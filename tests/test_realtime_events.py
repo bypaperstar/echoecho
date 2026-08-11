@@ -121,6 +121,46 @@ def test_dispatch_round_trip_instant_output_and_response_create():
     assert transport.sent[i + 1] == {"type": "response.create"}
 
 
+def test_malformed_tool_arguments_degrade_but_still_ack():
+    """Model-generated arguments JSON can be malformed; the loop must survive
+    and the server must still get a function_call_output for the call_id."""
+    fixture = [
+        {"type": "session.created", "session": {"id": "s"}},
+        {"type": "response.done", "response": {"id": "r1", "output": [
+            {"type": "function_call", "name": "dispatch_task", "call_id": "c1",
+             "arguments": "{\"kind\": \"recipe.search\", "}]}},  # truncated JSON
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "item_id": "u1", "transcript": "that's it"},
+        {"type": "response.done", "response": {"id": "r2", "output": []}},
+    ]
+    calls = []
+
+    def cb(name, args):
+        calls.append((name, args))
+        return {"task_id": "t1", "status": "queued"}
+
+    transport, client = run_client(fixture, tool_cb=cb)
+    assert calls == [("dispatch_task", {})]  # degraded to empty args, no crash
+    acks = [e for e in transport.sent
+            if e.get("type") == "conversation.item.create"
+            and e["item"]["type"] == "function_call_output"]
+    assert acks and acks[0]["item"]["call_id"] == "c1"
+    assert client.session.state == "IDLE"  # session survived and ended cleanly
+
+
+def test_tool_handler_exception_still_sends_function_call_output():
+    def cb(name, args):
+        raise KeyError("kind")
+
+    transport, client = run_client(str(FIX / "dispatch.jsonl"), tool_cb=cb)
+    acks = [e for e in transport.sent
+            if e.get("type") == "conversation.item.create"
+            and e["item"]["type"] == "function_call_output"]
+    assert len(acks) == 1
+    assert "error" in json.loads(acks[0]["item"]["output"])
+    assert client.session.state == "IDLE"  # loop survived the handler bug
+
+
 # -- injection gating: adversarial orderings ---------------------------------------
 
 

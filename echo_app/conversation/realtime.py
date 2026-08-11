@@ -307,8 +307,19 @@ class RealtimeClient(ConversationPort):
                  if it.get("type") == "function_call"]
         for call in calls:
             raw = call.get("arguments") or "{}"
-            args = json.loads(raw) if raw.strip() else {}
-            result = self._tool_cb(call["name"], args) if self._tool_cb else {}
+            try:
+                args = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                # model-generated JSON can be malformed; never crash the loop,
+                # and still ack below so the conversation isn't stuck waiting
+                self._log("malformed tool arguments for %s: %r"
+                          % (call.get("name"), raw))
+                args = {}
+            try:
+                result = self._tool_cb(call["name"], args) if self._tool_cb else {}
+            except Exception as exc:  # a handler bug must not kill the session
+                self._log("tool handler %s failed: %s" % (call.get("name"), exc))
+                result = {"error": str(exc)}
             # IMMEDIATE ack: dispatch_task etc. never block the voice turn
             await self.transport.send({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output",
