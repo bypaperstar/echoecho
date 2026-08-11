@@ -154,7 +154,11 @@ class TextRepl(ConversationPort):
                 break
             if line.startswith("~wait"):
                 parts = line.split()
-                await asyncio.sleep(float(parts[1]) if len(parts) > 1 else 0.5)
+                try:
+                    secs = float(parts[1]) if len(parts) > 1 else 0.5
+                except ValueError:
+                    secs = 0.5
+                await asyncio.sleep(secs)
                 self._drain()
                 continue
             await self._handle(line)
