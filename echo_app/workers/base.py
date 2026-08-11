@@ -12,5 +12,5 @@ def register(kind):
 
 def load_all():
     """Import every worker module so @register side effects run; return REGISTRY."""
-    from echo_app.workers import demo  # noqa: F401
+    from echo_app.workers import demo, doc_edit, recipe, grocery, learn  # noqa: F401
     return REGISTRY
