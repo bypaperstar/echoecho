@@ -17,6 +17,8 @@
   #content h1 { border-bottom: 2px solid #e3e3e3; padding-bottom: 6px; }
   #empty { color: #888; padding: 40px; text-align: center; }
   a { color: #0b6cff; }
+  .flash { animation: flash 1.4s ease-out; }
+  @keyframes flash { 0% { background: #fff3a6; } 100% { background: transparent; } }
 </style>
 </head>
 <body>
@@ -39,12 +41,36 @@ function renderTabs() {
   }
 }
 
+// section-diff flash: group rendered HTML by h2 heading, highlight changes
+let lastSections = {};  // file name -> {heading: sectionHTML}
+
+function sectionOf(el) { return el.tagName === 'H2' ? el.textContent : null; }
+
+function sectionMap(root) {
+  const map = {}; let key = '(intro)';
+  for (const el of root.children) {
+    key = sectionOf(el) || key;
+    map[key] = (map[key] || '') + el.outerHTML;
+  }
+  return map;
+}
+
 async function show(name) {
   active = name;
   renderTabs();
   const r = await fetch('/doc?f=' + encodeURIComponent(name));
   if (!r.ok) return;
-  document.getElementById('content').innerHTML = marked.parse(await r.text());
+  const content = document.getElementById('content');
+  content.innerHTML = marked.parse(await r.text());
+  const now = sectionMap(content), prev = lastSections[name];
+  if (prev) {  // flash every element of a new or changed h2 section
+    let key = '(intro)';
+    for (const el of content.children) {
+      key = sectionOf(el) || key;
+      if (prev[key] !== now[key]) el.classList.add('flash');
+    }
+  }
+  lastSections[name] = now;
 }
 
 const es = new EventSource('/events');

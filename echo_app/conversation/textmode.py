@@ -18,14 +18,7 @@ from echo_app import config
 from echo_app.conversation.port import ConversationPort
 from echo_app.conversation.session import Session
 
-SYSTEM_PROMPT = (
-    "You are Echo, a hands-free assistant. Keep replies short and speakable. "
-    "Use dispatch_task for anything slow; kinds: doc.edit, recipe.search, "
-    "grocery.merge, learn.outline, learn.deep_dive. dispatch_task returns "
-    "instantly — acknowledge and keep talking, never wait for a task. System "
-    "lines like '[task tN done] ...' report finished background work: weave "
-    "them in naturally. Use read_artifact to quote workspace files. Call "
-    "end_session when the user says something like \"that's it\".")
+SYSTEM_PROMPT = config.SYSTEM_PROMPT  # tuned in config.py (PR 6)
 
 TOOLS = [
     {"type": "function", "name": "dispatch_task",

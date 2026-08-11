@@ -75,6 +75,15 @@ class Orchestrator:
             out.append(line)
         return out
 
+    def results_since(self, ts):
+        """Speech-ready lines for non-silent tasks that finished after ts —
+        the '[since last session]' wake injection (voice daemon, PR 6)."""
+        done = [t for t in self.tasks.values()
+                if t.finished_at is not None and t.finished_at > ts
+                and t.result is not None and rank(t.result) != "silent"]
+        return ["%s (%s): %s" % (t.id, t.kind, t.result.say)
+                for t in sorted(done, key=lambda t: t.finished_at)]
+
     # -- main loop ----------------------------------------------------------
 
     async def run(self):

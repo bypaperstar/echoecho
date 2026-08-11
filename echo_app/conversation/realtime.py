@@ -184,7 +184,8 @@ class RealtimeClient(ConversationPort):
     def __init__(self, transport, session=None, out=print, poll_interval=0.25,
                  on_audio=None, flush_playback=None, transport_factory=None,
                  max_session_secs=RECONNECT_SECS, sign_off_max_polls=40,
-                 instructions=VOICE_PROMPT):
+                 instructions=VOICE_PROMPT, since_last_session=None,
+                 max_reconnects=3, reconnect_backoff=1.0):
         self.transport = transport
         self.session = session or Session()
         self.clock = self.session.clock
@@ -197,6 +198,10 @@ class RealtimeClient(ConversationPort):
         self._transport_factory = transport_factory
         self.max_session_secs = max_session_secs
         self.sign_off_max_polls = sign_off_max_polls
+        self.since_last_session = since_last_session
+        self.max_reconnects = max_reconnects
+        self.reconnect_backoff = reconnect_backoff
+        self._reconnects = 0
         self._tool_cb = None
         self._done = False
         self._signing_off = False
@@ -219,17 +224,21 @@ class RealtimeClient(ConversationPort):
         await self._connect()
         while not self._done:
             try:
-                event = await asyncio.wait_for(self.transport.recv(),
-                                               self.poll_interval)
-            except asyncio.TimeoutError:
-                event = None
+                try:
+                    event = await asyncio.wait_for(self.transport.recv(),
+                                                   self.poll_interval)
+                except asyncio.TimeoutError:
+                    event = None
+                if event is not None:
+                    await self._handle_event(event)
+                if self.session.check_silence():
+                    self._log("silence timeout — closing (sign-off skipped)")
+                await self._tick()
             except TransportClosed:
-                break
-            if event is not None:
-                await self._handle_event(event)
-            if self.session.check_silence():
-                self._log("silence timeout — closing (sign-off skipped)")
-            await self._tick()
+                # WS died mid-session: reconnect with backoff so the daemon
+                # never dies; if that fails, fall through to a clean IDLE.
+                if not await self._try_reconnect():
+                    break
         if self.session.state == ACTIVE:
             self.session.begin_ending("transport_closed")
         if self.session.state == ENDING:
@@ -243,12 +252,34 @@ class RealtimeClient(ConversationPort):
             await connect()
         await self.transport.send(build_session_update(self.instructions))
         if reconnect:
-            # summary stub (cookbook pattern): a real rolling summary is PR 6+
+            # summary stub (cookbook pattern): a real rolling summary is v1+
             await self.transport.send(_system_item(
-                "[reconnected] The previous connection neared the 60-minute "
-                "cap and was refreshed; continue where the conversation left off."))
+                "[reconnected] The previous connection dropped or neared the "
+                "60-minute cap and was refreshed; continue where the "
+                "conversation left off."))
+        elif self.since_last_session:
+            # tasks that finished while IDLE, surfaced on wake
+            await self.transport.send(_system_item(self.since_last_session))
         self._connected_at = self.clock()
         self.session.wake()  # no-op if the FSM is already ACTIVE
+
+    async def _try_reconnect(self):
+        """Called when the transport dies mid-ACTIVE. Retries via
+        transport_factory with linear backoff; returns True once reconnected."""
+        if self._transport_factory is None or self.session.state != ACTIVE:
+            return False
+        while self._reconnects < self.max_reconnects:
+            self._reconnects += 1
+            await asyncio.sleep(self.reconnect_backoff * self._reconnects)
+            self._log("transport lost — reconnect %d/%d"
+                      % (self._reconnects, self.max_reconnects))
+            try:
+                self.transport = self._transport_factory()
+                await self._connect(reconnect=True)
+                return True
+            except Exception as exc:
+                self._log("reconnect failed: %s" % exc)
+        return False
 
     async def _maybe_reconnect(self):
         if (self._transport_factory is None

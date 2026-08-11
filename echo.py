@@ -122,6 +122,7 @@ async def voice_main(args):
     Echo saying "echo" can't self-trigger; enter/spacebar+enter is the manual
     wake override. Orchestrator + viewer persist across sessions."""
     import threading
+    import time
 
     from echo_app import config
     from echo_app.conversation.audio import AudioIO
@@ -160,6 +161,7 @@ async def voice_main(args):
     orch_loop = asyncio.ensure_future(orch.run())
 
     model = config.realtime_model()
+    idle_since = None  # set on session end: tasks finishing after it are "missed"
     print("[wake] listening for '%s' (or press enter to wake)"
           % config.WAKE_PHRASE)
     try:
@@ -174,11 +176,18 @@ async def voice_main(args):
                         continue
                     manual_wake.clear()
             # -- WAKE -> ACTIVE session --------------------------------------
+            since = None  # "[since last session]" for tasks done while IDLE
+            missed = orch.results_since(idle_since) if idle_since else []
+            if missed:
+                since = ("[since last session] Background tasks finished "
+                         "while Echo was asleep: " + " | ".join(missed) +
+                         " Mention them naturally if relevant.")
             audio = AudioIO()
             client = RealtimeClient(
                 WebSocketTransport(model), session=session,
                 on_audio=audio.on_audio, flush_playback=audio.flush,
-                transport_factory=lambda: WebSocketTransport(model))
+                transport_factory=lambda: WebSocketTransport(model),
+                since_last_session=since)
             audio.tracker = client.tracker
             orch.on_injection = client.inject
             client.on_tool(make_tool_handler(orch, client))
@@ -186,7 +195,14 @@ async def voice_main(args):
             audio.play_chime("wake")
             try:
                 await client.run()  # returns when the session is back to IDLE
+            except Exception as exc:  # daemon never dies: back to wake loop
+                print("[voice] session crashed (%s) — returning to IDLE" % exc)
+                if session.state == "ACTIVE":
+                    session.begin_ending("crash")
+                if session.state == "ENDING":
+                    session.finish()
             finally:
+                idle_since = time.time()
                 orch.on_injection = lambda inj: None  # results wait in table
                 audio.muted_capture = True  # transport is closing: stop sends
                 audio.play_chime("end")
