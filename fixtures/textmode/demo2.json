@@ -1,0 +1,11 @@
+[
+  [{"type": "function_call", "name": "dispatch_task",
+    "arguments": {"kind": "recipe.search", "instructions": "chicken pad thai"}}],
+  [{"type": "message",
+    "text": "On it — searching for a good pad thai. I'll add the ingredients to your grocery list as soon as it lands, so keep telling me about the week."}],
+  [{"type": "function_call", "name": "read_artifact",
+    "arguments": {"name": "grocery.md"}}],
+  [{"type": "message",
+    "text": "Here's the list so far — the pad thai ingredients are in, grouped and deduped, with the recipe linked under Meals."}],
+  [{"type": "function_call", "name": "end_session", "arguments": {}}]
+]

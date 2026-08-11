@@ -17,6 +17,8 @@ def parse_args(argv=None):
     p.add_argument("--fake-llm", action="store_true", help="use fixture LLM outputs")
     p.add_argument("--script", metavar="PATH", help="run a scripted keyless session")
     p.add_argument("--model", metavar="ID", help="Realtime model id override")
+    p.add_argument("--no-viewer", action="store_true",
+                   help="don't start the workspace live viewer")
     p.add_argument("--mic-check", action="store_true", help="mic diagnostics (later PR)")
     return p.parse_args(argv)
 
@@ -65,12 +67,25 @@ async def amain(args):
                         fake_llm=config.echo_fake_llm())
     port.on_tool(make_tool_handler(orch, port))
 
+    viewer = None
+    if not args.script and not args.no_viewer:  # --text: live workspace viewer
+        from echo_app.viewer.server import ViewerServer
+        try:
+            viewer = ViewerServer(
+                config.WORKSPACE_DIR,
+                port=int(os.environ.get("ECHO_VIEWER_PORT", "8765"))).start()
+            print("[viewer] serving workspace at %s" % viewer.url)
+        except OSError as exc:
+            print("[viewer] not started (%s)" % exc)
+
     orch_loop = asyncio.ensure_future(orch.run())
     try:
         await port.run()
         await orch.drain(timeout=2.0)  # let in-flight demo workers log
     finally:
         orch_loop.cancel()
+        if viewer:
+            viewer.stop()
 
 
 def main(argv=None):

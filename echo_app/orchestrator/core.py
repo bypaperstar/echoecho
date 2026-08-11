@@ -14,6 +14,13 @@ from echo_app import config
 from echo_app.bus import Injection, Task, TaskRequest, TaskResult
 from echo_app.orchestrator import log as tasklog
 from echo_app.orchestrator.ranker import rank
+from echo_app.services import artifacts
+
+
+def _compact(text, limit=500):
+    """Squash a markdown file to one speakable line for an ambient injection."""
+    joined = " / ".join(ln.strip() for ln in text.splitlines() if ln.strip())
+    return joined[:limit] + ("…" if len(joined) > limit else "")
 
 
 @dataclass
@@ -105,6 +112,13 @@ class Orchestrator:
             self.on_injection(Injection(
                 text="[task %s done] %s" % (task.id, result.say),
                 priority=priority))
+        # ambient doc snapshot so the agent can answer "read me the goals"
+        for name in result.artifacts_touched:
+            snap = _compact(artifacts.read(self.ctx.workspace, name))
+            if snap:
+                self.on_injection(Injection(
+                    text="[workspace] %s now contains: %s" % (name, snap),
+                    priority="ambient"))
 
     async def drain(self, timeout=5.0):
         """Test/demo helper: wait until inbox is empty and no worker is running."""

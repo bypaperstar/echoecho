@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Echo workspace</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0;
+         background: #fafafa; color: #222; }
+  #tabs { display: flex; gap: 4px; padding: 10px 14px 0; background: #23272e; }
+  #tabs button { border: none; padding: 8px 16px; border-radius: 8px 8px 0 0;
+                 background: #3a4048; color: #cfd6dd; cursor: pointer;
+                 font-size: 14px; }
+  #tabs button.active { background: #fafafa; color: #111; font-weight: 600; }
+  #content { max-width: 760px; margin: 0 auto; padding: 24px 32px 80px;
+             line-height: 1.55; }
+  #content h1 { border-bottom: 2px solid #e3e3e3; padding-bottom: 6px; }
+  #empty { color: #888; padding: 40px; text-align: center; }
+  a { color: #0b6cff; }
+</style>
+</head>
+<body>
+<div id="tabs"></div>
+<div id="content"><div id="empty">Waiting for workspace files…</div></div>
+<script>
+let active = null;      // currently shown file
+let pinned = false;     // user clicked a tab; stop auto-switching until reload picks a newer file
+let files = [];
+
+function renderTabs() {
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = '';
+  for (const f of files) {
+    const b = document.createElement('button');
+    b.textContent = f.name;
+    b.className = f.name === active ? 'active' : '';
+    b.onclick = () => { pinned = true; show(f.name); };
+    tabs.appendChild(b);
+  }
+}
+
+async function show(name) {
+  active = name;
+  renderTabs();
+  const r = await fetch('/doc?f=' + encodeURIComponent(name));
+  if (!r.ok) return;
+  document.getElementById('content').innerHTML = marked.parse(await r.text());
+}
+
+const es = new EventSource('/events');
+es.addEventListener('reload', ev => {
+  files = JSON.parse(ev.data).files;
+  if (!files.length) return;
+  const latest = files.reduce((a, b) => (b.mtime > a.mtime ? b : a));
+  // auto-focus the most recently modified file (a change unpins the view);
+  // otherwise just re-fetch whatever is showing
+  if (!pinned || latest.name !== active) { pinned = false; show(latest.name); }
+  else show(active);
+});
+</script>
+</body>
+</html>
