@@ -1,0 +1,5 @@
+# Mac extras on top of requirements.txt.
+# Note: on macOS pin vosk<=0.3.44 (newest universal2 wheel).
+-r requirements.txt
+sounddevice==0.5.5
+vosk<=0.3.44

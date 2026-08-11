@@ -1,0 +1,4 @@
+openai==2.48.0
+websockets==15.0.1
+vosk
+recipe-scrapers

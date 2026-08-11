@@ -1,0 +1,134 @@
+import asyncio
+
+from echo_app.bus import TaskRequest, TaskResult
+from echo_app.orchestrator import log as tasklog
+from echo_app.orchestrator.core import Orchestrator
+from echo_app.orchestrator.ranker import rank
+from echo_app.workers.base import load_all
+
+
+def run_orch(registry, requests, tmp_path, timeout=3.0):
+    injections = []
+    orch = Orchestrator(registry=registry, on_injection=injections.append,
+                        log_path=tmp_path / "tasks.jsonl", workspace=tmp_path)
+
+    async def go():
+        loop_task = asyncio.ensure_future(orch.run())
+        for req in requests:
+            orch.submit(req)
+        assert await orch.drain(timeout), "orchestrator did not drain in time"
+        loop_task.cancel()
+
+    asyncio.run(go())
+    return orch, injections
+
+
+def test_dispatch_to_result_roundtrip(tmp_path):
+    orch, injections = run_orch(
+        load_all(),
+        [TaskRequest(kind="sleep.echo", instructions="hi", args={"sleep": 0.01})],
+        tmp_path)
+    task = orch.tasks["t1"]
+    assert task.status == "done"
+    assert task.result.say == "Echoing back: hi"
+    assert task.finished_at >= task.created_at
+    assert len(injections) == 1
+    assert injections[0].text == "[task t1 done] Echoing back: hi"
+    assert injections[0].priority == "interrupt"
+
+
+def test_follow_up_chaining(tmp_path):
+    async def worker_a(task, ctx):
+        return TaskResult(say="A done", priority="ambient",
+                          follow_ups=[TaskRequest(kind="b", instructions="from a")])
+
+    async def worker_b(task, ctx):
+        return TaskResult(say="B done (%s)" % task.request.instructions,
+                          priority="ambient")
+
+    orch, injections = run_orch({"a": worker_a, "b": worker_b},
+                                [TaskRequest(kind="a")], tmp_path)
+    assert set(orch.tasks) == {"t1", "t2"}
+    t2 = orch.tasks["t2"]
+    assert t2.kind == "b"
+    assert t2.request.source == "follow_up"
+    assert t2.status == "done"
+    assert [i.text for i in injections] == \
+        ["[task t1 done] A done", "[task t2 done] B done (from a)"]
+
+
+def test_worker_exception_becomes_error_interrupt(tmp_path):
+    async def boom(task, ctx):
+        raise RuntimeError("kaput")
+
+    orch, injections = run_orch({"boom": boom}, [TaskRequest(kind="boom")], tmp_path)
+    task = orch.tasks["t1"]
+    assert task.status == "error"
+    assert task.result.data["error"] == "kaput"
+    assert injections[0].priority == "interrupt"
+    assert "kaput" in injections[0].text
+
+
+def test_unknown_kind_is_error(tmp_path):
+    orch, injections = run_orch({}, [TaskRequest(kind="nope")], tmp_path)
+    assert orch.tasks["t1"].status == "error"
+    assert injections[0].priority == "interrupt"
+
+
+def test_silent_results_only_hit_task_table(tmp_path):
+    async def quiet(task, ctx):
+        return TaskResult(say="", data={"note": "bookkeeping"})
+
+    async def hushed(task, ctx):
+        return TaskResult(say="done quietly", priority="silent")
+
+    orch, injections = run_orch({"q": quiet, "h": hushed},
+                                [TaskRequest(kind="q"), TaskRequest(kind="h")],
+                                tmp_path)
+    assert injections == []
+    assert all(t.status == "done" for t in orch.tasks.values())
+    # still surfaced by check_tasks summaries
+    lines = orch.summaries()
+    assert any("done quietly" in ln for ln in lines)
+
+
+def test_summaries_single_task(tmp_path):
+    orch, _ = run_orch(load_all(),
+                       [TaskRequest(kind="sleep.echo", instructions="x",
+                                    args={"sleep": 0.01})], tmp_path)
+    assert orch.summaries("t1") == ["t1 sleep.echo: done — Echoing back: x"]
+
+
+def test_ranker_heuristics():
+    assert rank(TaskResult(say="x", priority="ambient",
+                           data={"error": "boom"})) == "interrupt"
+    assert rank(TaskResult(say="x", data={"needs_input": True})) == "interrupt"
+    assert rank(TaskResult(say="")) == "silent"
+    assert rank(TaskResult(say="x", priority="interrupt")) == "interrupt"
+    assert rank(TaskResult(say="x", priority="ambient")) == "ambient"
+    assert rank(TaskResult(say="x", priority="bogus-tier")) == "ambient"
+
+
+def test_jsonl_log_and_replay(tmp_path):
+    async def worker_a(task, ctx):
+        return TaskResult(say="A done", priority="ambient",
+                          follow_ups=[TaskRequest(kind="b")],
+                          artifacts_touched=["doc.md"])
+
+    async def worker_b(task, ctx):
+        return TaskResult(say="B done", priority="ambient")
+
+    run_orch({"a": worker_a, "b": worker_b}, [TaskRequest(kind="a")], tmp_path)
+    events = tasklog.replay(tmp_path / "tasks.jsonl")
+    seq = [(e["event"], e["task_id"]) for e in events]
+    assert seq == [("queued", "t1"), ("done", "t1"), ("queued", "t2"), ("done", "t2")]
+    done_t1 = events[1]
+    assert done_t1["say"] == "A done"
+    assert done_t1["follow_ups"] == ["b"]
+    assert done_t1["artifacts_touched"] == ["doc.md"]
+    assert events[2]["source"] == "follow_up"
+    assert all("ts" in e for e in events)
+
+
+def test_replay_missing_file(tmp_path):
+    assert tasklog.replay(tmp_path / "absent.jsonl") == []

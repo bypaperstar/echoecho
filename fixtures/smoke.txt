@@ -1,0 +1,8 @@
+# Smoke script: wake -> dispatch -> queued ack -> delayed result injected
+# at a turn boundary -> end phrase -> IDLE.
+echo echo
+hey echo, can you run a quick background job for me?
+!dispatch_task {"kind": "sleep.echo", "instructions": "hello from the smoke test"}
+so anyway, while that runs, let's keep chatting
+~wait 0.6
+that's it
