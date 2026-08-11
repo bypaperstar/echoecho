@@ -201,3 +201,13 @@ def test_scripted_smoke_session(tmp_path):
     assert "[state] ENDING -> IDLE (end_phrase)" in text
     # ack printed before the result injection (voice loop never blocks)
     assert text.index("queued") < text.index("[task t1 done]")
+
+
+def test_env_flags_case_insensitive(monkeypatch):
+    from echo_app import config
+    monkeypatch.setenv("ECHO_TEXT", "False")
+    assert config.echo_text() is False
+    monkeypatch.setenv("ECHO_TEXT", "NO")
+    assert config.echo_text() is False
+    monkeypatch.setenv("ECHO_TEXT", "1")
+    assert config.echo_text() is True

@@ -12,7 +12,7 @@ TASKS_LOG = WORKSPACE_DIR / ".tasks.jsonl"
 
 
 def _flag(name):
-    return os.environ.get(name, "").strip() not in ("", "0", "false", "no")
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
 
 
 def echo_text():
