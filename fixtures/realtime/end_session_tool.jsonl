@@ -1,0 +1,3 @@
+{"type": "session.created", "session": {"id": "sess_1"}}
+{"type": "response.done", "response": {"id": "r1", "output": [{"type": "function_call", "name": "end_session", "call_id": "call_9", "arguments": "{}"}]}}
+{"type": "response.done", "response": {"id": "r2", "output": [{"type": "message", "role": "assistant"}]}}

@@ -1,0 +1,3 @@
+{"type": "session.created", "session": {"id": "sess_1", "model": "gpt-realtime-2.1-mini"}}
+{"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_u1", "transcript": "okay that's it, thanks"}
+{"type": "response.done", "response": {"id": "resp_signoff", "output": [{"type": "message", "role": "assistant"}]}}

@@ -59,6 +59,14 @@ async def amain(args):
     if args.script:
         from echo_app.conversation.scripted import ScriptedAgent
         port = ScriptedAgent(args.script, session=session)
+    elif args.voice:
+        # PR 4 wiring: real WS transport + reconnect factory. main() already
+        # guards on audio I/O (PR 5), so this only runs once mic/speaker land.
+        from echo_app.conversation.realtime import (RealtimeClient,
+                                                    WebSocketTransport)
+        model = config.realtime_model()
+        port = RealtimeClient(WebSocketTransport(model), session=session,
+                              transport_factory=lambda: WebSocketTransport(model))
     else:
         from echo_app.conversation.textmode import TextRepl
         port = TextRepl(session=session)
@@ -100,8 +108,15 @@ def main(argv=None):
         sys.exit("--mic-check isn't built yet (lands with Mac audio in PR 5). "
                  "Try --text or --script fixtures/smoke.txt.")
     if args.voice:
-        sys.exit("Voice mode isn't built yet (Realtime transport lands in PR 4, "
-                 "Mac audio in PR 5). Try --text or --script fixtures/smoke.txt.")
+        try:
+            import sounddevice  # noqa: F401  (lazy: voice-mode-only dependency)
+        except ImportError:
+            sys.exit("--voice: the Realtime client is built (PR 4, tested via "
+                     "FakeTransport) but mic/speaker I/O needs 'sounddevice' "
+                     "and lands in PR 5. Try --text or --script "
+                     "fixtures/smoke.txt.")
+        sys.exit("--voice: Realtime client is ready (PR 4) but audio "
+                 "capture/playback lands in PR 5. Try --text for now.")
     from echo_app import config
     if not (args.script or args.text or config.echo_text()):
         sys.exit("No mode selected: use --text, --script PATH, or set ECHO_TEXT=1. "

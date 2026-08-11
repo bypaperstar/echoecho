@@ -73,6 +73,10 @@ class Session:
     def note_user_speech_stopped(self):
         self._user_speaking = False
 
+    def note_assistant_response_started(self):
+        """A response is in flight (response.created): not a turn boundary."""
+        self._at_turn_boundary = False
+
     def note_assistant_response_done(self):
         """A completed assistant response is a safe turn boundary; also resets clock."""
         self._at_turn_boundary = True

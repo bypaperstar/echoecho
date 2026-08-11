@@ -1,0 +1,19 @@
+// Adversarial injection orderings. "_inject" / "_probe" are test hooks.
+{"type": "session.created", "session": {"id": "sess_1"}}
+// -- scenario 1: task result arrives MID-USER-SPEECH -> must be held
+{"type": "input_audio_buffer.speech_started", "item_id": "u1"}
+{"type": "_inject", "text": "[task t1 done] Found a 30-minute pad thai.", "priority": "interrupt"}
+{"type": "_probe", "label": "mid_speech"}
+{"type": "input_audio_buffer.speech_stopped", "item_id": "u1"}
+{"type": "_probe", "label": "after_stop_before_done"}
+{"type": "response.created", "response": {"id": "r1"}}
+{"type": "response.done", "response": {"id": "r1", "output": [{"type": "message", "role": "assistant"}]}}
+{"type": "_probe", "label": "after_done_1"}
+// -- scenario 2: task result arrives MID-RESPONSE -> must be held
+{"type": "response.created", "response": {"id": "r2"}}
+{"type": "_inject", "text": "[task t2 done] Grocery list merged.", "priority": "ambient"}
+{"type": "_probe", "label": "mid_response"}
+{"type": "response.done", "response": {"id": "r2", "output": [{"type": "message", "role": "assistant"}]}}
+{"type": "_probe", "label": "after_done_2"}
+{"type": "conversation.item.input_audio_transcription.completed", "item_id": "u2", "transcript": "that's it"}
+{"type": "response.done", "response": {"id": "r3", "output": []}}

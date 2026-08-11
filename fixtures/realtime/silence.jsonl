@@ -1,0 +1,4 @@
+// "_clock.advance" is a test hook advancing the injectable fake clock.
+{"type": "session.created", "session": {"id": "sess_1"}}
+{"type": "response.done", "response": {"id": "r1", "output": [{"type": "message", "role": "assistant"}]}}
+{"type": "_clock.advance", "seconds": 601}

@@ -1,0 +1,10 @@
+{"type": "session.created", "session": {"id": "sess_1"}}
+{"type": "input_audio_buffer.speech_started", "item_id": "item_u1"}
+{"type": "input_audio_buffer.speech_stopped", "item_id": "item_u1"}
+{"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_u1", "transcript": "I'm thinking pad thai one night."}
+{"type": "response.created", "response": {"id": "resp_1"}}
+{"type": "response.done", "response": {"id": "resp_1", "output": [{"type": "function_call", "name": "dispatch_task", "call_id": "call_1", "arguments": "{\"kind\": \"recipe.search\", \"instructions\": \"pad thai\"}"}]}}
+{"type": "response.created", "response": {"id": "resp_2"}}
+{"type": "response.done", "response": {"id": "resp_2", "output": [{"type": "message", "role": "assistant"}]}}
+{"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_u2", "transcript": "that's it"}
+{"type": "response.done", "response": {"id": "resp_3", "output": []}}
