@@ -402,13 +402,15 @@ def test_full_session_dispatch_then_result_then_end():
 # -- echo.py --voice wiring -----------------------------------------------------------
 
 
-def test_echo_voice_fails_politely_pointing_at_pr5():
+def test_echo_voice_fails_politely_without_audio_deps():
+    # PR 5 note: --voice is fully wired now, but on Linux CI (no sounddevice)
+    # it must still fail politely and point at a working fallback.
     proc = subprocess.run(
         [sys.executable, str(config.REPO_ROOT / "echo.py"), "--voice"],
         capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0
     err = proc.stderr + proc.stdout
-    assert "PR 5" in err
+    assert "sounddevice" in err
     assert "--text" in err  # points at a working fallback
 
 
