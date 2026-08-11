@@ -42,6 +42,8 @@ def wp_search(query, sites=WP_SITES, per_page=3):
             items = _fetch_json(url)
         except Exception:
             continue  # one dead site must not kill the search
+        if not isinstance(items, list):
+            continue  # WP error responses are JSON objects, not result lists
         for item in items:
             title = htmllib.unescape(_TAG_RE.sub("", item.get("title", ""))).strip()
             if item.get("url"):
@@ -81,7 +83,7 @@ def wiki_search(query, limit=8):
     return [r["title"] for r in data.get("query", {}).get("search", [])]
 
 
-def wiki_extract(title, chars=1500):
+def wiki_extract(title, chars=1200):  # API caps exchars at 1200
     """Plaintext intro of a page via prop=extracts&exintro&explaintext."""
     url = WIKI_API + "?" + urllib.parse.urlencode(
         {"action": "query", "prop": "extracts", "exintro": 1, "explaintext": 1,

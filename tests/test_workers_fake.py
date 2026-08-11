@@ -245,6 +245,21 @@ def test_artifacts_read_list_mtime(tmp_path):
     assert artifacts.mtime(tmp_path, "a.md") > 0
 
 
+# -- web: wp_search resilience -------------------------------------------------
+
+def test_wp_search_skips_site_returning_json_error(monkeypatch):
+    from echo_app.services import web
+
+    def fake_fetch(url, timeout=20):
+        if "recipetineats" in url:  # WP outage: JSON error object, not a list
+            return '{"code": "rest_no_route", "message": "nope"}'
+        return '[{"title": "Pad <b>Thai</b>", "url": "https://pinchofyum.com/x"}]'
+
+    monkeypatch.setattr(web, "fetch", fake_fetch)
+    assert web.wp_search("pad thai") == [
+        {"title": "Pad Thai", "url": "https://pinchofyum.com/x"}]
+
+
 # -- LLM selection -----------------------------------------------------------
 
 def test_fake_llm_selected_by_env(monkeypatch, tmp_path):
