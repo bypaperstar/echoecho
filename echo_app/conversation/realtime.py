@@ -85,10 +85,18 @@ class WebSocketTransport:
             max_size=None)
 
     async def send(self, event):
-        await self._ws.send(json.dumps(event))
+        import websockets.exceptions  # NOT bare `import websockets`: the
+        # lazy top-level module doesn't expose `.exceptions` (AttributeError)
+        try:
+            await self._ws.send(json.dumps(event))
+        except websockets.exceptions.ConnectionClosed:
+            # Must match recv(): the client's reconnect path only catches
+            # TransportClosed, and a WS death is just as often noticed on a
+            # send (injection gate, function_call_output ack) as on a recv.
+            raise TransportClosed()
 
     async def recv(self):
-        import websockets
+        import websockets.exceptions  # see send(): bare import lacks .exceptions
         try:
             return json.loads(await self._ws.recv())
         except websockets.exceptions.ConnectionClosed:

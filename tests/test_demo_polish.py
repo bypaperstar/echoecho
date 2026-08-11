@@ -136,6 +136,33 @@ def test_no_reconnect_when_session_already_ending():
     assert session.state == "IDLE"
 
 
+def test_ws_transport_wraps_connection_closed_on_send_and_recv():
+    """A WS death must surface as TransportClosed from BOTH send and recv, or
+    the client's reconnect path never triggers on the real transport. (Also
+    guards the websockets-15 lazy-import gotcha: `websockets.exceptions` is
+    only importable as a submodule, so a raw ConnectionClosed inside the
+    except clause would otherwise become an AttributeError.)"""
+    import pytest
+    import websockets.exceptions
+
+    from echo_app.conversation.realtime import (TransportClosed,
+                                                WebSocketTransport)
+
+    class DeadWS:
+        async def send(self, data):
+            raise websockets.exceptions.ConnectionClosedError(None, None)
+
+        async def recv(self):
+            raise websockets.exceptions.ConnectionClosedOK(None, None)
+
+    tr = WebSocketTransport("gpt-realtime-2.1-mini", api_key="x")
+    tr._ws = DeadWS()
+    with pytest.raises(TransportClosed):
+        asyncio.run(tr.send({"type": "session.update"}))
+    with pytest.raises(TransportClosed):
+        asyncio.run(tr.recv())
+
+
 # -- "[since last session]" wake injection --------------------------------------
 
 
