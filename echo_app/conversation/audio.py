@@ -57,13 +57,20 @@ class AudioIO:
     # -- capture: mic -> input_audio_buffer.append --------------------------
 
     def _in_callback(self, indata, frames, time_info, status):
-        if self.muted_capture or self.send_event is None or self.loop is None:
+        # Bind locally: stop() nulls these from another thread mid-callback.
+        send, loop = self.send_event, self.loop
+        if self.muted_capture or send is None or loop is None:
             return
         event = {"type": "input_audio_buffer.append",
                  "audio": base64.b64encode(bytes(indata)).decode("ascii")}
-        # sounddevice callbacks run on a PortAudio thread; hop to the loop
-        self.loop.call_soon_threadsafe(
-            lambda: self.loop.create_task(self.send_event(event)))
+
+        # sounddevice callbacks run on a PortAudio thread; hop to the loop.
+        # Retrieve task exceptions: a send racing transport close is expected
+        # during teardown and must not spam "exception was never retrieved".
+        def _send():
+            loop.create_task(send(event)).add_done_callback(
+                lambda t: t.exception())
+        loop.call_soon_threadsafe(_send)
 
     # -- playback: output_audio.delta -> speaker ----------------------------
 

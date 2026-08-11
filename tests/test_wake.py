@@ -18,7 +18,9 @@ none contain the contiguous doubled phrase, so none fire. ("gecko" does
 decode its 'echo' tail, but never doubled; no README false-fire note needed
 for PR 6.)
 """
+import asyncio
 import audioop  # TEST-ONLY: removed in Python 3.13 (see module docstring)
+import base64
 import sys
 import wave
 
@@ -117,6 +119,31 @@ def test_playback_buffer_advances_tracker_and_flushes():
     out2 = bytearray(2400)
     io._out_callback(out2, 1200, None, None)
     assert bytes(out2) == b"\x00" * 2400  # zero-padded silence, no crash
+
+
+def test_capture_callback_sends_base64_append():
+    """The PortAudio-thread capture callback must schedule a well-shaped
+    input_audio_buffer.append onto the loop, and be a safe no-op after stop()
+    nulls send_event (teardown race)."""
+    from echo_app.conversation.audio import AudioIO
+    io = AudioIO()
+    sent = []
+
+    async def scenario():
+        async def send(ev):
+            sent.append(ev)
+        io.loop = asyncio.get_event_loop()
+        io.send_event = send
+        io._in_callback(b"\x01\x00" * 100, 100, None, None)
+        await asyncio.sleep(0.05)
+        io.send_event = None  # stop() from another thread
+        io._in_callback(b"\x01\x00" * 100, 100, None, None)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(scenario())
+    assert len(sent) == 1
+    assert sent[0]["type"] == "input_audio_buffer.append"
+    assert base64.b64decode(sent[0]["audio"]) == b"\x01\x00" * 100
 
 
 def _has_sounddevice():

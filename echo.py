@@ -188,9 +188,11 @@ async def voice_main(args):
                 await client.run()  # returns when the session is back to IDLE
             finally:
                 orch.on_injection = lambda inj: None  # results wait in table
+                audio.muted_capture = True  # transport is closing: stop sends
                 audio.play_chime("end")
                 await asyncio.sleep(max(0.3, audio.pending_ms() / 1000.0))
                 audio.stop()
+                manual_wake.clear()  # enter pressed mid-session: no ghost wake
             print("[wake] session over (%s) — listening for '%s' again"
                   % (session.end_reason, config.WAKE_PHRASE))
     finally:
