@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Echo — the always-on voice agent for your Mac</title>
+<meta name="description" content="Say “echo echo” and talk. Echo farms real work out to background agents — writing docs with you, building grocery lists, tutoring you — and weaves results back into the conversation.">
+<meta property="og:title" content="Echo — the always-on voice agent for your Mac">
+<meta property="og:description" content="Say “echo echo” and talk. Background agents do real work while you speak.">
+<meta property="og:type" content="website">
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#12151d; --panel2:#171b25; --line:#232937;
+    --text:#e8ebf2; --muted:#9aa3b5; --dim:#6b7488;
+    --accent:#7c9cff; --accent2:#5ee6c8; --warn:#ffd27c;
+    --radius:14px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--text);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px;margin:0 auto;padding:0 24px}
+
+  header{padding:18px 0;border-bottom:1px solid var(--line)}
+  header .wrap{display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.02em}
+  .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent2);box-shadow:0 0 12px var(--accent2)}
+  nav a{color:var(--muted);margin-left:22px;font-size:14px}
+  nav a:hover{color:var(--text);text-decoration:none}
+
+  .hero{padding:88px 0 64px;text-align:center;
+    background:
+      radial-gradient(600px 300px at 50% -80px, rgba(124,156,255,.16), transparent 70%),
+      radial-gradient(500px 260px at 80% 10%, rgba(94,230,200,.07), transparent 70%);
+  }
+  .hero h1{font-size:clamp(34px,6vw,58px);line-height:1.12;letter-spacing:-.02em;font-weight:800}
+  .hero h1 .say{background:linear-gradient(90deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p.lede{max-width:640px;margin:22px auto 0;color:var(--muted);font-size:19px}
+  .cta{margin-top:36px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-block;padding:13px 26px;border-radius:10px;font-weight:600;font-size:16px;transition:transform .08s ease}
+  .btn:hover{text-decoration:none;transform:translateY(-1px)}
+  .btn.primary{background:linear-gradient(90deg,var(--accent),#93b0ff);color:#0a0c11}
+  .btn.ghost{border:1px solid var(--line);color:var(--text);background:var(--panel)}
+  .cta-sub{margin-top:14px;color:var(--dim);font-size:13px}
+  .cta-sub code{font-family:var(--mono);color:var(--muted)}
+
+  section{padding:56px 0;border-top:1px solid var(--line)}
+  h2{font-size:26px;letter-spacing:-.01em;margin-bottom:8px}
+  .sub{color:var(--muted);margin-bottom:32px;max-width:640px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+  #how .grid{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:22px}
+  .card h3{font-size:16px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{color:var(--muted);font-size:14.5px}
+  .card .n{font-family:var(--mono);font-size:12px;color:var(--accent2)}
+
+  .demo{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:26px 28px;font-family:var(--mono);font-size:14px;line-height:2}
+  .demo .you{color:var(--text)} .demo .you::before{content:"you  ";color:var(--dim)}
+  .demo .echo{color:var(--accent2)} .demo .echo::before{content:"echo ";color:var(--dim)}
+  .demo .sys{color:var(--dim);font-style:italic}
+
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px 22px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.8}
+  pre .c{color:var(--dim)} pre .p{color:var(--accent2)}
+  .steps{counter-reset:step;list-style:none;display:flex;flex-direction:column;gap:10px;margin-bottom:22px}
+  .steps li{color:var(--muted);padding-left:34px;position:relative}
+  .steps li::before{counter-increment:step;content:counter(step);
+    position:absolute;left:0;top:2px;width:22px;height:22px;border-radius:50%;
+    background:var(--panel2);border:1px solid var(--line);color:var(--accent);
+    font:600 12px/22px var(--mono);text-align:center}
+  .steps li strong{color:var(--text)}
+
+  .note{display:flex;gap:12px;background:rgba(255,210,124,.07);border:1px solid rgba(255,210,124,.25);
+    border-radius:var(--radius);padding:16px 18px;margin-top:22px;font-size:14.5px;color:var(--muted)}
+  .note b{color:var(--warn)}
+
+  footer{border-top:1px solid var(--line);padding:34px 0;color:var(--dim);font-size:13.5px}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="brand"><span class="dot"></span>Echo</div>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/bypaperstar/home-voice">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Say <span class="say">“echo&nbsp;echo.”</span><br>Then just talk.</h1>
+    <p class="lede">Echo is an always-on voice agent for your Mac. It listens for its wake word, holds a natural back-and-forth conversation, and farms real work out to background agents — weaving the results back in while you speak.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/bypaperstar/home-voice/archive/refs/tags/v0.1.0.zip">Download v0.1.0 (.zip)</a>
+      <a class="btn ghost" href="https://github.com/bypaperstar/home-voice">View source on GitHub</a>
+    </div>
+    <p class="cta-sub">or <code>git clone https://github.com/bypaperstar/home-voice.git</code> · free &amp; open source · macOS</p>
+  </div>
+</div>
+
+<section id="use">
+  <div class="wrap">
+    <h2>What a session feels like</h2>
+    <p class="sub">Wake it, talk like you would to a person, say “that’s it” when you’re done. Meanwhile, workers write documents live into a browser workspace you can watch update in real time.</p>
+    <div class="demo">
+      <div class="you">echo echo … help me plan dinners this week, I’m thinking pad thai one night.</div>
+      <div class="sys">→ recipe.search dispatched · grocery.md created in the live workspace</div>
+      <div class="echo">Found three solid pad thai recipes — I started a grocery list with the one that skips tamarind paste. What else are we cooking?</div>
+      <div class="you">something with halloumi. and drop the fish sauce, we’re out.</div>
+      <div class="sys">→ grocery.merge updates the list while the conversation continues</div>
+      <div class="echo">Done — fish sauce is out, halloumi traybake is in for Thursday. The list is on your screen.</div>
+      <div class="you">that’s it.</div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="sub">Four pieces, all local except the voice model. Idle listening costs ~2% of one core and $0 in API.</p>
+    <div class="grid">
+      <div class="card">
+        <h3><span class="n">01</span> Wake word</h3>
+        <p>Vosk keyword spotting for “echo echo” — fully offline, open source, no accounts, no training. Sessions only exist between the wake word and “that’s it.”</p>
+      </div>
+      <div class="card">
+        <h3><span class="n">02</span> Voice loop</h3>
+        <p>OpenAI Realtime speech-to-speech with semantic voice-activity detection, barge-in (interrupt it mid-sentence), and auto-reconnect so the daemon never dies.</p>
+      </div>
+      <div class="card">
+        <h3><span class="n">03</span> Background workers</h3>
+        <p>The conversation dispatches tasks — doc edits, recipe search, learning outlines — to async workers. Results are ranked and injected back at natural turn boundaries.</p>
+      </div>
+      <div class="card">
+        <h3><span class="n">04</span> Live workspace</h3>
+        <p>Everything workers produce is markdown, rendered live in a browser tab: transcript and activity on the left, your documents updating on the right.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install in five minutes</h2>
+    <p class="sub">You need macOS, Python 3, headphones, and an OpenAI API key.</p>
+    <ol class="steps">
+      <li><strong>Download</strong> the release above (or clone the repo) and open a terminal in the folder.</li>
+      <li><strong>Install</strong> the environment and fetch the offline wake-word model (~40&nbsp;MB).</li>
+      <li><strong>Add your key</strong>, run a mic check, and start the daemon.</li>
+    </ol>
+<pre><span class="c"># from the project folder</span>
+uv venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements-mac.txt
+bash scripts/fetch_models.sh
+
+<span class="c"># your OpenAI API key (gitignored, loaded at startup)</span>
+echo 'OPENAI_API_KEY=sk-...' &gt; .env.local
+
+python3 echo.py --mic-check   <span class="c"># RMS meter should move when you speak</span>
+python3 echo.py --voice       <span class="c"># put your headphones on first</span></pre>
+    <p style="color:var(--muted);font-size:14.5px">Then open <span style="font-family:var(--mono)">http://127.0.0.1:8765/</span> for the live workspace, say <b style="color:var(--text)">“echo echo”</b>, and talk. Full runbook, troubleshooting table, and AirPods notes are in the <a href="https://github.com/bypaperstar/home-voice#readme">README</a>.</p>
+    <div class="note">
+      <div>🎧</div>
+      <div><b>Headphones required.</b> There’s no echo cancellation over the raw WebSocket — on speakers, Echo hears itself and barge-in goes haywire. AirPods or any headphones work.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Built for tinkering</h2>
+    <p class="sub">Echo is a prototype you can read in an afternoon and bend to your own use cases.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Runs headless, keyless</h3>
+        <p>The whole orchestrator/worker loop runs with no audio and no API key — a text REPL, scripted fixtures, and a 150+ test suite. Develop anywhere, voice only needs the Mac.</p>
+      </div>
+      <div class="card">
+        <h3>Records every session</h3>
+        <p>Each voice session saves a stereo review mix (you left, Echo right), transcripts, and an event timeline — so you can hear exactly what happened and turn gaps into fixes.</p>
+      </div>
+      <div class="card">
+        <h3>Add your own workers</h3>
+        <p>Workers are small async functions behind a typed task queue. If a CLI coding agent is on your PATH, a <span style="font-family:var(--mono)">code</span> task kind registers automatically.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>Echo · an open-source prototype by <a href="https://github.com/bypaperstar">paper star</a></div>
+    <div><a href="https://github.com/bypaperstar/home-voice">Source</a> · <a href="https://github.com/bypaperstar/home-voice/releases">Releases</a> · <a href="https://github.com/bypaperstar/home-voice/issues">Issues</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
