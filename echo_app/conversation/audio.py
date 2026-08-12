@@ -102,6 +102,15 @@ def refresh_devices():
         return False
 
 
+def _latency(stream):
+    """Best-effort stream latency in seconds; 0.0 when unknowable (fakes,
+    exotic backends). Observability for the session.wav mix, never raises."""
+    try:
+        return max(0.0, float(stream.latency))
+    except Exception:
+        return 0.0
+
+
 def make_chime(freqs, per_note_ms=90, rate=RATE, volume=0.35):
     """Pure-stdlib sine-wave chime: pcm16 mono bytes, one note per freq,
     with a linear fade per note so there are no clicks. No asset files."""
@@ -149,6 +158,8 @@ class AudioIO:
         # Bind locally: stop() nulls these from another thread mid-callback.
         send, loop = self.send_event, self.loop
         rec = recorder.active()
+        if rec is not None and status:  # overflow = dropped capture: log it
+            rec.note_status("input", status)
         sending = not (self.muted_capture or send is None or loop is None)
         if rec is None and not sending:
             return
@@ -196,6 +207,8 @@ class AudioIO:
             self.tracker.advance(played / (self.rate * 2.0) * 1000.0)
         rec = recorder.active()
         if rec is not None:
+            if status:  # underflow: playback glitched, alignment suspect
+                rec.note_status("output", status)
             rec.write_echo(chunk)  # zero-fill included: timeline stays real
 
     def play_chime(self, kind):
@@ -223,6 +236,12 @@ class AudioIO:
             samplerate=self.rate, channels=1, dtype="int16",
             blocksize=self.block_frames, device=out_dev,
             callback=self._out_callback)
+        rec = recorder.active()
+        if rec is not None:
+            # session.wav alignment: streams are built but not started, so
+            # this lands before the first write_echo (see set_echo_delay)
+            rec.set_echo_delay(_latency(self._in_stream)
+                               + _latency(self._out_stream))
         self._in_stream.start()
         self._out_stream.start()
         in_name = device_label(in_dev, "input")

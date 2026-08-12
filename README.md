@@ -179,6 +179,11 @@ barge-in weirdness. `meta.json`'s `end_reason` tells you how sessions die
 
 - Only ACTIVE sessions are recorded — never the idle wake-word listening.
   Recording starts at the wake chime and stops when the session closes.
+- `session.wav` alignment is approximate: the Echo track is shifted by the
+  measured in+out device latency (`echo_delay_s` in meta.json) so barge-in
+  timing reads true. If PortAudio reported overflows/underflows mid-session
+  (`stream_status` in meta.json), treat fine-grained L/R timing with
+  suspicion — dropped capture blocks shift the mic track.
 - Opt out with `--no-record` (or `ECHO_RECORD=0`); relocate with
   `ECHO_RECORDINGS_DIR`. Disk math: ~5.8 MB per minute of session.
 - `ECHO_RECORD=1` also records `--text` / `--script` runs (events + transcript,

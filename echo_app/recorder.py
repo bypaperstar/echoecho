@@ -59,12 +59,18 @@ def start(mode, root=None):
 
 
 def stop(end_reason=None):
-    """Detach and finalize the active recording (no-op when none)."""
+    """Detach and finalize the active recording (no-op when none). Never
+    raises: this runs in voice_main's session finally, where an escaping
+    exception would kill the always-on daemon."""
     global _active
     rec, _active = _active, None
     events.TEE = None
     if rec is not None:
-        rec.close(end_reason=end_reason)
+        try:
+            rec.close(end_reason=end_reason)
+        except Exception as exc:
+            print("[record] finalize failed (%s) — raw files kept in %s"
+                  % (exc, rec.dir))
     return rec
 
 
@@ -76,7 +82,10 @@ class SessionRecorder:
         self.started = clock()
         self.closed = False
         self.errors = 0
+        self.stalled = False  # writer thread failed to exit at close
         self.events = []  # teed event dicts: transcript + meta at close
+        self.stream_status = {}  # PortAudio status flags seen, by direction
+        self._echo_pad_frames = 0  # device-latency shim, see set_echo_delay
         root = config.recordings_dir() if root is None else Path(root)
         stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(self.started))
         base = "%s_%s" % (stamp, mode)
@@ -119,6 +128,29 @@ class SessionRecorder:
         if not self.closed:
             self._q.put(("echo", pcm_bytes))
 
+    def set_echo_delay(self, seconds):
+        """Device-latency alignment for session.wav: audio handed to the
+        output callback reaches the ear ~in+out stream latency later than the
+        same wall-clock moment on the mic track, so the echo track opens with
+        that much silence. AudioIO.start() calls this (streams built, not yet
+        started — so before the first write_echo). Approximate by nature;
+        capped at 2 s. Never raises."""
+        try:
+            self._echo_pad_frames = max(0, min(int(float(seconds) * self.rate),
+                                               2 * self.rate))
+        except Exception:
+            self.errors += 1
+
+    def note_status(self, direction, status):
+        """Count a PortAudio callback status flag (overflow/underflow). An
+        input overflow drops capture audio and silently desyncs the tracks —
+        the counts land in meta.json so a reviewer knows alignment drifted.
+        In-memory only: callback threads must never touch the disk."""
+        try:
+            self.stream_status[direction] = self.stream_status.get(direction, 0) + 1
+        except Exception:
+            self.errors += 1
+
     def _drain(self):
         while True:
             item = self._q.get()
@@ -133,6 +165,9 @@ class SessionRecorder:
                     w.setsampwidth(2)
                     w.setframerate(self.rate)
                     self._wavs[track] = w
+                    if track == "echo" and self._echo_pad_frames:
+                        w.writeframes(b"\x00\x00" * self._echo_pad_frames)
+                        self._frames[track] += self._echo_pad_frames
                 w.writeframes(data)
                 self._frames[track] += len(data) // 2
             except Exception:
@@ -147,15 +182,26 @@ class SessionRecorder:
         try:
             self._q.put(None)
             self._thread.join(timeout=10.0)
+            self.stalled = self._thread.is_alive()
         except Exception:
             self.errors += 1
-        for w in self._wavs.values():
-            try:
-                w.close()
-            except Exception:
-                self.errors += 1
-        for step in (self._write_mix, self._write_transcript,
-                     lambda: self._write_meta(end_reason)):
+        if self.stalled:
+            # writer stuck on a hung disk: touching its wave handles or
+            # reading half-written wavs would race it. Keep the raw files,
+            # skip finalize; transcript+meta below are main-thread-only.
+            self.errors += 1
+            print("[record] writer thread stalled — wav files left unfinalized"
+                  " in %s" % self.dir)
+        else:
+            for w in list(self._wavs.values()):
+                try:
+                    w.close()
+                except Exception:
+                    self.errors += 1
+        steps = (self._write_transcript, lambda: self._write_meta(end_reason)) \
+            if self.stalled else (self._write_mix, self._write_transcript,
+                                  lambda: self._write_meta(end_reason))
+        for step in steps:
             try:
                 step()
             except Exception:
@@ -230,6 +276,12 @@ class SessionRecorder:
             "event_counts": counts,
             "write_errors": self.errors,
         }
+        if self._echo_pad_frames:
+            meta["echo_delay_s"] = round(self._echo_pad_frames / float(self.rate), 3)
+        if self.stream_status:  # overflows/underflows: track alignment suspect
+            meta["stream_status"] = dict(self.stream_status)
+        if self.stalled:
+            meta["writer_stalled"] = True
         (self.dir / "meta.json").write_text(
             json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
 

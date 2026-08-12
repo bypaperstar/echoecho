@@ -173,8 +173,6 @@ async def amain(args):
 
     session = Session()
     mode = "script" if args.script else "text"
-    if config.echo_record(mode):  # opt-in for text/script (ECHO_RECORD=1)
-        recorder.start(mode)
     if args.script:
         from echo_app.conversation.scripted import ScriptedAgent
         port = ScriptedAgent(args.script, session=session)
@@ -197,13 +195,17 @@ async def amain(args):
         except OSError as exc:
             print("[viewer] not started (%s)" % exc)
 
+    # start recording only once setup can no longer raise: a failure above
+    # must not leave a forever-"(incomplete)" recording dir behind
+    if config.echo_record(mode):  # opt-in for text/script (ECHO_RECORD=1)
+        recorder.start(mode)
     orch_loop = asyncio.ensure_future(orch.run())
     try:
         await port.run()
         await orch.drain(timeout=2.0)  # let in-flight demo workers log
     finally:
         orch_loop.cancel()
-        recorder.stop(end_reason=session.end_reason)
+        recorder.stop(end_reason=session.end_reason or "interrupted")
         if viewer:
             viewer.stop()
 
@@ -319,6 +321,11 @@ async def voice_main(args):
             audio.tracker = client.tracker
             orch.on_injection = client.inject
             client.on_tool(make_tool_handler(orch, client))
+            # wake() resets this too, but only once the transport is up: a
+            # crash before that must not stamp LAST session's reason into
+            # this recording's meta.json
+            session.end_reason = None
+            fallback_reason = "interrupted"  # Ctrl-C / cancellation
             try:
                 # close wake mic -> refresh PortAudio -> open session streams
                 # with FRESH device resolution (hot-plug pickup, every wake)
@@ -328,6 +335,7 @@ async def voice_main(args):
                 await client.run()  # returns when the session is back to IDLE
             except Exception as exc:  # daemon never dies: back to wake loop
                 print("[voice] session crashed (%s) — returning to IDLE" % exc)
+                fallback_reason = "crash"  # e.g. died before the FSM woke
                 if session.state == "ACTIVE":
                     session.begin_ending("crash")
                 if session.state == "ENDING":
@@ -342,7 +350,7 @@ async def voice_main(args):
                 # fresh device resolution -> detector re-armed
                 end_session_audio(mic, audio, detector)
                 # streams are closed: everything audible is on disk; finalize
-                recorder.stop(end_reason=session.end_reason)
+                recorder.stop(end_reason=session.end_reason or fallback_reason)
                 manual_wake.clear()  # enter pressed mid-session: no ghost wake
             print("[wake] session over (%s) — listening for '%s' again"
                   % (session.end_reason, config.WAKE_PHRASE))

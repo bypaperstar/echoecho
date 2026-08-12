@@ -229,6 +229,82 @@ def test_start_failure_disables_recording_politely(rec_env, monkeypatch, capsys)
     events.emit("user_text", text="app still works")  # tee-less emit is fine
 
 
+class StuckThread(object):
+    """Stands in for a drain thread wedged on a hung disk."""
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return True
+
+
+def test_close_survives_a_stalled_writer_thread(rec_env, capsys):
+    rec = recorder.start("voice")
+    events.emit("user_text", text="hi")
+    rec.write_mic(b"\x01\x00" * 240)
+    rec._thread.join(timeout=5.0)  # let the real writes land first
+    rec._thread = StuckThread()
+    recorder.stop(end_reason="end_phrase")  # must not raise, must not hang
+    assert "writer thread stalled" in capsys.readouterr().out
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    assert meta["writer_stalled"] is True
+    assert meta["end_reason"] == "end_phrase"
+    # the review sheet still exists; wavs are left as-is (never touched live)
+    assert "you:** hi" in (rec.dir / "transcript.md").read_text()
+    assert not (rec.dir / "session.wav").exists()
+
+
+def test_stop_swallows_close_failures(rec_env, monkeypatch, capsys):
+    rec = recorder.start("voice")
+
+    def explode(end_reason=None):
+        raise RuntimeError("dictionary changed size during iteration")
+    monkeypatch.setattr(rec, "close", explode)
+    recorder.stop(end_reason="end_phrase")  # the daemon must survive this
+    assert recorder.active() is None and events.TEE is None
+    assert "[record] finalize failed" in capsys.readouterr().out
+
+
+def test_echo_delay_pads_the_echo_track(rec_env):
+    rec = recorder.start("voice")
+    rec.set_echo_delay(0.1)  # 100 ms in+out device latency
+    rec.write_echo(b"\x02\x00" * 240)
+    rec.write_mic(b"\x01\x00" * 240)
+    recorder.stop()
+    _, echo_track = read_wav(rec.dir / "echo.wav")
+    assert len(echo_track) == 2400 + 240  # latency shim + real audio
+    assert set(echo_track[:2400]) == {0} and echo_track[2400] == 2
+    _, mic = read_wav(rec.dir / "mic.wav")
+    assert len(mic) == 240  # mic track unshifted
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    assert meta["echo_delay_s"] == 0.1
+    rec2 = recorder.SessionRecorder("voice", root=rec_env)
+    rec2.set_echo_delay("not a number")  # never raises, never shifts
+    assert rec2._echo_pad_frames == 0 and rec2.errors == 1
+    rec2.set_echo_delay(99)  # absurd latency: capped at 2 s
+    assert rec2._echo_pad_frames == 2 * 24000
+    rec2.close()
+
+
+def test_status_flags_land_in_meta(rec_env):
+    rec = recorder.start("voice")
+    audio = AudioIO()
+    audio._in_callback(b"\x00\x00" * 10, 10, None, "input overflow")
+    audio._out_callback(bytearray(20), 10, None, "output underflow")
+    audio._out_callback(bytearray(20), 10, None, None)  # clean: not counted
+    recorder.stop()
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    assert meta["stream_status"] == {"input": 1, "output": 1}
+
+
+def test_clean_session_meta_has_no_alarm_fields(rec_env):
+    rec = recorder.start("voice")
+    recorder.stop(end_reason="end_phrase")
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    for key in ("stream_status", "writer_stalled", "echo_delay_s"):
+        assert key not in meta
+
+
 def test_same_second_wakes_never_clobber(rec_env):
     a = recorder.SessionRecorder("voice", root=rec_env, clock=lambda: 1000.0)
     b = recorder.SessionRecorder("voice", root=rec_env, clock=lambda: 1000.0)
@@ -261,7 +337,7 @@ def test_scripted_run_records_when_opted_in(rec_env, tmp_path, monkeypatch):
     monkeypatch.setenv("ECHO_RECORD", "1")
     monkeypatch.setenv("ECHO_FAKE_LLM", "1")
     args = scripted_args(tmp_path, ["echo echo", "hello there", "that's it"])
-    asyncio.new_event_loop().run_until_complete(echo.amain(args))
+    asyncio.run(echo.amain(args))
     dirs = session_dirs(rec_env)
     assert len(dirs) == 1 and dirs[0].name.endswith("_script")
     meta = json.loads((dirs[0] / "meta.json").read_text())
@@ -275,8 +351,24 @@ def test_scripted_run_records_when_opted_in(rec_env, tmp_path, monkeypatch):
 def test_scripted_run_does_not_record_by_default(rec_env, tmp_path, monkeypatch):
     monkeypatch.setenv("ECHO_FAKE_LLM", "1")
     args = scripted_args(tmp_path, ["echo echo", "hi", "that's it"])
-    asyncio.new_event_loop().run_until_complete(echo.amain(args))
+    asyncio.run(echo.amain(args))
     assert session_dirs(rec_env) == []
+
+
+def test_amain_setup_failure_leaves_no_recording(rec_env, tmp_path, monkeypatch):
+    """A crash during setup (before the try/finally) must not strand a
+    forever-'(incomplete)' recording dir."""
+    import echo_app.workers.base as workers_base
+    monkeypatch.setenv("ECHO_RECORD", "1")
+
+    def boom():
+        raise RuntimeError("registry exploded")
+    monkeypatch.setattr(workers_base, "load_all", boom)
+    args = scripted_args(tmp_path, ["echo echo", "hi", "that's it"])
+    with pytest.raises(RuntimeError):
+        asyncio.run(echo.amain(args))
+    assert session_dirs(rec_env) == []
+    assert recorder.active() is None
 
 
 # -- the --recordings listing --------------------------------------------------------
@@ -300,6 +392,9 @@ def test_list_recordings_empty_and_table(rec_env, capsys):
 
 
 def test_no_record_flag_maps_to_env(rec_env, monkeypatch, capsys):
+    # keep the repo's real .env.local out of os.environ (hidden test-order
+    # dependency on the Mac, where it holds OPENAI_API_KEY etc.)
+    monkeypatch.setattr(config, "load_env_local", lambda path=None: None)
     monkeypatch.setenv("ECHO_RECORD", "sentinel")  # restored by monkeypatch
     echo.main(["--no-record", "--recordings"])     # exits after the listing
     assert os.environ["ECHO_RECORD"] == "0"
