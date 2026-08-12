@@ -174,6 +174,164 @@ def test_apply_bad_manifest_touches_nothing(tmp_path, monkeypatch):
     assert task.result.data["error"] == "bad manifest"
 
 
+# -- review hardening: the write path must never lose data or half-apply -----
+
+def test_apply_is_all_or_report_never_half_crashes(tmp_path, monkeypatch):
+    """A bad entry (target is a directory) mid-batch must NOT abort the batch
+    or raise: it's refused, the good entries still apply, and the report is
+    honest."""
+    docs = tmp_path / "Documents"; docs.mkdir()
+    good = docs / "good.md"; good.write_text("v1")
+    (docs / "adir").mkdir()  # a directory target — copy2 would raise
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    stage(ws, "t1",
+          [{"staged": "bad", "target": str(docs / "adir")},
+           {"staged": "good.md", "target": str(good)}],
+          {"bad": "x", "good.md": "v2"})
+    task = run_task("outbox.apply", tmp_path, workspace=ws)
+    assert task.status == "done"                 # not error/crash
+    assert good.read_text() == "v2"              # the good entry applied
+    assert task.result.data["applied"] == ["good.md"]
+    assert str(docs / "adir") in task.result.data["refused"]
+
+
+def test_apply_write_failure_is_reported_not_fatal(tmp_path, monkeypatch):
+    """A write that raises OSError mid-batch is recorded in `failed`, other
+    entries still apply, and nothing propagates."""
+    docs = tmp_path / "Documents"; docs.mkdir()
+    ok = docs / "ok.md"; ok.write_text("v1")
+    boom = docs / "boom.md"; boom.write_text("orig")
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    stage(ws, "t1",
+          [{"staged": "boom.md", "target": str(boom)},
+           {"staged": "ok.md", "target": str(ok)}],
+          {"boom.md": "new", "ok.md": "v2"})
+
+    import echo_app.workers.outbox as outbox_mod
+    real_write = outbox_mod._write_over
+
+    def flaky(target, staged_path):
+        if target.name == "boom.md":
+            raise OSError("disk on fire")
+        return real_write(target, staged_path)
+
+    monkeypatch.setattr(outbox_mod, "_write_over", flaky)
+    task = run_task("outbox.apply", tmp_path, workspace=ws)
+    assert task.status == "done"
+    assert ok.read_text() == "v2"                       # good one applied
+    assert task.result.data["applied"] == ["ok.md"]
+    assert any("boom.md" in f for f in task.result.data["failed"])
+
+
+def test_duplicate_target_preserves_true_original_backup(tmp_path, monkeypatch):
+    """Two manifest entries for the SAME target must not clobber the backup of
+    the real original (dedup + non-clobbering backup)."""
+    docs = tmp_path / "Documents"; docs.mkdir()
+    lease = docs / "lease.md"; lease.write_text("TRUE ORIGINAL")
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    stage(ws, "t1",
+          [{"staged": "a", "target": str(lease)},
+           {"staged": "b", "target": str(lease)}],
+          {"a": "FIRST", "b": "SECOND"})
+    task = run_task("outbox.apply", tmp_path, workspace=ws)
+    # applied once (deduped), last staged content wins
+    assert task.result.data["applied"] == ["lease.md"]
+    assert lease.read_text() == "SECOND"
+    # exactly one backup, and it holds the TRUE original — never overwritten
+    baks = list(docs.glob("lease.md" + config.OUTBOX_BACKUP_SUFFIX + "*"))
+    assert len(baks) == 1
+    assert baks[0].read_text() == "TRUE ORIGINAL"
+
+
+def test_backup_never_clobbers_across_two_applies(tmp_path, monkeypatch):
+    docs = tmp_path / "Documents"; docs.mkdir()
+    f = docs / "f.md"; f.write_text("orig")
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    stage(ws, "t1", [{"staged": "f.md", "target": str(f)}], {"f.md": "v2"})
+    # apply twice in the same second-granularity stamp window
+    run_task("outbox.apply", tmp_path, workspace=ws)
+    stage(ws, "t1", [{"staged": "f.md", "target": str(f)}], {"f.md": "v3"})
+    run_task("outbox.apply", tmp_path, workspace=ws)
+    # both backups survive; the ORIGINAL is still recoverable from one of them
+    baks = sorted(docs.glob("f.md" + config.OUTBOX_BACKUP_SUFFIX + "*"))
+    assert len(baks) == 2
+    assert any(b.read_text() == "orig" for b in baks)
+
+
+def test_malformed_only_manifest_is_honest(tmp_path, monkeypatch):
+    docs = tmp_path / "Documents"; docs.mkdir()
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    box = "%s/t1" % config.OUTBOX_DIR
+    artifacts.write_atomic(ws, "%s/MANIFEST.json" % box,
+                           json.dumps(["not-a-dict", {"summary": "no target"}]))
+    task = run_task("outbox.apply", tmp_path, workspace=ws)
+    assert task.result.data["error"] == "nothing applied"
+    # the OLD bug said "0 were outside your shared folders" — must not anymore
+    assert "outside" not in task.result.say
+    assert task.result.data["unusable"] == 2
+
+
+def test_user_docs_path_with_spaces_survives(monkeypatch, tmp_path):
+    d = tmp_path / "My Documents"; d.mkdir()
+    monkeypatch.setenv("ECHO_USER_DOCS", str(d))
+    assert config.user_docs() == [d]  # not shattered on the space
+
+
+def test_pick_task_dir_rejects_dotted_arg(tmp_path, monkeypatch):
+    docs = tmp_path / "Documents"; docs.mkdir()
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    (ws / config.OUTBOX_DIR).mkdir()
+    task = run_task("outbox.apply", tmp_path, args={"task_id": ".."},
+                    workspace=ws)
+    assert task.result.data["error"] == "no staged changes"
+
+
+# -- deterministic staged-changes handoff from agent.run ----------------------
+
+def test_agent_run_stages_changes_gets_apply_it_completion(tmp_path,
+                                                           monkeypatch):
+    """When an agent run leaves an outbox MANIFEST, the completion say names
+    the file and tells the user to say 'apply it' — deterministically, not
+    left to the agent's free text."""
+    from echo_app.services.agent_cli import FakeAgentCLI
+    docs = tmp_path / "Documents"; docs.mkdir()
+    (docs / "lease.md").write_text("orig")
+    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    ws = tmp_path / "ws"; ws.mkdir()
+    manifest = json.dumps([{"staged": "lease.md", "target": str(docs / "lease.md"),
+                            "summary": "rewrote section 3"}])
+    script = ws.parent / "s.jsonl"
+    script.write_text("\n".join(json.dumps(e) for e in [
+        {"type": "system", "subtype": "init", "session_id": "s1"},
+        {"type": "_write", "file": "outbox/t1/lease.md", "content": "new lease\n"},
+        {"type": "_write", "file": "outbox/t1/MANIFEST.json", "content": manifest},
+        {"type": "result", "subtype": "success", "is_error": False,
+         "session_id": "s1", "result": "I revised the lease."},
+    ]) + "\n")
+
+    orch = Orchestrator(registry=load_all(), log_path=tmp_path / "t.jsonl",
+                        workspace=ws)
+    orch.ctx.extra["agent_cli"] = FakeAgentCLI(script)
+
+    async def go():
+        loop = asyncio.ensure_future(orch.run())
+        orch.submit(TaskRequest(kind="agent.run", instructions="revise the lease"))
+        assert await orch.drain()
+        loop.cancel()
+
+    asyncio.run(go())
+    result = orch.tasks["t1"].result
+    assert "apply it" in result.say and "lease.md" in result.say
+    assert result.data["staged"][0]["summary"] == "rewrote section 3"
+    assert result.priority == "interrupt"
+
+
 # -- conditional advertisement + prompt ---------------------------------------
 
 def test_outbox_apply_advertised_only_with_user_docs(tmp_path, monkeypatch):

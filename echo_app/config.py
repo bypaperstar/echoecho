@@ -104,14 +104,19 @@ def vm_boot_timeout():
 
 
 def user_docs():
-    """ECHO_USER_DOCS: host folders the user shares with Echo (e.g.
-    ~/Documents:~/Desktop). They mount READ-ONLY into the VM; the ONLY path
-    back to them is the outbox + spoken approval (workers/outbox.py). Returns
-    absolute, user-expanded, existing directories."""
-    raw = os.environ.get("ECHO_USER_DOCS", "").strip()
+    """ECHO_USER_DOCS: host folders the user shares with Echo, separated by
+    the OS path separator (':' on macOS) — e.g. ~/Documents:~/Desktop. They
+    mount READ-ONLY into the VM; the ONLY path back to them is the outbox +
+    spoken approval (workers/outbox.py). Returns absolute, user-expanded
+    paths — split ONLY on os.pathsep so a folder name with a space ("My
+    Documents", iCloud "Mobile Documents/…") survives intact."""
+    raw = os.environ.get("ECHO_USER_DOCS", "")
     out = []
-    for part in raw.replace(os.pathsep, " ").split():
-        p = Path(part).expanduser()
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(os.path.abspath(Path(part).expanduser()))
         if p not in out:
             out.append(p)
     return out

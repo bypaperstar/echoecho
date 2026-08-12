@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import signal
+from pathlib import Path
 
 from echo_app import config
 from echo_app.bus import TaskResult
@@ -46,6 +47,28 @@ PROMPT_SUFFIX = (
     "\n\nYou are working headless for a voice assistant; your reply will be "
     "spoken. If you cannot proceed without an answer from the user, stop and "
     "end your reply with one line starting '%s '." % QUESTION_PREFIX)
+
+
+def _staged_changes(task, ctx):
+    """Did this task stage document edits in its outbox? Returns a list of
+    {name, target, summary} from workspace/outbox/<task>/MANIFEST.json, or []
+    — the structured signal behind the deterministic 'say apply it' handoff,
+    so surfacing staged changes never depends on the agent's free-text reply."""
+    if not config.user_docs():
+        return []
+    raw = artifacts.read(ctx.workspace,
+                         "%s/%s/MANIFEST.json" % (config.OUTBOX_DIR, task.id))
+    try:
+        entries = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    out = []
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("staged") and e.get("target"):
+            out.append({"name": Path(str(e["target"])).name,
+                        "target": str(e["target"]),
+                        "summary": str(e.get("summary", ""))})
+    return out
 
 
 def _user_docs_convention(task):
@@ -305,6 +328,19 @@ async def run_agent(task, ctx):
             say="The agent needs an answer to continue: %s"
                 % _speakable(question),
             data=data, artifacts_touched=touched)
+    # if the agent staged document changes, surface the approval handoff
+    # DETERMINISTICALLY (not left to the model inferring from its free text)
+    staged = _staged_changes(task, ctx)
+    if staged:
+        data["staged"] = staged
+        names = ", ".join(s["name"] for s in staged[:3])
+        more = "" if len(staged) <= 3 else " and %d more" % (len(staged) - 3)
+        return TaskResult(
+            say="Staged %d change%s to %s%s — say \"apply it\" to save over "
+                "the original%s." % (len(staged),
+                                     "" if len(staged) == 1 else "s", names,
+                                     more, "" if len(staged) == 1 else "s"),
+            priority="interrupt", data=data, artifacts_touched=touched)
     return TaskResult(
         say=_speakable(final) or "The agent finished the task.",
         priority="interrupt",  # primary user-requested result

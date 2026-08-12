@@ -45,7 +45,10 @@ def _pick_task_dir(workspace, args):
     root = _outbox_root(workspace)
     name = args.get("task_id") or args.get("outbox")
     if name:
-        cand = root / Path(name).name  # basename: no traversal via the arg
+        base = Path(str(name)).name  # basename only: no traversal via the arg
+        if not base or base.startswith("."):  # "", ".", "..": reject outright
+            return None
+        cand = root / base
         return cand if cand.is_dir() else None
     subdirs = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
     return max(subdirs, key=lambda p: p.stat().st_mtime) if subdirs else None
@@ -64,13 +67,24 @@ def _within_user_docs(target):
 
 def _backup(target, stamp):
     """Copy an existing original aside before overwriting; returns the backup
-    path or None if there was nothing to back up."""
+    path or None if there was nothing to back up. Never clobbers an existing
+    backup — an O_EXCL create picks a unique -N suffix — so a real original is
+    never lost even if two applies land in the same one-second stamp."""
     if not target.exists():
         return None
-    bak = target.with_name(target.name + config.OUTBOX_BACKUP_SUFFIX
-                           + "-" + stamp)
-    shutil.copy2(str(target), str(bak))
-    return bak
+    base = target.with_name(target.name + config.OUTBOX_BACKUP_SUFFIX
+                            + "-" + stamp)
+    for n in range(1000):
+        bak = base if n == 0 else base.with_name(base.name + "-%d" % n)
+        try:
+            fd = os.open(str(bak), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(target.read_bytes())
+        shutil.copystat(str(target), str(bak))
+        return bak
+    raise OSError("could not create a unique backup for %s" % target)
 
 
 def _write_over(target, staged_path):
@@ -122,13 +136,20 @@ async def run_apply(task, ctx):
         return TaskResult(say="There's nothing staged to apply.",
                           data={"error": "empty manifest"})
 
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    applied, refused, backups = [], [], []
+    # Resolve + validate EVERY entry before touching a single document, and
+    # collapse duplicate targets (last staged file wins) so one original is
+    # never written — or backed up — twice in a batch. The manifest is
+    # untrusted, so unusable/outside/failed entries are counted and reported,
+    # never fatal: a bad entry can't abort the batch or hide what was applied.
+    planned = {}  # realpath(target) -> (target, staged_path)
+    refused, unusable = [], []
     for entry in entries:
         if not isinstance(entry, dict):
+            unusable.append(entry)
             continue
         staged, target_raw = entry.get("staged"), entry.get("target")
         if not staged or not target_raw:
+            unusable.append(entry)
             continue
         target = Path(str(target_raw)).expanduser()
         if not _within_user_docs(target):
@@ -141,27 +162,42 @@ async def run_apply(task, ctx):
             refused.append(str(staged))  # staged path escapes the workspace
             continue
         if not staged_path.is_file():
-            refused.append(str(staged))
+            refused.append(str(staged))  # missing / a directory
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        bak = _backup(target, stamp)
-        _write_over(target, staged_path)
+        if target.exists() and not target.is_file():
+            refused.append(str(target_raw))  # a dir/device: never copy over it
+            continue
+        planned[os.path.realpath(str(target))] = (target, staged_path)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    applied, backups, failed = [], [], []
+    for target, staged_path in planned.values():
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            bak = _backup(target, stamp)  # true original, once, non-clobbering
+            _write_over(target, staged_path)
+        except OSError as exc:  # permission, ENOSPC, ...: skip, never abort
+            failed.append("%s (%s)" % (target.name, exc))
+            continue
         applied.append(target.name)
         if bak is not None:
             backups.append(bak.name)
 
+    skipped = len(refused) + len(unusable) + len(failed)
     if not applied:
+        reason = "nothing usable to apply" if not (refused or failed) \
+            else "none could be applied safely"
         return TaskResult(
-            say="I couldn't apply any of the staged changes — %d were outside "
-                "your shared folders, so I left your documents untouched."
-                % len(refused),
-            data={"error": "nothing applied", "refused": refused})
+            say="I couldn't apply any of the staged changes (%s), so I left "
+                "your documents untouched." % reason,
+            data={"error": "nothing applied", "refused": refused,
+                  "unusable": len(unusable), "failed": failed})
     say = "Saved %d change%s over your documents%s." % (
         len(applied), "" if len(applied) == 1 else "s",
         " (backed up first)" if backups else "")
-    if refused:
-        say += " I skipped %d that pointed outside your shared folders." \
-               % len(refused)
+    if skipped:
+        say += " I skipped %d I couldn't apply safely." % skipped
     return TaskResult(say=say, priority="interrupt",
                       data={"applied": applied, "backups": backups,
-                            "refused": refused})
+                            "refused": refused, "failed": failed,
+                            "unusable": len(unusable)})
