@@ -12,8 +12,10 @@ from echo_app.workers.base import register
 
 PROMPT = """You maintain a grocery list as markdown. Merge the new items below into the
 current list: deduplicate (combine quantities, e.g. '2 cloves garlic' + '3 cloves
-garlic' -> 'garlic (5 cloves)'), group items under '## <Aisle>' headings, and keep a
-'## Meals' section listing source recipes as markdown links.
+garlic' -> 'garlic (5 cloves)' — illustrative only: NEVER add items that aren't in
+the new items, the instruction, or the current list), group items under
+'## <Aisle>' headings, and keep a '## Meals' section listing source recipes as
+markdown links. Omit the '## Meals' section entirely if there are no recipes yet.
 Also apply this instruction if present: {instruction}
 New items: {ingredients}
 Source recipe: {source}
