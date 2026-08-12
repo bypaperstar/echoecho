@@ -21,7 +21,55 @@ def parse_args(argv=None):
                    help="don't start the workspace live viewer")
     p.add_argument("--mic-check", action="store_true",
                    help="list audio devices + live RMS meter (Mac only)")
+    p.add_argument("--input-device", metavar="SPEC",
+                   help="mic device: index or name substring; overrides "
+                        "ECHO_INPUT_DEVICE ('' = system default)")
+    p.add_argument("--output-device", metavar="SPEC",
+                   help="speaker device: index or name substring; overrides "
+                        "ECHO_OUTPUT_DEVICE ('' = system default)")
+    p.add_argument("--list-devices", action="store_true",
+                   help="print an indexed audio device table and exit")
     return p.parse_args(argv)
+
+
+def apply_device_args(args):
+    """--input-device/--output-device flags override the env vars (voice_main
+    reads devices from config so env and flags share one path)."""
+    if args.input_device is not None:
+        os.environ["ECHO_INPUT_DEVICE"] = args.input_device
+    if args.output_device is not None:
+        os.environ["ECHO_OUTPUT_DEVICE"] = args.output_device
+
+
+def list_devices():
+    """--list-devices: indexed device table with in/out capabilities and the
+    current defaults, then exit. Polite pointer + nonzero on Linux."""
+    try:
+        import sounddevice as sd
+    except ImportError:
+        sys.exit("--list-devices needs sounddevice (Mac): "
+                 "pip install -r requirements-mac.txt. No audio hardware "
+                 "here? --text and --script fixtures/smoke.txt work keyless.")
+    try:
+        default_in, default_out = tuple(sd.default.device)
+    except Exception:
+        default_in = default_out = None
+    print("idx   in  out  name")
+    for idx, dev in enumerate(sd.query_devices()):
+        marks = []
+        if idx == default_in:
+            marks.append("default in")
+        if idx == default_out:
+            marks.append("default out")
+        print("%3d  %3d  %3d  %s%s"
+              % (idx, dev.get("max_input_channels", 0),
+                 dev.get("max_output_channels", 0), dev.get("name", "?"),
+                 "   <- " + ", ".join(marks) if marks else ""))
+    print("\nPick with --input-device/--output-device (or ECHO_INPUT_DEVICE/"
+          "ECHO_OUTPUT_DEVICE): an index or a case-insensitive name "
+          "substring; empty = follow the system default. Devices re-resolve "
+          "at every session start, so plug in AirPods and just say '%s'."
+          % "echo echo")
 
 
 def mic_check(seconds=5.0):
@@ -116,6 +164,32 @@ async def amain(args):
             viewer.stop()
 
 
+def start_session_audio(mic, audio, loop, send_event):
+    """Wake -> ACTIVE device swap. The order is load-bearing:
+    refresh_devices() re-inits PortAudio and must NEVER run while any stream
+    is open, so the wake mic fully closes first; AudioIO.start() then
+    resolves its device specs against the fresh list — hardware plugged in
+    while Echo was IDLE (AirPods!) is picked up with zero user action."""
+    from echo_app.conversation.audio import refresh_devices
+    mic.stop()
+    refresh_devices()
+    audio.start(loop, send_event)
+
+
+def end_session_audio(mic, audio, detector):
+    """ACTIVE -> IDLE swap back, same zero-open-streams rule: close the
+    session streams, re-init PortAudio, reopen the wake mic (re-resolving its
+    device spec), then re-arm the detector."""
+    from echo_app.conversation.audio import refresh_devices
+    audio.stop()
+    refresh_devices()
+    try:
+        mic.reopen()
+    except Exception as exc:  # mic vanished: daemon lives; enter still wakes
+        print("[wake] mic reopen failed (%s) — press enter to wake" % exc)
+    detector.resume()
+
+
 async def voice_main(args):
     """Mac-only always-on daemon: wake loop -> Realtime session -> back to
     IDLE. The Vosk feed is paused while ACTIVE (Session's wake_pause hook) so
@@ -135,7 +209,7 @@ async def voice_main(args):
 
     loop = asyncio.get_event_loop()
     detector = WakeDetector()
-    mic = WakeMic().start()
+    mic = WakeMic(device=config.input_device()).start()
     manual_wake = threading.Event()
 
     def stdin_watcher():  # any line (enter, or spacebar+enter) forces a wake
@@ -143,8 +217,11 @@ async def voice_main(args):
             manual_wake.set()
     threading.Thread(target=stdin_watcher, daemon=True).start()
 
+    # wake re-arm (mic reopen with fresh devices + detector.resume) happens in
+    # end_session_audio in the finally below — AFTER the session streams are
+    # closed — not in the FSM hook, which fires while they're still open.
     session = Session(wake_pause=detector.suspend,
-                      wake_resume=lambda: (mic.drain(), detector.resume()))
+                      wake_resume=lambda: None)
     from echo_app.workers.base import load_all
     orch = Orchestrator(registry=load_all(), fake_llm=config.echo_fake_llm())
 
@@ -186,7 +263,8 @@ async def voice_main(args):
                 since = ("[since last session] Background tasks finished "
                          "while Echo was asleep: " + " | ".join(missed) +
                          " Mention them naturally if relevant.")
-            audio = AudioIO()
+            audio = AudioIO(input_device=config.input_device(),
+                            output_device=config.output_device())
             client = RealtimeClient(
                 WebSocketTransport(model), session=session,
                 on_audio=audio.on_audio, flush_playback=audio.flush,
@@ -195,9 +273,12 @@ async def voice_main(args):
             audio.tracker = client.tracker
             orch.on_injection = client.inject
             client.on_tool(make_tool_handler(orch, client))
-            audio.start(loop, lambda ev: client.transport.send(ev))
-            audio.play_chime("wake")
             try:
+                # close wake mic -> refresh PortAudio -> open session streams
+                # with FRESH device resolution (hot-plug pickup, every wake)
+                start_session_audio(mic, audio, loop,
+                                    lambda ev: client.transport.send(ev))
+                audio.play_chime("wake")
                 await client.run()  # returns when the session is back to IDLE
             except Exception as exc:  # daemon never dies: back to wake loop
                 print("[voice] session crashed (%s) — returning to IDLE" % exc)
@@ -211,7 +292,9 @@ async def voice_main(args):
                 audio.muted_capture = True  # transport is closing: stop sends
                 audio.play_chime("end")
                 await asyncio.sleep(max(0.3, audio.pending_ms() / 1000.0))
-                audio.stop()
+                # session streams closed -> refresh -> wake mic reopens with
+                # fresh device resolution -> detector re-armed
+                end_session_audio(mic, audio, detector)
                 manual_wake.clear()  # enter pressed mid-session: no ghost wake
             print("[wake] session over (%s) — listening for '%s' again"
                   % (session.end_reason, config.WAKE_PHRASE))
@@ -232,6 +315,10 @@ def main(argv=None):
         os.environ["ECHO_FAKE_LLM"] = "1"
     if args.text:
         os.environ["ECHO_TEXT"] = "1"
+    apply_device_args(args)  # flags beat ECHO_INPUT_DEVICE/ECHO_OUTPUT_DEVICE
+    if args.list_devices:
+        list_devices()
+        return
     if args.mic_check:
         mic_check()
         return

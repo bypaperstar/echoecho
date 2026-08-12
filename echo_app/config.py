@@ -48,6 +48,19 @@ def silence_timeout():
     return float(os.environ.get("ECHO_SILENCE_TIMEOUT", "600"))
 
 
+def input_device():
+    """ECHO_INPUT_DEVICE: mic device index or name substring (see
+    conversation.audio.resolve_device); "" = follow the system default,
+    re-checked at every session start."""
+    return os.environ.get("ECHO_INPUT_DEVICE", "").strip()
+
+
+def output_device():
+    """ECHO_OUTPUT_DEVICE: speaker device index or name substring; "" =
+    follow the system default, re-checked at every session start."""
+    return os.environ.get("ECHO_OUTPUT_DEVICE", "").strip()
+
+
 WAKE_PHRASE = "echo echo"
 
 # Tuned for voice (PR 6): short utterances, verbal acks before dispatch, weave

@@ -241,6 +241,9 @@ function activityLine(ev) {
       return ['🔌 Voice line closed', ev.detail || null];
     return null;
   }
+  if (t === 'audio')
+    return ['🎧 mic: ' + (ev.input || 'system default') +
+            ' → speaker: ' + (ev.output || 'system default'), null];
   if (t === 'tool_call') {
     const args = ev.args || {};
     if (ev.name === 'dispatch_task')

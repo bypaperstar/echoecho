@@ -14,8 +14,92 @@ import math
 import struct
 import threading
 
+from echo_app import events
+
 RATE = 24000
 BLOCK_FRAMES = 2400  # 100 ms at 24 kHz
+
+
+# -- device selection (PR 8) --------------------------------------------------
+#
+# PortAudio freezes its device list at library init, so a daemon that binds
+# devices once never sees hardware plugged in later (AirPods!). The fix is
+# two-part: resolve_device() runs at STREAM-OPEN time (never at construction),
+# and refresh_devices() re-inits PortAudio between sessions — with zero open
+# streams — so the list itself is fresh.
+
+def resolve_device(spec, kind):
+    """Resolve a device spec into what sounddevice's `device=` argument wants.
+
+    None / "" -> None (PortAudio's default at open time); all digits -> int
+    index; anything else -> case-insensitive substring match over the names
+    of devices capable of `kind` ('input': max_input_channels>0, 'output':
+    max_output_channels>0). Multiple matches -> first; no match -> ValueError
+    listing what IS available. sounddevice is imported lazily and only when a
+    name actually needs matching, so this module (and the default/index
+    paths) work on the Linux sandbox.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, int):
+        return spec
+    spec = str(spec).strip()
+    if not spec:
+        return None
+    if spec.isdigit():
+        return int(spec)
+    import sounddevice as sd  # lazy: Mac-only dependency
+    key = "max_input_channels" if kind == "input" else "max_output_channels"
+    candidates = [(i, dev.get("name", ""))
+                  for i, dev in enumerate(sd.query_devices())
+                  if dev.get(key, 0) > 0]
+    needle = spec.lower()
+    for i, name in candidates:
+        if needle in name.lower():
+            return i
+    raise ValueError(
+        "no %s device matching %r; available %s devices: %s"
+        % (kind, spec, kind,
+           ", ".join(repr(n) for _, n in candidates) or "(none)"))
+
+
+def device_label(index, kind):
+    """Human-readable name for a resolved device index. None means 'system
+    default' — we name the ACTUAL current default when discoverable. Never
+    raises (labels are observability, not load-bearing)."""
+    try:
+        import sounddevice as sd  # lazy: Mac-only dependency
+        if index is None:
+            info = sd.query_devices(kind=kind)
+            name = info.get("name") if isinstance(info, dict) else None
+            return "%s (system default)" % name if name else "system default"
+        info = sd.query_devices(index)
+        name = info.get("name") if isinstance(info, dict) else None
+        return name or "device %s" % index
+    except Exception:
+        return "system default" if index is None else "device %s" % index
+
+
+def refresh_devices():
+    """Re-initialize PortAudio so its init-time-frozen device list picks up
+    hot-plugged hardware. sounddevice._terminate()/_initialize() is private
+    API but the standard trick; guarded so a future sounddevice that drops it
+    degrades to 'no refresh', never a crash. CRITICAL: only call this with
+    ZERO open streams (echo.py's session-boundary helpers own the ordering).
+    Returns True iff a refresh actually happened."""
+    try:
+        import sounddevice as sd  # lazy: Mac-only dependency
+    except ImportError:
+        return False
+    try:
+        sd._terminate()
+        sd._initialize()
+        return True
+    except AttributeError:  # private API removed in a future version
+        return False
+    except Exception as exc:  # never let a refresh kill the daemon
+        print("[audio] device refresh failed (%s)" % exc)
+        return False
 
 
 def make_chime(freqs, per_note_ms=90, rate=RATE, volume=0.35):
@@ -41,12 +125,17 @@ def end_chime():
 
 class AudioIO:
     def __init__(self, tracker=None, loop=None, rate=RATE,
-                 block_frames=BLOCK_FRAMES, device=None):
+                 block_frames=BLOCK_FRAMES, device=None,
+                 input_device=None, output_device=None):
         self.tracker = tracker  # PlaybackTracker (advance() as audio plays)
         self.loop = loop        # asyncio loop for thread-safe send scheduling
         self.rate = rate
         self.block_frames = block_frames
-        self.device = device
+        self.device = device    # legacy alias for input_device
+        # device SPECS (index / name substring / "" = system default), kept
+        # unresolved until start(): resolution must see the current devices
+        self.input_device = device if input_device is None else input_device
+        self.output_device = output_device
         self.send_event = None  # async cb(dict) -> transport
         self._buf = bytearray()
         self._lock = threading.Lock()
@@ -111,15 +200,24 @@ class AudioIO:
         import sounddevice as sd  # lazy: Mac-only dependency
         self.loop = loop
         self.send_event = send_event
+        # resolve specs NOW, against the current device list (voice_main
+        # refreshes PortAudio just before this, so hot-plugged devices show)
+        in_dev = resolve_device(self.input_device, "input")
+        out_dev = resolve_device(self.output_device, "output")
         self._in_stream = sd.RawInputStream(
             samplerate=self.rate, channels=1, dtype="int16",
-            blocksize=self.block_frames, device=self.device,
+            blocksize=self.block_frames, device=in_dev,
             callback=self._in_callback)
         self._out_stream = sd.RawOutputStream(
             samplerate=self.rate, channels=1, dtype="int16",
-            blocksize=self.block_frames, callback=self._out_callback)
+            blocksize=self.block_frames, device=out_dev,
+            callback=self._out_callback)
         self._in_stream.start()
         self._out_stream.start()
+        in_name = device_label(in_dev, "input")
+        out_name = device_label(out_dev, "output")
+        events.emit("audio", input=in_name, output=out_name)
+        print("[audio] mic: %s -> speaker: %s" % (in_name, out_name))
         return self
 
     def stop(self):

@@ -13,8 +13,8 @@ class WakeMic:
     def __init__(self, rate=RATE, block_frames=BLOCK_FRAMES, device=None):
         self.rate = rate
         self.block_frames = block_frames
-        self.device = device
-        self.chunks = queue.Queue()
+        self.device = device  # SPEC (index / name substring / "" = default),
+        self.chunks = queue.Queue()  # resolved fresh at every start()/reopen()
         self._stream = None
 
     def _callback(self, indata, frames, time_info, status):
@@ -22,12 +22,24 @@ class WakeMic:
 
     def start(self):
         import sounddevice as sd  # lazy: Mac-only dependency
+        from echo_app.conversation.audio import device_label, resolve_device
+        dev = resolve_device(self.device, "input")  # at OPEN time, on purpose
         self._stream = sd.RawInputStream(
             samplerate=self.rate, channels=1, dtype="int16",
-            blocksize=self.block_frames, device=self.device,
+            blocksize=self.block_frames, device=dev,
             callback=self._callback)
         self._stream.start()
+        print("[wake] mic: %s" % device_label(dev, "input"))
         return self
+
+    def reopen(self):
+        """Fully close, drop stale chunks, then start() again so the device
+        spec re-resolves against the CURRENT device list — this (plus
+        refresh_devices() between sessions) is what makes AirPods connected
+        while Echo was busy get picked up with zero user action."""
+        self.stop()
+        self.drain()
+        return self.start()
 
     def read(self, timeout=0.5):
         """Next 100 ms chunk of int16 bytes, or None on timeout."""

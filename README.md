@@ -128,6 +128,31 @@ then the full test suite): `bash scripts/demo_check.sh`.
 - The Vosk feed is suspended while a session is ACTIVE so Echo saying "echo" can't self-trigger; wake/end chimes are synthesized sine waves, no asset files.
 - Detector behavior on the committed fixtures (`fixtures/audio/`, exercised by `tests/test_wake.py`): both "echo echo" WAVs fire; `decoy_single_echo`, `decoy_speech` and `decoy_gecko` do not ("gecko" decodes as `[unk] echo [unk] echo` — never the contiguous doubled phrase).
 
+### AirPods / switching audio devices
+
+PortAudio freezes its device list when it initializes, so a naive always-on
+daemon never sees hardware that appears after startup — AirPods connected
+mid-run would be invisible and output would stay on the Mac speakers. Echo
+re-initializes PortAudio and re-resolves both devices at **every session
+boundary** (on wake, and again when the wake mic reopens at session end), so
+after connecting AirPods just start a new session ("echo echo") — no restart,
+no flags, no user action if you follow the system default. Each session logs
+and shows what it bound (`🎧 mic: … → speaker: …` in the live transcript).
+
+- `python3 echo.py --list-devices` — indexed table of every device with in/out
+  channel counts and the current defaults.
+- Pin devices with `--input-device SPEC` / `--output-device SPEC`, or the
+  `ECHO_INPUT_DEVICE` / `ECHO_OUTPUT_DEVICE` env vars (flags win). A SPEC is a
+  device index or a case-insensitive name substring (first match wins); empty
+  means "follow the system default at each session start".
+- **Bluetooth HFP gotcha:** using AirPods for BOTH input and output forces
+  them into phone-call (HFP) mode and the sound quality craters. Best
+  practice — built-in mic in, AirPods out:
+
+  ```bash
+  python3 echo.py --voice --input-device "macbook pro microphone" --output-device "pods"
+  ```
+
 ## Status
 
 Prototype complete as a stack of PRs (`echo/01-…` through `echo/06-…`), each headlessly testable — the full orchestrator/worker/artifact loop runs with no audio and no API key (text REPL + fixtures + FakeTransport event replay). Only the mic/speaker and the real Realtime connection need your Mac. A stretch `code` task kind (headless `codex exec` / `claude -p` subprocess) registers automatically when one of those CLIs is on PATH.
