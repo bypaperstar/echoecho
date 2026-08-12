@@ -143,6 +143,7 @@ def make_tool_handler(orch, port):
     """Contract A: the 4 tools, backed by the orchestrator + workspace."""
     from echo_app import config
     from echo_app.bus import TaskRequest
+    from echo_app.services import artifacts
 
     def handle(name, args):
         if name == "dispatch_task":
@@ -153,10 +154,17 @@ def make_tool_handler(orch, port):
         if name == "check_tasks":
             return {"tasks": orch.summaries(args.get("task_id"))}
         if name == "read_artifact":
-            path = config.WORKSPACE_DIR / os.path.basename(args.get("name", ""))
+            raw = args.get("name", "")
+            try:
+                path = artifacts.resolve(config.WORKSPACE_DIR, raw)
+            except ValueError as exc:
+                return {"name": raw, "error": str(exc)}
             if not path.is_file():
-                return {"name": args.get("name"), "error": "no such artifact"}
-            return {"name": path.name, "content": path.read_text()}
+                return {"name": raw, "error": "no such artifact"}
+            try:
+                return {"name": raw, "content": path.read_text(encoding="utf-8")}
+            except (UnicodeDecodeError, OSError):
+                return {"name": raw, "error": "not a text file"}
         if name == "end_session":
             port.session.begin_ending("end_session_tool")
             return {"status": "ending"}

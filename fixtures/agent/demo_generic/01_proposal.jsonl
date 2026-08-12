@@ -1,0 +1,4 @@
+{"type": "system", "subtype": "init", "session_id": "fake-offsite-1"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Drafting the proposal at offsite/proposal.md."}]}}
+{"type": "_write", "file": "offsite/proposal.md", "content": "# Team Offsite in Lisbon\n\nA one-page proposal for a 3-day team offsite in Lisbon this fall.\n\n## Why Lisbon\n- Direct flights for everyone\n- Great food, walkable, sunny in October\n\n## Next steps\n- Pick dates\n- Book a venue\n"}
+{"type": "result", "subtype": "success", "is_error": false, "session_id": "fake-offsite-1", "result": "Drafted offsite/proposal.md — a one-page Lisbon offsite proposal with a why-Lisbon case and next steps."}

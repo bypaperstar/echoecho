@@ -2,22 +2,19 @@
 
 Chaos: kill the FakeTransport mid-session -> reconnect with backoff, or (no
 factory / attempts exhausted) a clean return to IDLE with the wake loop
-re-armed. Plus: '[since last session]' wake injection, code_stub PATH-gated
-registration, prompt tuning, viewer section-flash assets.
+re-armed. Plus: '[since last session]' wake injection, prompt tuning, viewer
+section-flash assets.
 Sync tests calling asyncio.run internally (no pytest-asyncio).
 """
 import asyncio
-import importlib
-import os
-import stat
 from pathlib import Path
 
 from echo_app import config
 from echo_app.bus import Task, TaskRequest, TaskResult
 from echo_app.conversation.realtime import (FakeTransport, RealtimeClient,
-                                            VOICE_PROMPT)
+                                            voice_prompt)
 from echo_app.conversation.session import Session
-from echo_app.orchestrator.core import Orchestrator, WorkerContext
+from echo_app.orchestrator.core import Orchestrator
 
 
 class FakeClock:
@@ -201,75 +198,21 @@ def test_orchestrator_results_since():
     assert orch.results_since(120.0) == []  # t1 finished before the marker
 
 
-# -- code_stub stretch worker -----------------------------------------------------
-
-
-def _reload_code_stub():
-    import echo_app.workers.code_stub as cs
-    return importlib.reload(cs)
-
-
-def test_code_stub_registers_only_if_cli_on_path(tmp_path):
-    from echo_app.workers.base import REGISTRY
-    old_path = os.environ.get("PATH", "")
-    try:
-        # no CLIs on PATH -> not registered
-        REGISTRY.pop("code", None)
-        os.environ["PATH"] = str(tmp_path / "nowhere")
-        cs = _reload_code_stub()
-        assert cs.find_cli() is None
-        assert "code" not in REGISTRY
-        # fake `codex` on PATH -> registered, and run_code shells out to it
-        fake = tmp_path / "codex"
-        fake.write_text("#!/bin/sh\necho \"patched hello.py in $PWD\"\n")
-        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-        os.environ["PATH"] = str(tmp_path)
-        cs = _reload_code_stub()
-        assert cs.find_cli() == ["codex", "exec"]
-        assert "code" in REGISTRY
-        task = Task(id="t1", request=TaskRequest(kind="code",
-                                                 instructions="add a hello script"))
-        ctx = WorkerContext(workspace=tmp_path)
-        result = asyncio.run(REGISTRY["code"](task, ctx))
-        assert result.say.startswith("Code task finished: patched hello.py")
-        assert str(tmp_path) in result.data["output"]  # ran with cwd=workspace
-        assert result.priority == "interrupt"
-    finally:
-        os.environ["PATH"] = old_path
-        REGISTRY.pop("code", None)
-        _reload_code_stub()  # re-register (or not) per the real PATH
-
-
-def test_code_stub_nonzero_exit_is_an_error_result(tmp_path):
-    import echo_app.workers.code_stub as cs
-    fake = tmp_path / "codex"
-    fake.write_text("#!/bin/sh\necho boom\nexit 3\n")
-    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    old_path = os.environ.get("PATH", "")
-    try:
-        os.environ["PATH"] = str(tmp_path)
-        task = Task(id="t1", request=TaskRequest(kind="code", instructions="x"))
-        result = asyncio.run(cs.run_code(task, WorkerContext(workspace=tmp_path)))
-        assert result.data["error"] == "exit 3"
-        assert "failed" in result.say
-    finally:
-        os.environ["PATH"] = old_path
-
-
 # -- prompt tuning + viewer flash polish -----------------------------------------
 
 
 def test_system_prompt_tuned_for_voice():
-    p = config.SYSTEM_PROMPT
+    from echo_app.workers.base import load_all
+    load_all()
+    p = config.system_prompt()
     assert "short" in p                       # short utterances
     assert "ack BEFORE dispatching" in p      # verbal ack before dispatch
     assert "weave" in p                       # weave results naturally
     assert "Never read URLs" in p             # never read URLs aloud
     assert "dispatch_task" in p and "end_session" in p
+    assert "agent.run" in p                   # generated kinds line (PR 10)
     # the realtime voice prompt builds on the same tuned prompt
-    assert p in VOICE_PROMPT
-    from echo_app.conversation import textmode
-    assert textmode.SYSTEM_PROMPT == p
+    assert p in voice_prompt()
 
 
 def test_viewer_index_has_section_flash():

@@ -31,7 +31,8 @@ def _sections(markdown):
     return [m.group(1).strip() for m in re.finditer(r"^## +(.+)$", markdown, re.M)]
 
 
-@register("learn.outline")
+@register("learn.outline",
+          description="start Wikipedia-grounded study notes on a topic")
 async def run_outline(task, ctx):
     web = _web(ctx)
     topic = task.request.instructions or task.request.args.get("topic", "")
@@ -58,7 +59,10 @@ async def run_outline(task, ctx):
         artifacts_touched=["notes.md"])
 
 
-@register("learn.deep_dive")
+@register("learn.deep_dive",
+          description="expand one section of the study notes",
+          arg_schema={"topic": {"type": "string"},
+                      "section": {"type": "string"}})
 async def run_deep_dive(task, ctx):
     web = _web(ctx)
     section = task.request.args.get("section") or task.request.instructions

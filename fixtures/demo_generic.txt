@@ -1,0 +1,16 @@
+# Generic demo — the old demo-1/-2 asks through ONE kind: agent.run.
+# Keyless: run with ECHO_FAKE_AGENT_SCRIPT=fixtures/agent/demo_generic so
+# FakeAgentCLI replays the three recorded agent runs in order.
+echo echo
+let's write a one-page proposal for a team offsite in lisbon
+!dispatch_task {"kind": "agent.run", "instructions": "write a one-page proposal for a team offsite in Lisbon at offsite/proposal.md"}
+~wait 0.5
+add three goals and a two-day agenda, and rough out a budget
+!dispatch_task {"kind": "agent.run", "instructions": "add three goals (team bonding, planning next year, shipping the demo) and a two-day agenda to offsite/proposal.md, and rough out a per-person budget in offsite/budget.csv"}
+~wait 0.5
+now add pad thai ingredients to my grocery list
+!dispatch_task {"kind": "agent.run", "instructions": "merge pad thai ingredients into grocery.md, grouped by aisle, keeping a Meals section"}
+~wait 0.5
+read me just the goals
+!read_artifact {"name": "offsite/proposal.md"}
+that's it

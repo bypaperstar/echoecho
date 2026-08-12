@@ -1,41 +1,58 @@
 """Live workspace viewer: stdlib HTTP + SSE, no dependencies.
 
-GET /            -> index.html (marked.js tabs page + live transcript pane)
-GET /doc?f=name  -> raw markdown; basename'd, *.md only, inside workspace only
+GET /            -> index.html (file tree + type-aware pane + live transcript)
+GET /doc?f=path  -> any visible workspace file (relative path, subdirs ok);
+                    resolution goes through artifacts.resolve, so traversal
+                    and dotfiles 404. Markdown/images/PDF get their real
+                    content type; other text is served as text/plain (never
+                    text/html — the viewer must not execute workspace files);
+                    undecodable bytes fall back to application/octet-stream.
 GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
-                    and whenever a 250ms mtime poll sees a change to a *.md
-                    doc OR to the .events.jsonl feed
+                    and whenever a 250ms poll sees any visible file change
+                    OR an append to the .events.jsonl feed
 
 Workspace writes are atomic (tmp + os.rename), so /doc never serves a
 half-written file.
 """
 import json
-import os
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from echo_app.services import artifacts
 
 POLL_INTERVAL = 0.25
 INDEX = Path(__file__).with_name("index.html")
 EVENTS_FEED = ".events.jsonl"  # echo_app.events feed inside the workspace
 TRANSCRIPT_LIMIT = 400
 
+# Types the browser may render natively; everything else is text/plain or a
+# download. Deliberately no text/html: workspace files never run as pages.
+NATIVE_TYPES = {
+    ".md": "text/markdown; charset=utf-8",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+}
+
 
 def workspace_state(workspace):
-    """{name: (mtime, size, inode)} for visible workspace *.md files.
+    """{relative posix path: (mtime, size, inode)} for every visible
+    workspace file, recursively (dotted files/dirs excluded).
 
     Size + inode matter: coarse filesystem mtime granularity can hide two
     atomic writes in the same tick, but tmp+rename always swaps the inode.
     """
     ws = Path(workspace)
     state = {}
-    if ws.is_dir():
-        for p in sorted(ws.iterdir()):
-            if p.is_file() and p.suffix == ".md" and not p.name.startswith("."):
-                st = p.stat()
-                state[p.name] = (st.st_mtime, st.st_size, st.st_ino)
+    for name in artifacts.list_files(ws):
+        try:
+            st = (ws / name).stat()
+        except OSError:
+            continue  # deleted between listing and stat
+        state[name] = (st.st_mtime, st.st_size, st.st_ino)
     return state
 
 
@@ -96,22 +113,31 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # workspace files are agent-written: text/plain must stay text/plain
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
     def _doc(self, parsed):
         qs = urllib.parse.parse_qs(parsed.query)
         raw = (qs.get("f") or [""])[0]
-        name = os.path.basename(raw)  # no traversal, ever
-        if not name.endswith(".md") or name.startswith("."):
-            self._respond(404, "text/plain", b"not a workspace markdown file")
+        try:
+            path = artifacts.resolve(self.workspace, raw)  # no traversal, ever
+        except ValueError:
+            self._respond(404, "text/plain", b"not a workspace file")
             return
-        path = Path(self.workspace) / name
         if not path.is_file():
             self._respond(404, "text/plain", b"no such file")
             return
-        self._respond(200, "text/markdown; charset=utf-8",
-                      path.read_bytes())
+        body = path.read_bytes()
+        ctype = NATIVE_TYPES.get(path.suffix.lower())
+        if ctype is None:
+            try:
+                body.decode("utf-8")
+                ctype = "text/plain; charset=utf-8"
+            except UnicodeDecodeError:
+                ctype = "application/octet-stream"
+        self._respond(200, ctype, body)
 
     def _events(self):
         self.send_response(200)
@@ -123,8 +149,8 @@ class _Handler(BaseHTTPRequestHandler):
             while not self.stopping.is_set():
                 docs = workspace_state(self.workspace)
                 state = dict(docs)
-                # non-doc sentinel: a transcript append must also fire SSE,
-                # but "files" below stays *.md-only (the tabs JS depends on it)
+                # non-file sentinel: a transcript append must also fire SSE,
+                # but never leak into the "files" list the tree JS renders
                 state["__events__"] = events_feed_state(self.workspace)
                 if state != last:
                     last = state

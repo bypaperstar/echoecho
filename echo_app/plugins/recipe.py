@@ -34,7 +34,10 @@ def _site_name(url):
     return names.get(host, host)
 
 
-@register("recipe.search")
+@register("recipe.search",
+          description="find a recipe on the verified sites and chain a "
+                      "grocery.merge of its ingredients",
+          arg_schema={"max_minutes": {"type": "integer"}})
 async def run(task, ctx):
     web = _web(ctx)
     query = task.request.instructions or task.request.args.get("dish", "")

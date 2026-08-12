@@ -15,7 +15,7 @@ from echo_app.conversation.realtime import (FakeTransport, PlaybackTracker,
                                             RealtimeClient, build_session_update,
                                             pcm16_ms)
 from echo_app.conversation.session import Session
-from echo_app.conversation.textmode import TOOLS
+from echo_app.conversation.textmode import build_tools
 
 FIX = config.FIXTURES_DIR / "realtime"
 
@@ -78,19 +78,22 @@ def test_session_update_is_first_send_with_full_config():
     assert s["tool_choice"] == "auto"
 
 
-def test_four_tool_schema_matches_contract_a():
+def test_four_tool_schema_matches_contract_a(monkeypatch):
+    monkeypatch.delenv("ECHO_PLUGINS", raising=False)
+    from echo_app.workers.base import load_all
+    load_all()
     tools = build_session_update()["session"]["tools"]
     assert [t["name"] for t in tools] == list(TOOL_NAMES)
-    assert tools == TOOLS  # byte-identical to the Contract A schema (textmode)
+    assert tools == build_tools()  # identical to the Contract A schema (textmode)
     by_name = {t["name"]: t for t in tools}
     for t in tools:
         assert t["type"] == "function"
         assert t["parameters"]["type"] == "object"
     dispatch = by_name["dispatch_task"]["parameters"]
     assert dispatch["required"] == ["kind", "instructions"]
-    assert set(dispatch["properties"]["kind"]["enum"]) == {
-        "doc.edit", "recipe.search", "grocery.merge",
-        "learn.outline", "learn.deep_dive"}
+    # the enum is GENERATED from the registry: one generic kind by default,
+    # demo plugins stay dispatchable but unadvertised (PR 10)
+    assert dispatch["properties"]["kind"]["enum"] == ["agent.run"]
     assert by_name["read_artifact"]["parameters"]["required"] == ["name"]
     assert "required" not in by_name["check_tasks"]["parameters"]
     assert by_name["end_session"]["parameters"]["properties"] == {}

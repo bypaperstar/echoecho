@@ -1,0 +1,4 @@
+{"type": "system", "subtype": "init", "session_id": "fake-grocery-1"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Merging pad thai ingredients into grocery.md, grouped by aisle."}]}}
+{"type": "_write", "file": "grocery.md", "content": "# Grocery List\n\n## Produce\n- garlic (2 cloves)\n- lime (1)\n- bean sprouts (2 cups)\n- green onions (4)\n\n## Pantry\n- rice noodles (250 g)\n- fish sauce\n- tamarind paste\n- peanuts (1/2 cup)\n\n## Protein\n- chicken thighs (300 g)\n- eggs (2)\n\n## Meals\n- Pad Thai\n"}
+{"type": "result", "subtype": "success", "is_error": false, "session_id": "fake-grocery-1", "result": "Merged 10 pad thai ingredients into grocery.md, grouped by aisle, with Pad Thai in the Meals section."}

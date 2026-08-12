@@ -17,10 +17,15 @@ from pathlib import Path
 from echo_app import config, events
 from echo_app.conversation.port import ConversationPort
 from echo_app.conversation.session import ACTIVE, ENDING, Session
-from echo_app.conversation.textmode import SYSTEM_PROMPT, TOOLS
+from echo_app.conversation.textmode import build_tools
 
-VOICE_PROMPT = SYSTEM_PROMPT + (
-    " You are speaking out loud: keep each turn to a sentence or two.")
+VOICE_SUFFIX = " You are speaking out loud: keep each turn to a sentence or two."
+
+
+def voice_prompt():
+    """Tuned prompt + speaking suffix, built at call time so the generated
+    kinds line reflects whatever load_all() registered."""
+    return config.system_prompt() + VOICE_SUFFIX
 SIGN_OFF_INSTRUCTIONS = ("The session is ending. Say a brief, friendly "
                          "one-sentence goodbye.")
 RECONNECT_SECS = 55 * 60  # 60-min API cap; summary+reconnect a bit before it
@@ -161,12 +166,12 @@ class FakeTransport:
         return [e.get("type") for e in self.sent]
 
 
-def build_session_update(instructions=VOICE_PROMPT):
+def build_session_update(instructions=None):
     """GA session.update: instructions, the exact 4 Contract-A tools, pcm16
     24 kHz in/out, semantic VAD with barge-in, input transcription on."""
     return {"type": "session.update", "session": {
         "type": "realtime",
-        "instructions": instructions,
+        "instructions": instructions or voice_prompt(),
         "output_modalities": ["audio"],
         "audio": {
             "input": {
@@ -177,7 +182,7 @@ def build_session_update(instructions=VOICE_PROMPT):
             },
             "output": {"format": {"type": "audio/pcm", "rate": 24000}},
         },
-        "tools": TOOLS,
+        "tools": build_tools(),
         "tool_choice": "auto",
     }}
 
@@ -192,7 +197,7 @@ class RealtimeClient(ConversationPort):
     def __init__(self, transport, session=None, out=print, poll_interval=0.25,
                  on_audio=None, flush_playback=None, transport_factory=None,
                  max_session_secs=RECONNECT_SECS, sign_off_max_polls=40,
-                 instructions=VOICE_PROMPT, since_last_session=None,
+                 instructions=None, since_last_session=None,
                  max_reconnects=3, reconnect_backoff=1.0):
         self.transport = transport
         self.session = session or Session()

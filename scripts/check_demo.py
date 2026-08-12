@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Assertions for scripts/demo_check.sh (the merge gate).
 
-Usage: python3 scripts/check_demo.py <1|2|3>
-Checks the final workspace/*.md contents and the .tasks.jsonl event sequence
-left behind by the corresponding fixtures/demoN.txt scripted run.
+Usage: python3 scripts/check_demo.py <1|2|3|generic>
+Checks the final workspace contents and the .tasks.jsonl event sequence left
+behind by the corresponding fixtures/demoN.txt scripted run ("generic" =
+fixtures/demo_generic.txt, the same asks through one agent.run kind).
 """
 import json
 import sys
@@ -89,9 +90,37 @@ def check_demo3():
     check(evs[3]["artifacts_touched"] == ["notes.md"], "deep dive touched notes.md")
 
 
+def check_demo_generic():
+    """PLAN-GENERIC gate: the old demo-1/-2 asks pass headless as agent.run
+    fixtures — subdirectories, a non-markdown artifact, one generic kind."""
+    doc = read("offsite/proposal.md")
+    check("# Team Offsite in Lisbon" in doc, "offsite/proposal.md has the title")
+    check("## Goals" in doc and "- Team bonding" in doc
+          and "- Planning next year" in doc and "- Shipping the demo" in doc,
+          "proposal Goals section has the three goals")
+    check("## Agenda" in doc and "Day 1" in doc and "Day 2" in doc,
+          "proposal has a two-day Agenda section")
+    check(read("offsite/budget.csv").startswith("item,"),
+          "agent produced a non-markdown artifact (offsite/budget.csv)")
+    g = read("grocery.md")
+    check("## Meals" in g and "Pad Thai" in g and "- fish sauce" in g,
+          "grocery.md merged by the generic agent, Meals section kept")
+    evs = events()
+    check(seq(evs) == [("queued", "agent.run"), ("done", "agent.run")] * 3,
+          ".tasks.jsonl: three queued->done agent.run round trips, in order")
+    check(evs[3]["artifacts_touched"] == ["offsite/budget.csv",
+                                          "offsite/proposal.md"],
+          "touched-file detection saw both second-run artifacts")
+    for e in evs:
+        if e["event"] == "done":
+            check(e["priority"] == "interrupt",
+                  "%s spoke up (interrupt)" % e["task_id"])
+
+
 def main():
     n = sys.argv[1]
-    {"1": check_demo1, "2": check_demo2, "3": check_demo3}[n]()
+    {"1": check_demo1, "2": check_demo2, "3": check_demo3,
+     "generic": check_demo_generic}[n]()
     print("demo %s assertions all passed" % n)
 
 

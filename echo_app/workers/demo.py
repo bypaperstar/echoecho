@@ -5,7 +5,7 @@ from echo_app.bus import TaskResult
 from echo_app.workers.base import register
 
 
-@register("sleep.echo")
+@register("sleep.echo", advertise=False)  # smoke-test kind, never in the enum
 async def run(task, ctx):
     await asyncio.sleep(float(task.request.args.get("sleep", 0.3)))
     return TaskResult(say="Echoing back: %s" % (task.request.instructions or "(nothing)"),

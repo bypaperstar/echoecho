@@ -9,7 +9,7 @@ See **[PLAN.md](PLAN.md)** for the full architecture, decisions (and what was re
 1. **Wake word** — Vosk keyword spotting for "echo echo" (open source, no keys, no training).
 2. **Voice loop** — OpenAI Realtime API speech-to-speech (`gpt-realtime-2.1[-mini]`), semantic VAD, barge-in, reconnect-with-backoff so the daemon never dies.
 3. **Orchestrator** — a generic in-process task queue: the voice agent dispatches tasks, async workers do them, results are ranked (interrupt / ambient / silent) and injected back into the live conversation at safe turn boundaries. Tasks that finish while Echo is asleep are surfaced on the next wake as a "[since last session]" note.
-4. **Live workspace** — everything workers produce is markdown in `workspace/`, rendered live in a browser tab via a tiny SSE auto-refresh viewer (changed sections flash briefly).
+4. **Live workspace** — everything workers produce lands in `workspace/` (any file type, subdirectories welcome), rendered live in a browser tab via a tiny SSE auto-refresh viewer: a file tree, type-aware rendering (markdown, code, images, downloads), changed markdown sections flash briefly.
 
 ## Mac runbook (from zero to talking)
 
@@ -97,8 +97,15 @@ Full line-by-line scripts with timestamps: [`scripts/demo_cheatsheet.md`](script
 2. **Groceries + recipes** — "Echo echo … help me plan dinners this week, I'm thinking pad thai one night." (then halloumi, "drop the fish sauce", "that's it")
 3. **Learning** — "Echo echo. Teach me about fermentation in food." (then "sourdough", answer the quiz question, "that's it")
 
-Headless merge gate (runs all three scripted, asserts artifacts + task log,
-then the full test suite): `bash scripts/demo_check.sh`.
+Since PR 10 ([PLAN-GENERIC.md](PLAN-GENERIC.md)) the product's one advertised
+kind is **`agent.run`**: any ask is handed to a headless coding agent
+(`claude -p` / `codex exec`) working inside `workspace/`. The demo workers
+above live on as optional fast-path plugins — dispatchable always, advertised
+to the voice model only with `ECHO_PLUGINS=1`.
+
+Headless merge gate (runs all three scripted demos plus the generic agent.run
+rewrite of them, asserts artifacts + task log, then the full test suite):
+`bash scripts/demo_check.sh`.
 
 ### Troubleshooting
 
@@ -119,6 +126,10 @@ then the full test suite): `bash scripts/demo_check.sh`.
   (FakeLLM fixtures; live keyless WordPress/Wikipedia endpoints for search),
   workspace + `.tasks.jsonl` asserted, full pytest suite.
 - `ECHO_TEXT=1 ECHO_FAKE_LLM=1 python3 echo.py --script fixtures/smoke.txt` — 60-line smoke run.
+- `ECHO_FAKE_AGENT_SCRIPT=fixtures/agent/demo_generic python3 echo.py --script fixtures/demo_generic.txt`
+  — the generic demo: `agent.run` replayed from recorded stream-json fixtures
+  (a directory is consumed in sorted order, one file per task; a single
+  `.jsonl` replays for every task).
 - `ECHO_FAKE_LLM=1 python3 echo.py --text` — interactive keyless REPL.
 - `python3 -m pytest tests/ -q` — everything except `-m network` live-endpoint tests.
 
@@ -193,4 +204,4 @@ barge-in weirdness. `meta.json`'s `end_reason` tells you how sessions die
 
 ## Status
 
-Prototype complete as a stack of PRs (`echo/01-…` through `echo/06-…`), each headlessly testable — the full orchestrator/worker/artifact loop runs with no audio and no API key (text REPL + fixtures + FakeTransport event replay). Only the mic/speaker and the real Realtime connection need your Mac. A stretch `code` task kind (headless `codex exec` / `claude -p` subprocess) registers automatically when one of those CLIs is on PATH.
+Prototype complete as a stack of PRs (`echo/01-…` through `echo/06-…`), each headlessly testable — the full orchestrator/worker/artifact loop runs with no audio and no API key (text REPL + fixtures + FakeTransport event replay). Only the mic/speaker and the real Realtime connection need your Mac. The v2 generic build-out (`echo/10-…`, see [PLAN-GENERIC.md](PLAN-GENERIC.md)) replaces the stretch `code` kind with the first-class `agent.run` worker: the first agent CLI found on PATH (`claude`, then `codex`) runs each task with the workspace as its cwd.
