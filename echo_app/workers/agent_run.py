@@ -24,6 +24,8 @@ ARG_SCHEMA = {}
 
 STDERR_TAIL = 2000
 SAY_LIMIT = 240
+MAX_LINE = 8 * 2 ** 20  # claude tool_result lines embed whole files
+READ_CHUNK = 65536
 
 
 def _speakable(text, limit=SAY_LIMIT):
@@ -34,30 +36,57 @@ def _speakable(text, limit=SAY_LIMIT):
 
 
 def _snapshot(workspace):
-    return {name: artifacts.mtime(workspace, name)
+    """{name: (mtime, size, inode)} — the same signature triple the viewer
+    polls with, so same-tick rewrites still register (rename swaps the inode)."""
+    return {name: artifacts.stat_key(workspace, name)
             for name in artifacts.list_files(workspace)}
 
 
 def _hook(workspace, ev):
     if ev.get("type") == "_write":
-        artifacts.write_atomic(workspace, ev.get("file", ""),
-                               ev.get("content", ""))
+        try:
+            artifacts.write_atomic(workspace, ev.get("file", ""),
+                                   ev.get("content", ""))
+        except (ValueError, OSError):
+            pass  # a broken fixture write shows up in the test's asserts
+
+
+async def _lines(stream, max_line=MAX_LINE):
+    """Decoded stdout lines. asyncio's readline() RAISES past its 64 KiB
+    limit and real agent CLIs routinely exceed it (tool results embed whole
+    files), so split lines ourselves and silently drop anything over
+    max_line instead of failing the task."""
+    buf = b""
+    skipping = False
+    while True:
+        chunk = await stream.read(READ_CHUNK)
+        if not chunk:
+            if buf and not skipping:
+                yield buf.decode("utf-8", "replace")
+            return
+        buf += chunk
+        while True:
+            nl = buf.find(b"\n")
+            if nl == -1:
+                if len(buf) > max_line:
+                    buf = b""
+                    skipping = True  # drop the rest of this oversized line
+                break
+            line, buf = buf[:nl], buf[nl + 1:]
+            if skipping:
+                skipping = False
+            elif line.strip():
+                yield line.decode("utf-8", "replace")
 
 
 async def _pump(stream, runtime, workspace, state):
     """Parse the CLI's stdout JSONL into the normalized event stream."""
-    while True:
-        line = await stream.readline()
-        if not line:
-            return
-        line = line.decode("utf-8", "replace").strip()
-        if not line:
-            continue
+    async for line in _lines(stream):
         try:
             raw = json.loads(line)
         except ValueError:
             continue  # CLIs print the odd non-JSON banner; never fatal
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
             continue
         if raw.get("type", "").startswith("_"):
             _hook(workspace, raw)
@@ -77,7 +106,14 @@ async def _pump(stream, runtime, workspace, state):
 
 
 async def _drain(stream, state):
-    state["stderr"] = (await stream.read()).decode("utf-8", "replace")
+    """Keep a bounded stderr tail — never the whole stream in memory."""
+    tail = b""
+    while True:
+        chunk = await stream.read(READ_CHUNK)
+        if not chunk:
+            break
+        tail = (tail + chunk)[-4 * STDERR_TAIL:]
+    state["stderr"] = tail.decode("utf-8", "replace")
 
 
 @register(KIND, description=DESCRIPTION, arg_schema=ARG_SCHEMA)
@@ -99,9 +135,21 @@ async def run_agent(task, ctx):
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     state = {"progress": [], "result": "", "error": None,
              "session_id": None, "stderr": ""}
-    await asyncio.gather(_pump(proc.stdout, runtime, ctx.workspace, state),
-                         _drain(proc.stderr, state))
-    rc = await proc.wait()
+    pump = asyncio.ensure_future(_pump(proc.stdout, runtime,
+                                       ctx.workspace, state))
+    drain = asyncio.ensure_future(_drain(proc.stderr, state))
+    try:
+        await asyncio.gather(pump, drain)
+        rc = await proc.wait()
+    finally:
+        # a worker exception must NEVER orphan a live agent: nobody would be
+        # reading its pipes, so it would block forever, still burning tokens
+        pump.cancel()
+        drain.cancel()
+        await asyncio.gather(pump, drain, return_exceptions=True)
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
     touched = sorted(name for name, mt in _snapshot(ctx.workspace).items()
                      if before.get(name) != mt)

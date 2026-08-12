@@ -92,6 +92,27 @@ def test_silent_results_only_hit_task_table(tmp_path):
     assert any("done quietly" in ln for ln in lines)
 
 
+def test_workspace_snapshot_fanout_is_capped(tmp_path):
+    """An agent touching a whole tree must not flood the conversation with
+    one ambient injection per file: cap + one summary line."""
+    from echo_app.services import artifacts
+
+    names = ["f%02d.md" % i for i in range(8)]
+    for n in names:
+        artifacts.write_atomic(tmp_path, n, "content of " + n)
+
+    async def sweeper(task, ctx):
+        return TaskResult(say="swept", priority="ambient",
+                          artifacts_touched=names)
+
+    _, injections = run_orch({"sweep": sweeper}, [TaskRequest(kind="sweep")],
+                             tmp_path)
+    snaps = [i for i in injections if i.text.startswith("[workspace]")]
+    assert len(snaps) == 6  # 5 file snapshots + 1 "and N more" summary
+    assert "and 3 more files changed" in snaps[-1].text
+    assert all(i.priority == "ambient" for i in snaps)
+
+
 def test_summaries_single_task(tmp_path):
     orch, _ = run_orch(load_all(),
                        [TaskRequest(kind="sleep.echo", instructions="x",

@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <title>Echo — live session</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
 <style>
   :root {
     --bg: #0e1116; --panel: #161b22; --panel-2: #1c2330;
@@ -216,7 +219,18 @@ function sectionMap(root) {
 
 function showMarkdown(name, text) {
   const content = document.getElementById('content');
-  content.innerHTML = marked.parse(text);
+  // workspace markdown is agent-written = untrusted: sanitize before it
+  // touches innerHTML; with no sanitizer (offline), render as plain text
+  if (window.DOMPurify) {
+    content.innerHTML = DOMPurify.sanitize(marked.parse(text));
+  } else {
+    const pre = document.createElement('pre');
+    pre.className = 'raw';
+    pre.textContent = text;
+    content.innerHTML = '';
+    content.appendChild(pre);
+    return;
+  }
   const now = sectionMap(content), prev = lastSections[name];
   if (prev) {  // flash every element of a new or changed h2 section
     let key = '(intro)';
@@ -234,10 +248,13 @@ async function show(name) {
   const url = '/doc?f=' + encodeURIComponent(name);
   const content = document.getElementById('content');
   const ext = extOf(name);
-  if (IMAGE_EXTS.includes(ext)) {  // cache-bust so touched images refresh
+  if (IMAGE_EXTS.includes(ext)) {
+    // mtime as cache-buster: refetch when the file changed, browser-cache
+    // (no flicker) on the unrelated reloads SSE fires for other files
+    const meta = files.find(f => f.name === name);
     content.innerHTML = '';
     const img = document.createElement('img');
-    img.src = url + '&t=' + Date.now();
+    img.src = url + '&t=' + (meta ? meta.mtime : Date.now());
     content.appendChild(img);
     return;
   }
@@ -246,12 +263,16 @@ async function show(name) {
   const ctype = r.headers.get('Content-Type') || '';
   if (ext === 'md') {
     showMarkdown(name, await r.text());
-  } else if (ctype.startsWith('text/')) {  // code/config/CSV: raw monospace
+  } else if (ctype.startsWith('text/')) {  // code/config/CSV: highlighted
     const pre = document.createElement('pre');
     pre.className = 'raw';
-    pre.textContent = await r.text();
+    const code = document.createElement('code');
+    code.className = 'language-' + ext;
+    code.textContent = await r.text();  // textContent: hljs gets inert input
+    pre.appendChild(code);
     content.innerHTML = '';
     content.appendChild(pre);
+    if (window.hljs) hljs.highlightElement(code);
   } else {  // pdf/binary: hand off to the browser
     content.innerHTML = '';
     const a = document.createElement('a');

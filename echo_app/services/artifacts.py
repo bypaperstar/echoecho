@@ -12,18 +12,24 @@ from pathlib import Path
 
 def resolve(workspace, name):  # type: (...) -> Path
     """Map a workspace-relative name to an absolute Path or raise ValueError.
-    Rejects absolute paths, traversal, and any dotted component — dotfiles
-    (.tasks.jsonl, .events.jsonl, tmp files) are Echo-internal, never
-    artifacts."""
+    Rejects absolute paths, home-dir paths, traversal, and any dotted
+    component — dotfiles (.tasks.jsonl, .events.jsonl, tmp files) are
+    Echo-internal, never artifacts. The lexical checks are backstopped by a
+    realpath containment check: agents run shells inside the workspace, so a
+    planted symlink must not turn a clean-looking name into an escape."""
     raw = str(name or "").strip()
     if not raw:
         raise ValueError("empty artifact name")
     rel = Path(os.path.normpath(raw))
-    if rel.is_absolute() or raw.startswith("~"):
+    if rel.is_absolute() or rel.parts[:1] == ("~",):
         raise ValueError("artifact name must be workspace-relative: %r" % raw)
     if any(part.startswith(".") for part in rel.parts):  # covers ".." too
         raise ValueError("artifact name escapes the workspace: %r" % raw)
-    return Path(workspace) / rel
+    path = Path(workspace) / rel
+    ws_real = os.path.realpath(str(workspace))
+    if not os.path.realpath(str(path)).startswith(ws_real + os.sep):
+        raise ValueError("artifact name escapes the workspace: %r" % raw)
+    return path
 
 
 def read(workspace, name, default=""):  # type: (...) -> str
@@ -54,6 +60,17 @@ def mtime(workspace, name):  # type: (...) -> float
         return resolve(workspace, name).stat().st_mtime
     except (ValueError, OSError):
         return 0.0
+
+
+def stat_key(workspace, name):
+    """(mtime, size, inode) change signature, or None if unreadable. Size +
+    inode matter: coarse filesystem mtime granularity can hide two atomic
+    writes in the same tick, but tmp+rename always swaps the inode."""
+    try:
+        st = resolve(workspace, name).stat()
+    except (ValueError, OSError):
+        return None
+    return (st.st_mtime, st.st_size, st.st_ino)
 
 
 def write_atomic(workspace, name, content):  # type: (...) -> Path

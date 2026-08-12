@@ -17,6 +17,9 @@ from echo_app.orchestrator.ranker import rank
 from echo_app.services import artifacts
 
 
+SNAPSHOT_CAP = 5  # ambient [workspace] injections per finished task
+
+
 def _compact(text, limit=500):
     """Squash a markdown file to one speakable line for an ambient injection."""
     joined = " / ".join(ln.strip() for ln in text.splitlines() if ln.strip())
@@ -125,13 +128,22 @@ class Orchestrator:
             self.on_injection(Injection(
                 text="[task %s done] %s" % (task.id, result.say),
                 priority=priority))
-        # ambient doc snapshot so the agent can answer "read me the goals"
-        for name in result.artifacts_touched:
+        # ambient doc snapshots so the agent can answer "read me the goals" —
+        # capped: an agent.run that touches a whole tree must not flood the
+        # conversation context with one injection per file
+        touched = result.artifacts_touched
+        for name in touched[:SNAPSHOT_CAP]:
             snap = _compact(artifacts.read(self.ctx.workspace, name))
-            if snap:
+            if snap:  # binary/unreadable files read back empty: skipped
                 self.on_injection(Injection(
                     text="[workspace] %s now contains: %s" % (name, snap),
                     priority="ambient"))
+        if len(touched) > SNAPSHOT_CAP:
+            self.on_injection(Injection(
+                text="[workspace] …and %d more files changed (use "
+                     "read_artifact for any of them)"
+                     % (len(touched) - SNAPSHOT_CAP),
+                priority="ambient"))
 
     async def drain(self, timeout=5.0):
         """Test/demo helper: wait until inbox is empty and no worker is running."""

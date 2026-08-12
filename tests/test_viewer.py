@@ -96,6 +96,43 @@ def test_doc_serves_nested_files_and_types(server, tmp_path):
     assert status == 200 and ctype.startswith("text/plain")
 
 
+def test_doc_responses_carry_script_free_csp(server, tmp_path):
+    """SVG is a script-capable document type the viewer serves natively:
+    the CSP must keep agent-written SVGs inert when opened directly."""
+    artifacts.write_atomic(tmp_path, "evil.svg",
+                           '<svg xmlns="http://www.w3.org/2000/svg">'
+                           '<script>fetch("/pwn")</script></svg>')
+    host, port = server.httpd.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    try:
+        conn.request("GET", "/doc?f=evil.svg")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert resp.getheader("Content-Type") == "image/svg+xml"
+        csp = resp.getheader("Content-Security-Policy")
+        assert csp and "default-src 'none'" in csp
+        assert resp.getheader("X-Content-Type-Options") == "nosniff"
+        resp.read()
+    finally:
+        conn.close()
+
+
+def test_doc_refuses_workspace_escaping_symlink(server, tmp_path):
+    outside = tmp_path.parent / ("secret-%s.txt" % tmp_path.name)
+    outside.write_text("secret")
+    (tmp_path / "innocent.md").symlink_to(outside)
+    status, _ = get(server, "/doc?f=innocent.md")
+    assert status == 404
+
+
+def test_index_sanitizes_markdown_before_innerhtml(server):
+    status, body = get(server, "/")
+    assert status == 200
+    html = body.decode("utf-8")
+    assert "DOMPurify.sanitize" in html  # agent markdown never hits innerHTML raw
+    assert "purify.min.js" in html
+
+
 def test_sse_reload_within_500ms_of_touch(server, tmp_path):
     artifacts.write_atomic(tmp_path, "doc.md", "v1")
     host, port = server.httpd.server_address[:2]

@@ -4,6 +4,7 @@ runs keyless. Touched-file detection, control-hook writes (subdirs included),
 error paths, and the per-CLI adapters."""
 import asyncio
 import json
+import time
 from pathlib import Path
 
 from echo_app.bus import TaskRequest
@@ -236,6 +237,67 @@ def test_codex_style_run_takes_last_message_as_result(tmp_path):
     result = orch.tasks["t1"].result
     assert result.say == "All done, plan drafted."
     assert result.data["session_id"] == "th-1"
+
+
+# -- review hardening (PR 10) ---------------------------------------------------
+
+def test_oversized_stream_line_is_dropped_not_fatal(tmp_path):
+    """asyncio's readline() raises past 64 KiB and real claude stream-json
+    lines routinely exceed it (tool results embed whole files): the worker
+    must drop the line and keep the run alive."""
+    huge = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "x" * 300000}]}}
+    script = write_script(tmp_path, [
+        {"type": "system", "subtype": "init", "session_id": "s-big"},
+        huge,
+        {"type": "result", "subtype": "success", "is_error": False,
+         "session_id": "s-big", "result": "survived the flood"},
+    ])
+    orch, _, _ = run_orch(
+        [TaskRequest(kind="agent.run", instructions="big")],
+        tmp_path, extra={"agent_cli": FakeAgentCLI(script)})
+    task = orch.tasks["t1"]
+    assert task.status == "done"
+    assert task.result.say == "survived the flood"
+
+
+def test_worker_exception_kills_the_agent_subprocess(tmp_path):
+    """A bug anywhere in the parse path must not orphan a live agent: the
+    process is killed and reaped, so the task errors FAST instead of the
+    stderr drain waiting 30s for pipes to close."""
+    class EvilRuntime(ClaudeCLI):
+        name = "evil"
+
+        def command(self, prompt):
+            return ["sh", "-c", "echo '{\"type\": \"assistant\"}'; sleep 30"]
+
+        def parse_event(self, ev):
+            raise RuntimeError("adapter bug")
+
+    t0 = time.monotonic()
+    orch, _, _ = run_orch(
+        [TaskRequest(kind="agent.run", instructions="x")],
+        tmp_path, extra={"agent_cli": EvilRuntime()}, timeout=10.0)
+    assert time.monotonic() - t0 < 5.0, "subprocess was not reaped"
+    task = orch.tasks["t1"]
+    assert task.status == "error"
+    assert "adapter bug" in task.result.data["error"]
+
+
+def test_agent_subprocess_runs_with_cwd_workspace(tmp_path):
+    """The tier-1 sandbox contract: the agent's cwd IS the workspace."""
+    class PwdCLI(ClaudeCLI):
+        name = "pwd"
+
+        def command(self, prompt):
+            return ["sh", "-c",
+                    'printf \'{"type": "result", "subtype": "success", '
+                    '"is_error": false, "result": "%s"}\\n\' "$PWD"']
+
+    orch, _, ws = run_orch(
+        [TaskRequest(kind="agent.run", instructions="where am I")],
+        tmp_path, extra={"agent_cli": PwdCLI()})
+    assert orch.tasks["t1"].result.say == str(ws)
 
 
 # -- say-line hygiene ----------------------------------------------------------

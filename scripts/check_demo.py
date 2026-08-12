@@ -91,7 +91,7 @@ def check_demo3():
 
 
 def check_demo_generic():
-    """PLAN-GENERIC gate: the old demo-1/-2 asks pass headless as agent.run
+    """PLAN-GENERIC gate: all three v0 demo asks pass headless as agent.run
     fixtures — subdirectories, a non-markdown artifact, one generic kind."""
     doc = read("offsite/proposal.md")
     check("# Team Offsite in Lisbon" in doc, "offsite/proposal.md has the title")
@@ -105,9 +105,17 @@ def check_demo_generic():
     g = read("grocery.md")
     check("## Meals" in g and "Pad Thai" in g and "- fish sauce" in g,
           "grocery.md merged by the generic agent, Meals section kept")
+    check("recipetineats.com" in g, "grocery.md links the found recipe")
+    n = read("notes.md")
+    check(n.startswith("# Notes: fermentation in food"), "notes.md has the title")
+    check("## Sourdough" in n and "**Analogy:**" in n
+          and "**Check yourself:**" in n,
+          "deep dive filled Sourdough with an analogy + quiz question")
+    check("## Sources" in n and "wikipedia.org" in n,
+          "notes.md ends with linked sources")
     evs = events()
-    check(seq(evs) == [("queued", "agent.run"), ("done", "agent.run")] * 3,
-          ".tasks.jsonl: three queued->done agent.run round trips, in order")
+    check(seq(evs) == [("queued", "agent.run"), ("done", "agent.run")] * 5,
+          ".tasks.jsonl: five queued->done agent.run round trips, in order")
     check(evs[3]["artifacts_touched"] == ["offsite/budget.csv",
                                           "offsite/proposal.md"],
           "touched-file detection saw both second-run artifacts")

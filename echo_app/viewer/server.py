@@ -2,11 +2,14 @@
 
 GET /            -> index.html (file tree + type-aware pane + live transcript)
 GET /doc?f=path  -> any visible workspace file (relative path, subdirs ok);
-                    resolution goes through artifacts.resolve, so traversal
-                    and dotfiles 404. Markdown/images/PDF get their real
-                    content type; other text is served as text/plain (never
-                    text/html — the viewer must not execute workspace files);
-                    undecodable bytes fall back to application/octet-stream.
+                    resolution goes through artifacts.resolve, so traversal,
+                    dotfiles, and workspace-escaping symlinks 404.
+                    Markdown/images/PDF get their real content type; other
+                    text is served as text/plain (never text/html — the
+                    viewer must not execute workspace files); undecodable
+                    bytes fall back to application/octet-stream. Every /doc
+                    response carries a script-free CSP so script-capable
+                    types (SVG!) stay inert opened as documents.
 GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
                     and whenever a 250ms poll sees any visible file change
@@ -48,11 +51,9 @@ def workspace_state(workspace):
     ws = Path(workspace)
     state = {}
     for name in artifacts.list_files(ws):
-        try:
-            st = (ws / name).stat()
-        except OSError:
-            continue  # deleted between listing and stat
-        state[name] = (st.st_mtime, st.st_size, st.st_ino)
+        key = artifacts.stat_key(ws, name)  # None: deleted mid-poll, or a
+        if key is not None:                 # symlink escaping the workspace
+            state[name] = key
     return state
 
 
@@ -109,12 +110,14 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._respond(404, "text/plain", b"not found")
 
-    def _respond(self, status, ctype, body):
+    def _respond(self, status, ctype, body, csp=None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         # workspace files are agent-written: text/plain must stay text/plain
         self.send_header("X-Content-Type-Options", "nosniff")
+        if csp:
+            self.send_header("Content-Security-Policy", csp)
         self.end_headers()
         self.wfile.write(body)
 
@@ -137,7 +140,11 @@ class _Handler(BaseHTTPRequestHandler):
                 ctype = "text/plain; charset=utf-8"
             except UnicodeDecodeError:
                 ctype = "application/octet-stream"
-        self._respond(200, ctype, body)
+        # script-free CSP: an agent-written SVG (image/svg+xml is a
+        # script-capable document type) opened directly must stay inert
+        self._respond(200, ctype, body,
+                      csp="default-src 'none'; img-src 'self' data:; "
+                          "style-src 'unsafe-inline'; object-src 'self'")
 
     def _events(self):
         self.send_response(200)
