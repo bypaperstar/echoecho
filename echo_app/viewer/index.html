@@ -61,8 +61,10 @@
            min-width: 0; background: var(--panel); }
 
   /* ---------- transcript (left) ---------- */
-  #transcript { flex: 1 1 auto; overflow-y: auto; padding: 18px 22px 26px;
-                scroll-behavior: smooth; }
+  /* no scroll-behavior:smooth here: the feed is rebuilt on every refresh and
+     re-pinned with an instant scrollTop set; a smooth animation would fire
+     mid-flight scroll events that unpin stickToBottom during event bursts */
+  #transcript { flex: 1 1 auto; overflow-y: auto; padding: 18px 22px 26px; }
   #howto {
     margin: 0 0 16px; border: 1px solid var(--border); border-radius: 10px;
     background: var(--panel); font-size: 13.5px; color: var(--muted);
@@ -324,8 +326,10 @@ function renderTranscript(events) {
 function updateHeader(events) {
   let state = 'IDLE', model = '', taskStatus = {};
   for (const ev of events) {
+    // badge is driven by state events ONLY: a 'wake' emit precedes the WS
+    // connect in voice mode, so inferring ACTIVE from it would stick the
+    // badge on green if the connect fails and the session never opens
     if (ev.type === 'state') state = ev.to || state;
-    else if (ev.type === 'wake') state = 'ACTIVE';
     else if (ev.type === 'session' && ev.event === 'connected' && ev.model)
       model = ev.model;
     else if (ev.type === 'task' && ev.task_id) taskStatus[ev.task_id] = ev.status;
