@@ -20,6 +20,7 @@ from echo_app.services import artifacts
 
 SNAPSHOT_CAP = 5  # ambient [workspace] injections per finished task
 TITLE_WORDS = 5  # spoken-handle length
+RECENT_SUMMARIES = 10  # finished tasks check_tasks shows without an id
 
 
 def _compact(text, limit=500):
@@ -74,6 +75,13 @@ class Orchestrator:
         self.ctx.extra.setdefault("tasks", self.tasks)
         self._seq = 0
         self._running = set()
+        # PR 11 announcement watermark: which task results have been spoken.
+        # live=True means on_injection reaches an ACTIVE session, so a result
+        # injected now counts as announced; while IDLE (live=False) results
+        # are dropped and wait to be surfaced on the next wake — persisted so
+        # a completed-while-idle task still announces across a restart.
+        self._announced = set()
+        self.live = False
 
     @property
     def inbox(self):
@@ -96,11 +104,24 @@ class Orchestrator:
         self.inbox.put_nowait(task)
         return task
 
-    def summaries(self, task_id=None):
+    def summaries(self, task_id=None, recent=RECENT_SUMMARIES):
         """Compact status lines for the check_tasks tool: handle, status,
         elapsed time + last progress line while running (PR 11 — "how's it
-        going?" works mid-task)."""
-        tasks = [self.tasks[task_id]] if task_id in self.tasks else self.tasks.values()
+        going?" works mid-task).
+
+        With no id, the table persists across restarts and grows without
+        bound, so return every unfinished task plus only the most recent
+        `recent` finished ones — the active work, never a wall of history."""
+        if task_id in self.tasks:
+            tasks = [self.tasks[task_id]]
+        else:
+            allt = list(self.tasks.values())
+            active = [t for t in allt if t.status in ("queued", "running")]
+            done = sorted((t for t in allt if t.status not in
+                           ("queued", "running")),
+                          key=lambda t: t.finished_at or 0.0)[-recent:]
+            tasks = sorted(active + done, key=lambda t: int(t.id[1:])
+                           if t.id[1:].isdigit() else 0)
         out = []
         for t in tasks:
             line = "%s %s" % (t.id, t.kind)
@@ -124,6 +145,26 @@ class Orchestrator:
                 and t.result is not None and rank(t.result) != "silent"]
         return ["%s (%s): %s" % (t.id, t.kind, t.result.say)
                 for t in sorted(done, key=lambda t: t.finished_at)]
+
+    def collect_missed(self):
+        """Speech-ready lines for every non-silent finished task not yet
+        announced, oldest first; marks them announced (persisted) so they are
+        spoken exactly once — even if the finish and the next wake straddle a
+        restart. Replaces the wall-clock results_since window for the wake
+        announcement, which lost completed-while-idle tasks across restarts."""
+        pending = [t for t in self.tasks.values()
+                   if t.id not in self._announced
+                   and t.finished_at is not None and t.result is not None
+                   and rank(t.result) != "silent"]
+        pending.sort(key=lambda t: t.finished_at)
+        self._mark_announced(pending)
+        return ["%s (%s): %s" % (t.id, t.kind, t.result.say) for t in pending]
+
+    def _mark_announced(self, tasks):
+        for t in tasks:
+            if t.id not in self._announced:
+                self._announced.add(t.id)
+                tasklog.append_event(self.log_path, "announced", task_id=t.id)
 
     # -- persistence (PR 11) --------------------------------------------------
 
@@ -150,6 +191,8 @@ class Orchestrator:
                 continue  # log tail from before a truncation; skip
             if e.get("event") == "session":
                 task.session_id = e.get("session_id") or task.session_id
+            elif e.get("event") == "announced":
+                self._announced.add(tid)  # already spoken in a prior run
             elif e.get("event") in ("done", "error"):
                 task.status = e["event"]
                 task.finished_at = e.get("ts")
@@ -248,6 +291,10 @@ class Orchestrator:
             self.on_injection(Injection(
                 text="[task %s done] %s" % (task.id, result.say),
                 priority=priority))
+            # delivered to a live session -> counts as announced; while IDLE
+            # the sink drops it, so it stays pending for the next wake
+            if self.live:
+                self._mark_announced([task])
         # ambient doc snapshots so the agent can answer "read me the goals" —
         # capped: an agent.run that touches a whole tree must not flood the
         # conversation context with one injection per file

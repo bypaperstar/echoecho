@@ -252,6 +252,91 @@ def test_resume_after_restart_uses_persisted_session(tmp_path):
     assert fake.resumes[-1][1] == "sess-x"  # reached the persisted session
 
 
+# -- announcement watermark: announce once, even across a restart -------------
+
+def test_collect_missed_announces_once_and_survives_restart(tmp_path):
+    """A task that finished while Echo was away announces on the next wake,
+    and having a restart between the finish and the wake must not lose it —
+    nor announce it twice."""
+    log = "\n".join(json.dumps(e) for e in [
+        {"ts": 1.0, "event": "queued", "task_id": "t1", "kind": "agent.run",
+         "instructions": "review the lease", "source": "user"},
+        {"ts": 2.0, "event": "done", "task_id": "t1", "kind": "agent.run",
+         "say": "reviewed the lease", "priority": "interrupt"},
+    ]) + "\n"
+    orch, _, _ = run_orch([], tmp_path, seed_log=log)
+    missed = orch.collect_missed()
+    assert len(missed) == 1 and "reviewed the lease" in missed[0]
+    assert orch.collect_missed() == []  # marked announced -> not repeated
+    # a SECOND restart re-reads the log incl. the persisted 'announced' row
+    orch2, _, _ = run_orch([], tmp_path)
+    assert orch2.collect_missed() == []  # still not re-announced
+
+
+def test_interrupted_task_surfaces_via_collect_missed(tmp_path):
+    log = (json.dumps({"ts": 1.0, "event": "queued", "task_id": "t1",
+                       "kind": "agent.run", "instructions": "review the lease",
+                       "source": "user"}) + "\n"
+           + json.dumps({"ts": 2.0, "event": "session", "task_id": "t1",
+                         "session_id": "sess-1"}) + "\n")
+    orch, _, interrupted = run_orch([], tmp_path, seed_log=log)
+    assert [t.id for t in interrupted] == ["t1"]
+    missed = orch.collect_missed()
+    assert len(missed) == 1 and "interrupted by a restart" in missed[0]
+    assert orch.collect_missed() == []
+
+
+def test_live_result_is_marked_announced_not_re_surfaced(tmp_path):
+    """A result delivered to an ACTIVE session (live=True) counts as spoken,
+    so the next wake does not re-announce it; a result finishing while IDLE
+    (live=False) does surface on the next wake."""
+    injections = []
+    orch = Orchestrator(registry=None, on_injection=injections.append,
+                        log_path=tmp_path / "t.jsonl", workspace=tmp_path)
+
+    async def quick(task, ctx):
+        return TaskResult(say="done " + task.request.instructions,
+                          priority="interrupt")
+
+    async def go():
+        orch.registry = {"agent.run": quick}
+        loop = asyncio.ensure_future(orch.run())
+        orch.live = True  # ACTIVE session
+        orch.submit(TaskRequest(kind="agent.run", instructions="live one"))
+        assert await orch.drain()
+        orch.live = False  # session ended
+        orch.submit(TaskRequest(kind="agent.run", instructions="idle one"))
+        assert await orch.drain()
+        loop.cancel()
+
+    asyncio.run(go())
+    missed = orch.collect_missed()
+    assert len(missed) == 1  # only the idle-finished task waits for the wake
+    assert "idle one" in missed[0]
+
+
+def test_summaries_without_id_is_bounded_to_active_plus_recent(tmp_path):
+    """check_tasks over a long-lived persisted table returns active tasks +
+    only the most recent finished ones, never a growing wall of history."""
+    lines = []
+    for i in range(1, 26):  # 25 finished tasks in the log
+        lines.append(json.dumps({"ts": float(i), "event": "queued",
+                                 "task_id": "t%d" % i, "kind": "agent.run",
+                                 "instructions": "task %d" % i,
+                                 "source": "user"}))
+        lines.append(json.dumps({"ts": float(i) + 0.5, "event": "done",
+                                 "task_id": "t%d" % i, "kind": "agent.run",
+                                 "say": "did %d" % i, "priority": "ambient"}))
+    orch, _, _ = run_orch([], tmp_path, seed_log="\n".join(lines) + "\n")
+    summ = orch.summaries()
+    assert len(summ) == 10  # RECENT_SUMMARIES, not 25
+    # the most recent finished tasks, not the oldest
+    assert any("did 25" in s for s in summ)
+    assert not any("did 1'" in s or ": did 1 " in s for s in summ)
+    # a specific id is always available regardless of the recency window
+    assert orch.summaries("t3") == ["t3 agent.run 'task 3': done — did 3"]
+
+
 # -- wall-clock budget --------------------------------------------------------
 
 def test_budget_breach_kills_and_reports_resumable(tmp_path, monkeypatch):
@@ -276,3 +361,28 @@ def test_budget_breach_kills_and_reports_resumable(tmp_path, monkeypatch):
     assert result.data["error"].startswith("hit the")
     assert result.data["session_id"] == "sess-hang"  # checkpointed -> resumable
     assert injections[0].priority == "interrupt"
+
+
+def test_budget_kill_takes_the_whole_process_tree(tmp_path, monkeypatch):
+    """A real agent spawns children (builds, dev servers); the budget kill
+    must take the process GROUP, not just the CLI, or orphans outlive it."""
+    monkeypatch.setenv("ECHO_AGENT_TIMEOUT", "0.3")
+    marker = tmp_path / "grandchild_alive"
+
+    class ForkingCLI(ClaudeCLI):
+        name = "forking"
+
+        def command(self, prompt, resume=None):
+            # a backgrounded grandchild that touches a marker AFTER the budget
+            # would have elapsed, then the foreground process hangs. A single
+            # -PID kill of the shell leaves the grandchild to write the marker;
+            # a process-group kill takes it out first.
+            return ["sh", "-c",
+                    "(sleep 1.5; touch %s) & sleep 30" % marker]
+
+    orch, _, _ = run_orch(
+        [TaskRequest(kind="agent.run", instructions="build the world")],
+        tmp_path, extra={"agent_cli": ForkingCLI()}, timeout=10.0)
+    assert "budget" in orch.tasks["t1"].result.say
+    time.sleep(2.0)  # well past the grandchild's 1.5s timer
+    assert not marker.exists(), "grandchild survived the budget kill (orphaned)"

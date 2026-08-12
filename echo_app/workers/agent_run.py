@@ -12,6 +12,8 @@ real agent makes — real CLIs never emit them.
 """
 import asyncio
 import json
+import os
+import signal
 
 from echo_app import config
 from echo_app.bus import TaskResult
@@ -39,6 +41,19 @@ PROMPT_SUFFIX = (
     "\n\nYou are working headless for a voice assistant; your reply will be "
     "spoken. If you cannot proceed without an answer from the user, stop and "
     "end your reply with one line starting '%s '." % QUESTION_PREFIX)
+
+
+def _kill_tree(proc):
+    """SIGKILL the agent's whole process group (start_new_session put it in
+    its own), so children it spawned die with it. Falls back to the direct
+    process if the group is already gone."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _speakable(text, limit=SAY_LIMIT):
@@ -182,17 +197,24 @@ async def run_agent(task, ctx):
         return TaskResult(say="The agent couldn't start: %s" % exc,
                           priority="interrupt", data={"error": str(exc)})
 
+    # read the budget BEFORE spawning: a misconfigured ECHO_AGENT_TIMEOUT
+    # must fail fast, never after a live agent is already running (the
+    # finally below can only reap a process it got to assign to `proc`)
+    budget = config.agent_timeout()
     before = _snapshot(ctx.workspace)
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(ctx.workspace),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        # own process group: the agent spawns its own children (builds, dev
+        # servers, tool subprocesses); a budget kill must take the whole tree,
+        # not just the CLI, or orphans burn resources past the budget
+        start_new_session=True)
     state = {"progress": [], "result": "", "error": None,
              "session_id": resume, "stderr": "", "cost_usd": None}
     pump = asyncio.ensure_future(_pump(proc.stdout, runtime, ctx.workspace,
                                        state, report=ctx.report))
     drain = asyncio.ensure_future(_drain(proc.stderr, state))
     rc, timed_out = None, False
-    budget = config.agent_timeout()
     try:
         try:
             await asyncio.wait_for(asyncio.gather(pump, drain), budget)
@@ -206,7 +228,7 @@ async def run_agent(task, ctx):
         drain.cancel()
         await asyncio.gather(pump, drain, return_exceptions=True)
         if proc.returncode is None:
-            proc.kill()
+            _kill_tree(proc)
             await proc.wait()
 
     touched = sorted(name for name, mt in _snapshot(ctx.workspace).items()

@@ -57,8 +57,12 @@ front-end and the sandbox*, not the agent runtime:
 - Steering: `agent.run` accepts `task_id` to resume — the voice model can say "add a budget section
   too" and the worker resumes the same agent session (`--resume <session-id>`). This replaces v0's
   per-kind arguments with conversation.
-- Budgets: per-task wall-clock and token caps from config; on breach the worker snapshots state,
-  reports `error` (auto-`interrupt`), and the VM snapshot makes "undo that" trivial.
+- Budgets: a per-task wall-clock cap from config (`ECHO_AGENT_TIMEOUT`); on breach the worker kills
+  the agent's whole process group, reports `error` (auto-`interrupt`), and leaves partial work
+  staged + resumable. Token/cost caps are deferred: `cost_usd` is captured from the agent's terminal
+  result as groundwork, but it arrives only at the end (and `codex` emits none), so there is no
+  incremental signal to preempt on mid-run — a real cap needs the VM tier's metering. The VM
+  snapshot will make "undo that" trivial.
 - Testing: a `FakeAgentCLI` fixture (JSONL event replay, same trick as `FakeTransport`/`FakeLLM`)
   keeps the whole loop keyless and Linux-runnable.
 
@@ -134,8 +138,10 @@ Every piece exists in the open; the *combination* (always-on wake-word voice + l
     `FakeAgentCLI` fixtures. Demo kinds move to `plugins/` (kept runnable; no longer in the prompt
     by default). Gate: existing scripted demos rewritten as `agent.run` fixtures pass headless.
 11. **`echo/11-long-tasks`** — progress-stream → throttled ambient injections; `needs_input`
-    voice round-trip; resume/steering by task handle; task-table persistence + orphan re-attach;
-    wall-clock/token budgets.
+    voice round-trip; resume/steering by task handle; task-table persistence + orphan re-attach +
+    a persisted announcement watermark (so a completed-while-idle task announces once, even across
+    a restart); a per-task wall-clock budget with process-group teardown (token/cost cap deferred
+    to the VM tier — see above).
 12. **`echo/12-vm-sandbox`** — Lume lifecycle (golden image build script, clone, suspend/resume,
     snapshot, SSH exec), `sandbox=vm` in `agent.run`, workspace virtiofs mount, warm-VM policy.
     Headless CI substitutes a `FakeVM` (local tmpdir + subprocess) behind the same port.
@@ -148,8 +154,9 @@ Every piece exists in the open; the *combination* (always-on wake-word voice + l
 
 1. **VM footprint on a personal Mac** (40–60 GB disk, 4–8 GB RAM warm). Mitigate: single warm VM,
    aggressive suspend, tier-1 default for document work, document the cost up front.
-2. **Runaway agents** (cost/time/junk in workspace). Mitigate: budgets + snapshots + everything in
-   the VM is disposable by design; `outbox/` keeps the host clean.
+2. **Runaway agents** (cost/time/junk in workspace). Mitigate: a wall-clock budget that kills the
+   agent's whole process group (PR 11), snapshots, and everything in the VM being disposable by
+   design; `outbox/` keeps the host clean. Cost/token metering waits for the VM tier.
 3. **Voice ↔ long-task impedance** (user wakes Echo mid-task, expects instant answers). Mitigate:
    task handles + `check_tasks` elapsed/progress; progress throttling so Echo isn't chatty.
 4. **Headless-agent CLI drift** (flags/stream format change). Mitigate: one adapter module per CLI
