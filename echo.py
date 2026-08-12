@@ -65,11 +65,12 @@ def list_devices():
               % (idx, dev.get("max_input_channels", 0),
                  dev.get("max_output_channels", 0), dev.get("name", "?"),
                  "   <- " + ", ".join(marks) if marks else ""))
+    from echo_app import config
     print("\nPick with --input-device/--output-device (or ECHO_INPUT_DEVICE/"
           "ECHO_OUTPUT_DEVICE): an index or a case-insensitive name "
           "substring; empty = follow the system default. Devices re-resolve "
           "at every session start, so plug in AirPods and just say '%s'."
-          % "echo echo")
+          % config.WAKE_PHRASE)
 
 
 def mic_check(seconds=5.0):

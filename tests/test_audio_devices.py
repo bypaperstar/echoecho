@@ -202,6 +202,37 @@ def test_session_sequence_never_refreshes_with_open_streams(fake_sd, feed_dir):
     assert detector.resumed == 1
 
 
+def test_crashed_audio_start_leaves_no_stream_open_across_refresh(fake_sd):
+    # The un-testable-on-Mac disaster is PortAudio re-init with an open
+    # stream. Worst case: AudioIO.start() opens the input stream, then the
+    # OUTPUT stream constructor raises (device vanished between resolve and
+    # open). voice_main's finally must close that orphan via audio.stop()
+    # BEFORE end_session_audio's refresh — lock the invariant.
+    class Boom(Exception):
+        pass
+
+    good_stream = fake_sd.RawOutputStream
+
+    def failing_out(**kwargs):
+        raise Boom("output device vanished")
+
+    mic = WakeMic().start()
+    detector = StubDetector()
+    audio = AudioIO()
+    fake_sd.RawOutputStream = failing_out
+    with pytest.raises(Boom):
+        echo.start_session_audio(mic, audio, loop=None, send_event=None)
+    assert len(fake_sd.open_streams) == 1  # orphaned session input stream
+    # voice_main's finally path:
+    audio.muted_capture = True
+    audio.play_chime("end")
+    fake_sd.RawOutputStream = good_stream
+    echo.end_session_audio(mic, audio, detector)
+    assert fake_sd.refresh_violations == 0  # orphan closed before re-init
+    assert len(fake_sd.open_streams) == 1   # wake mic back, nothing leaked
+    assert detector.resumed == 1
+
+
 def test_end_session_audio_survives_mic_reopen_failure(fake_sd):
     mic = WakeMic(device="usb").start()
     detector = StubDetector()
