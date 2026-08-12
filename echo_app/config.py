@@ -53,6 +53,18 @@ def fake_agent_script():
     return os.environ.get("ECHO_FAKE_AGENT_SCRIPT", "").strip()
 
 
+def progress_interval():
+    """Min seconds between ambient progress injections per task — long agent
+    runs stay felt without Echo narrating every step."""
+    return float(os.environ.get("ECHO_PROGRESS_INTERVAL", "30"))
+
+
+def agent_timeout():
+    """Wall-clock budget (seconds) for one agent.run task; on breach the
+    subprocess is killed and the task errors (resumable by task_id)."""
+    return float(os.environ.get("ECHO_AGENT_TIMEOUT", "900"))
+
+
 def realtime_model():
     return os.environ.get("ECHO_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 
@@ -108,8 +120,13 @@ SYSTEM_PROMPT_TEMPLATE = (
     "don't read them verbatim. Never read URLs, file paths, or raw markdown "
     "syntax aloud; say where a thing came from instead (\"a 30-minute pad "
     "thai on RecipeTin Eats\"). Use read_artifact to quote workspace files, "
-    "summarizing just the part the user asked for. Call end_session when the "
-    "user says something like \"that's it\".")
+    "summarizing just the part the user asked for. Long tasks report "
+    "progress as '[task tN progress]' lines and check_tasks shows elapsed "
+    "time — refer to tasks by what they are (\"the lease review\"), never by "
+    "raw ids. To steer, extend, or answer a question from an earlier agent "
+    "task, dispatch the same kind again with args.task_id set to that "
+    "task's id. Call end_session when the user says something like "
+    "\"that's it\".")
 
 
 def system_prompt():

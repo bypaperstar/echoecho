@@ -103,6 +103,20 @@ kind is **`agent.run`**: any ask is handed to a headless coding agent
 above live on as optional fast-path plugins — dispatchable always, advertised
 to the voice model only with `ECHO_PLUGINS=1`.
 
+PR 11 makes those agent tasks long-task-shaped: progress streams back as
+throttled ambient lines (`ECHO_PROGRESS_INTERVAL`, default 30 s), `check_tasks`
+shows elapsed time and the last progress line ("how's it going?" works
+mid-task), and tasks are referred to by a short spoken handle. To steer or
+extend an earlier task, dispatch `agent.run` again with `args.task_id` — it
+resumes the same agent session (`--resume`). A task that ends with a
+`QUESTION:` line comes back as an interrupt so Echo can ask you. The task
+table persists to `.tasks.jsonl`, so a finished task announces on the next
+wake even across a restart, and a task caught mid-flight is reported as
+interrupted (and resumable if its agent session was checkpointed). Runaway
+agents are bounded by a wall-clock budget (`ECHO_AGENT_TIMEOUT`, default
+15 min); on breach the agent is stopped and the partial work is left staged
+and resumable.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.

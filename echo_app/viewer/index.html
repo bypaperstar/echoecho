@@ -349,6 +349,8 @@ function activityLine(ev) {
       return ['⏳ ' + kind + ' queued as ' + (ev.task_id || '?'), null];
     if (ev.status === 'running')
       return ['⚙️ ' + kind + ' is running in the background…', null];
+    if (ev.status === 'progress')
+      return ['⏱ ' + kind + ': ' + (ev.say || 'still working…'), null];
     if (ev.status === 'done')
       return ['✅ ' + kind + ' finished (' + (ev.priority || '?') + '): "' +
               (ev.say || '') + '"', PRIORITY_NOTES[ev.priority] || null];
@@ -419,7 +421,10 @@ function updateHeader(events) {
     if (ev.type === 'state') state = ev.to || state;
     else if (ev.type === 'session' && ev.event === 'connected' && ev.model)
       model = ev.model;
-    else if (ev.type === 'task' && ev.task_id) taskStatus[ev.task_id] = ev.status;
+    // 'progress' is a mid-run heartbeat, not a terminal state: it must not
+    // knock a task out of the running count
+    else if (ev.type === 'task' && ev.task_id && ev.status !== 'progress')
+      taskStatus[ev.task_id] = ev.status;
   }
   const badge = document.getElementById('state-badge');
   badge.className = 'badge' +

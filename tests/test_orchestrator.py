@@ -117,7 +117,8 @@ def test_summaries_single_task(tmp_path):
     orch, _ = run_orch(load_all(),
                        [TaskRequest(kind="sleep.echo", instructions="x",
                                     args={"sleep": 0.01})], tmp_path)
-    assert orch.summaries("t1") == ["t1 sleep.echo: done — Echoing back: x"]
+    # a finished task shows its spoken handle + say-line (PR 11)
+    assert orch.summaries("t1") == ["t1 sleep.echo 'x': done — Echoing back: x"]
 
 
 def test_ranker_heuristics():

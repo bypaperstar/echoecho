@@ -22,11 +22,14 @@ class ClaudeCLI:
 
     name = "claude"
 
-    def command(self, prompt):
+    def command(self, prompt, resume=None):
         # tier-1 policy: file edits inside cwd (= the workspace) auto-accept,
         # everything riskier stays deny-by-default in headless mode
-        return ["claude", "-p", prompt, "--output-format", "stream-json",
+        argv = ["claude", "-p", prompt, "--output-format", "stream-json",
                 "--verbose", "--permission-mode", "acceptEdits"]
+        if resume:  # steer/answer a previous run: same agent session
+            argv += ["--resume", resume]
+        return argv
 
     def parse_event(self, ev):
         t = ev.get("type", "")
@@ -40,7 +43,8 @@ class ClaudeCLI:
         if t == "result":
             return {"event": "result", "text": ev.get("result") or "",
                     "error": bool(ev.get("is_error")),
-                    "session_id": ev.get("session_id")}
+                    "session_id": ev.get("session_id"),
+                    "cost_usd": ev.get("total_cost_usd")}
         return None
 
 
@@ -51,10 +55,12 @@ class CodexCLI:
 
     name = "codex"
 
-    def command(self, prompt):
+    def command(self, prompt, resume=None):
         # tier-1 policy: codex's own sandbox, writes fenced to the workspace
-        return ["codex", "exec", "--sandbox", "workspace-write", "--json",
-                prompt]
+        argv = ["codex", "exec"]
+        if resume:
+            argv += ["resume", resume]
+        return argv + ["--sandbox", "workspace-write", "--json", prompt]
 
     def parse_event(self, ev):
         t = ev.get("type", "")
@@ -85,8 +91,10 @@ class FakeAgentCLI(ClaudeCLI):
         # fixture path from the launcher's cwd would vanish
         self.source = Path(source).resolve()
         self._consumed = 0
+        self.resumes = []  # (prompt, resume) per call — the tests' spy
 
-    def command(self, prompt):
+    def command(self, prompt, resume=None):
+        self.resumes.append((prompt, resume))
         script = self.source
         if script.is_dir():
             scripts = sorted(script.glob("*.jsonl"))

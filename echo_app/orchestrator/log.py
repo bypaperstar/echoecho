@@ -14,7 +14,9 @@ def append_event(path, event, **fields):
 
 
 def replay(path):
-    """Return the logged events as a list of dicts (empty if no log yet)."""
+    """Return the logged events as a list of dicts (empty if no log yet).
+    Malformed lines are skipped, not fatal — a crash mid-append must not
+    poison rehydration forever."""
     path = Path(path)
     if not path.exists():
         return []
@@ -22,6 +24,12 @@ def replay(path):
     with open(path) as f:
         for line in f:
             line = line.strip()
-            if line:
-                events.append(json.loads(line))
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict):
+                events.append(ev)
     return events

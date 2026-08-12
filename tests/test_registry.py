@@ -41,7 +41,7 @@ def test_worker_metadata_attached_by_register():
     fn = base.REGISTRY["agent.run"]
     assert fn.kind == "agent.run"
     assert "agent" in fn.description
-    assert fn.arg_schema == {}
+    assert "task_id" in fn.arg_schema  # steering/resume arg (PR 11)
     assert fn.advertise and not fn.is_plugin
     plug = base.REGISTRY["doc.edit"]
     assert plug.is_plugin and plug.advertise

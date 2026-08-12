@@ -80,8 +80,13 @@ def test_agent_run_end_to_end_offline(tmp_path):
     assert task.result.data["cli"] == "fake"
     assert task.result.data["progress"] == ["Reading the current list.",
                                             "Wrote the plan."]
+    # the result speaks up as an interrupt (progress heartbeats precede it)
+    done = [i for i in injections if i.text.startswith("[task t1 done]")]
+    assert done and done[0].priority == "interrupt"
+    # progress streamed as ambient injections while the agent worked
+    prog = [i for i in injections if i.text.startswith("[task t1 progress]")]
+    assert prog and prog[0].priority == "ambient"
     # ambient workspace snapshot fired for the touched doc
-    assert injections[0].priority == "interrupt"
     snaps = [i for i in injections if i.text.startswith("[workspace]")]
     assert snaps and "notes/plan.md now contains: # Plan" in snaps[0].text
 
@@ -106,7 +111,7 @@ def test_nonzero_exit_is_an_error_result(tmp_path):
     class ExplodingCLI(ClaudeCLI):
         name = "boom"
 
-        def command(self, prompt):
+        def command(self, prompt, resume=None):
             return ["sh", "-c", "echo not-json; echo doomed >&2; exit 3"]
 
     orch, _, _ = run_orch(
@@ -193,11 +198,12 @@ def test_claude_adapter_normalizes_events():
         {"type": "tool_use", "name": "Edit"}]}}) is None
     done = cli.parse_event({"type": "result", "subtype": "success",
                             "is_error": False, "session_id": "s",
-                            "result": "done"})
+                            "result": "done", "total_cost_usd": 0.02})
     assert done == {"event": "result", "text": "done", "error": False,
-                    "session_id": "s"}
+                    "session_id": "s", "cost_usd": 0.02}
     assert cli.parse_event({"type": "user", "message": {}}) is None
     assert "--permission-mode" in cli.command("x")  # tier-1 policy flags
+    assert "--resume" in cli.command("x", resume="sess-9")  # steering (PR 11)
 
 
 def test_codex_adapter_normalizes_events():
@@ -212,6 +218,7 @@ def test_codex_adapter_normalizes_events():
     err = cli.parse_event({"type": "error", "message": "boom"})
     assert err["event"] == "result" and err["error"]
     assert "--sandbox" in cli.command("x")  # tier-1 policy flags
+    assert cli.command("x", resume="th-9")[:3] == ["codex", "exec", "resume"]
 
 
 def test_codex_style_run_takes_last_message_as_result(tmp_path):
@@ -220,7 +227,7 @@ def test_codex_style_run_takes_last_message_as_result(tmp_path):
         def __init__(self, script):
             self.script = script
 
-        def command(self, prompt):
+        def command(self, prompt, resume=None):
             return ["cat", str(self.script)]
 
     script = write_script(tmp_path, [
@@ -268,7 +275,7 @@ def test_worker_exception_kills_the_agent_subprocess(tmp_path):
     class EvilRuntime(ClaudeCLI):
         name = "evil"
 
-        def command(self, prompt):
+        def command(self, prompt, resume=None):
             return ["sh", "-c", "echo '{\"type\": \"assistant\"}'; sleep 30"]
 
         def parse_event(self, ev):
@@ -289,7 +296,7 @@ def test_agent_subprocess_runs_with_cwd_workspace(tmp_path):
     class PwdCLI(ClaudeCLI):
         name = "pwd"
 
-        def command(self, prompt):
+        def command(self, prompt, resume=None):
             return ["sh", "-c",
                     'printf \'{"type": "result", "subtype": "success", '
                     '"is_error": false, "result": "%s"}\\n\' "$PWD"']

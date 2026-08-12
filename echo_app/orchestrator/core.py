@@ -4,6 +4,7 @@ Generic by design: knows kinds only as registry keys; chaining is the
 follow_ups[] list on TaskResult, re-enqueued verbatim.
 """
 import asyncio
+import dataclasses
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from echo_app.services import artifacts
 
 
 SNAPSHOT_CAP = 5  # ambient [workspace] injections per finished task
+TITLE_WORDS = 5  # spoken-handle length
 
 
 def _compact(text, limit=500):
@@ -26,12 +28,34 @@ def _compact(text, limit=500):
     return joined[:limit] + ("…" if len(joined) > limit else "")
 
 
+def _title(instructions):
+    """Short spoken handle: the first few words of the ask."""
+    words = (instructions or "").split()
+    return " ".join(words[:TITLE_WORDS]) + ("…" if len(words) > TITLE_WORDS
+                                            else "")
+
+
+def _elapsed(secs):
+    secs = max(0, int(secs))
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        return "%dm%02ds" % (secs // 60, secs % 60)
+    return "%dh%02dm" % (secs // 3600, secs % 3600 // 60)
+
+
 @dataclass
 class WorkerContext:
-    """What every worker gets alongside its Task (Contract B's ctx)."""
+    """What every worker gets alongside its Task (Contract B's ctx).
+
+    report is per-task (bound by the orchestrator): report(text) streams a
+    progress line — throttled into ambient injections, surfaced by
+    check_tasks; report(session_id=...) checkpoints the agent session behind
+    the task so it stays resumable, even across a restart."""
     workspace: Path
     fake_llm: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
+    report: Optional[Callable] = None
 
 
 class Orchestrator:
@@ -45,6 +69,9 @@ class Orchestrator:
         self.tasks = {}  # type: Dict[str, Task]
         self.ctx = WorkerContext(workspace=Path(workspace or config.WORKSPACE_DIR),
                                  fake_llm=fake_llm)
+        # workers that steer prior tasks (agent.run task_id resume) read the
+        # LIVE table through ctx; the dict is shared, not copied
+        self.ctx.extra.setdefault("tasks", self.tasks)
         self._seq = 0
         self._running = set()
 
@@ -59,7 +86,8 @@ class Orchestrator:
     def submit(self, request):  # type: (TaskRequest) -> Task
         """Enqueue a task and return it immediately (never blocks the voice turn)."""
         self._seq += 1
-        task = Task(id="t%d" % self._seq, request=request, created_at=time.time())
+        task = Task(id="t%d" % self._seq, request=request, created_at=time.time(),
+                    title=_title(request.instructions))
         self.tasks[task.id] = task
         tasklog.append_event(self.log_path, "queued", task_id=task.id,
                              kind=task.kind, instructions=request.instructions,
@@ -69,12 +97,21 @@ class Orchestrator:
         return task
 
     def summaries(self, task_id=None):
-        """Compact status lines for the check_tasks tool."""
+        """Compact status lines for the check_tasks tool: handle, status,
+        elapsed time + last progress line while running (PR 11 — "how's it
+        going?" works mid-task)."""
         tasks = [self.tasks[task_id]] if task_id in self.tasks else self.tasks.values()
         out = []
         for t in tasks:
-            line = "%s %s: %s" % (t.id, t.kind, t.status)
-            if t.result and t.result.say:
+            line = "%s %s" % (t.id, t.kind)
+            if t.title:
+                line += " '%s'" % t.title
+            line += ": %s" % t.status
+            if t.status in ("queued", "running"):
+                line += " — %s elapsed" % _elapsed(time.time() - t.created_at)
+                if t.progress:
+                    line += ", last: %s" % t.progress
+            elif t.result and t.result.say:
                 line += " — " + t.result.say
             out.append(line)
         return out
@@ -88,6 +125,61 @@ class Orchestrator:
         return ["%s (%s): %s" % (t.id, t.kind, t.result.say)
                 for t in sorted(done, key=lambda t: t.finished_at)]
 
+    # -- persistence (PR 11) --------------------------------------------------
+
+    def rehydrate(self):
+        """Rebuild the task table from the append-only log, so v2's
+        minutes-to-hours tasks survive a restart. Tasks caught mid-flight
+        (queued/running at the last shutdown) are marked as interrupted
+        errors — still resumable by task_id when a session was checkpointed.
+        Returns the newly-interrupted tasks so the caller can announce them."""
+        for e in tasklog.replay(self.log_path):
+            tid = e.get("task_id")
+            if not tid:
+                continue
+            if e.get("event") == "queued":
+                req = TaskRequest(kind=e.get("kind", ""),
+                                  instructions=e.get("instructions", ""),
+                                  source=e.get("source", "user"))
+                self.tasks[tid] = Task(id=tid, request=req,
+                                       created_at=e.get("ts", 0.0),
+                                       title=_title(req.instructions))
+                continue
+            task = self.tasks.get(tid)
+            if task is None:
+                continue  # log tail from before a truncation; skip
+            if e.get("event") == "session":
+                task.session_id = e.get("session_id") or task.session_id
+            elif e.get("event") in ("done", "error"):
+                task.status = e["event"]
+                task.finished_at = e.get("ts")
+                task.session_id = e.get("session_id") or task.session_id
+                data = {"session_id": task.session_id}
+                if e["event"] == "error":
+                    data["error"] = e.get("say") or "failed"
+                task.result = TaskResult(say=e.get("say", ""),
+                                         priority=e.get("priority", "ambient"),
+                                         data=data)
+        self._seq = max([int(t[1:]) for t in self.tasks
+                         if t[1:].isdigit()] or [0])
+        interrupted = [t for t in self.tasks.values()
+                       if t.status in ("queued", "running")]
+        for task in interrupted:
+            task.status = "error"
+            task.finished_at = time.time()
+            resumable = task.session_id is not None
+            task.result = TaskResult(
+                say="'%s' was interrupted by a restart%s." % (
+                    task.title or task.id,
+                    " — it can be resumed" if resumable else ""),
+                data={"error": "interrupted",
+                      "session_id": task.session_id})
+            tasklog.append_event(self.log_path, "error", task_id=task.id,
+                                 kind=task.kind, say=task.result.say,
+                                 priority="interrupt", artifacts_touched=[],
+                                 follow_ups=[], session_id=task.session_id)
+        return interrupted
+
     # -- main loop ----------------------------------------------------------
 
     async def run(self):
@@ -97,14 +189,40 @@ class Orchestrator:
             self._running.add(handle)
             handle.add_done_callback(self._running.discard)
 
+    def _reporter(self, task):
+        """Per-task progress channel (ctx.report): text lines throttle into
+        ambient injections; session ids checkpoint into the log so the task
+        stays resumable across a restart."""
+        state = {"last_inject": 0.0}
+
+        def report(text=None, session_id=None):
+            if session_id and session_id != task.session_id:
+                task.session_id = session_id
+                tasklog.append_event(self.log_path, "session", task_id=task.id,
+                                     session_id=session_id)
+            if not text:
+                return
+            task.progress = text
+            events.emit("task", task_id=task.id, kind=task.kind,
+                        status="progress", say=text)
+            now = time.time()
+            if now - state["last_inject"] >= config.progress_interval():
+                state["last_inject"] = now
+                self.on_injection(Injection(
+                    text="[task %s progress] %s" % (task.id, text),
+                    priority="ambient"))
+
+        return report
+
     async def _run_task(self, task):  # type: (Task) -> None
         task.status = "running"
         events.emit("task", task_id=task.id, kind=task.kind, status="running")
         worker = self.registry.get(task.kind)
+        ctx = dataclasses.replace(self.ctx, report=self._reporter(task))
         try:
             if worker is None:
                 raise KeyError("no worker registered for kind %r" % task.kind)
-            result = await worker(task, self.ctx)
+            result = await worker(task, ctx)
         except Exception as exc:
             result = TaskResult(say="Task %s (%s) failed: %s" % (task.id, task.kind, exc),
                                 data={"error": str(exc),
@@ -114,11 +232,13 @@ class Orchestrator:
             task.status = "done"
         task.result = result
         task.finished_at = time.time()
+        task.session_id = result.data.get("session_id") or task.session_id
         priority = rank(result)
         tasklog.append_event(self.log_path, task.status, task_id=task.id,
                              kind=task.kind, say=result.say, priority=priority,
                              artifacts_touched=result.artifacts_touched,
-                             follow_ups=[f.kind for f in result.follow_ups])
+                             follow_ups=[f.kind for f in result.follow_ups],
+                             session_id=task.session_id)
         events.emit("task", task_id=task.id, kind=task.kind,
                     status=task.status, say=result.say, priority=priority)
         for follow in result.follow_ups:  # generic chaining

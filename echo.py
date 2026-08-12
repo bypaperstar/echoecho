@@ -190,6 +190,7 @@ async def amain(args):
 
     orch = Orchestrator(registry=load_all(), on_injection=port.inject,
                         fake_llm=config.echo_fake_llm())
+    orch.rehydrate()  # v2: the task table survives restarts
     port.on_tool(make_tool_handler(orch, port))
 
     viewer = None
@@ -278,6 +279,10 @@ async def voice_main(args):
                       wake_resume=lambda: None)
     from echo_app.workers.base import load_all
     orch = Orchestrator(registry=load_all(), fake_llm=config.echo_fake_llm())
+    # v2: rehydrate the task table; tasks the last run left mid-flight are
+    # marked interrupted and announced on the first wake like missed results
+    boot_ts = time.time()
+    rehydrated_interrupts = orch.rehydrate()
 
     viewer = None
     if not args.no_viewer:
@@ -292,7 +297,10 @@ async def voice_main(args):
     orch_loop = asyncio.ensure_future(orch.run())
 
     model = config.realtime_model()
-    idle_since = None  # set on session end: tasks finishing after it are "missed"
+    # tasks finishing after idle_since are "missed" and announced on the next
+    # wake; seed it at boot when rehydration just marked interrupted tasks so
+    # "the lease review was interrupted" surfaces on the first wake
+    idle_since = (boot_ts - 0.001) if rehydrated_interrupts else None
     print("[wake] listening for '%s' (or press enter to wake)"
           % config.WAKE_PHRASE)
     try:

@@ -24,7 +24,10 @@ def events():
 
 
 def seq(evs):
-    return [(e["event"], e["kind"]) for e in evs]
+    # lifecycle only: the log also carries 'session' checkpoint rows (PR 11)
+    # that have no kind
+    return [(e["event"], e["kind"]) for e in evs
+            if e["event"] in ("queued", "done", "error")]
 
 
 def check(cond, msg):
@@ -116,13 +119,13 @@ def check_demo_generic():
     evs = events()
     check(seq(evs) == [("queued", "agent.run"), ("done", "agent.run")] * 5,
           ".tasks.jsonl: five queued->done agent.run round trips, in order")
-    check(evs[3]["artifacts_touched"] == ["offsite/budget.csv",
-                                          "offsite/proposal.md"],
+    done = [e for e in evs if e["event"] == "done"]
+    check(done[1]["artifacts_touched"] == ["offsite/budget.csv",
+                                           "offsite/proposal.md"],
           "touched-file detection saw both second-run artifacts")
-    for e in evs:
-        if e["event"] == "done":
-            check(e["priority"] == "interrupt",
-                  "%s spoke up (interrupt)" % e["task_id"])
+    for e in done:
+        check(e["priority"] == "interrupt",
+              "%s spoke up (interrupt)" % e["task_id"])
 
 
 def main():
