@@ -48,6 +48,26 @@ PROMPT_SUFFIX = (
     "end your reply with one line starting '%s '." % QUESTION_PREFIX)
 
 
+def _user_docs_convention(task):
+    """When the user has shared folders, teach the agent the mediated-write
+    rule: their documents are read-only; propose changes via the outbox so
+    the user can approve them by voice. Keyed to this task's outbox dir."""
+    docs = config.user_docs()
+    if not docs:
+        return ""
+    box = "%s/%s" % (config.OUTBOX_DIR, task.id)
+    listing = ", ".join(str(d) for d in docs)
+    return (
+        "\n\nThe user's shared folders (%s) are mounted READ-ONLY: read them "
+        "freely but NEVER modify a file there directly. To propose a change to "
+        "one of their documents, write the full updated file under '%s/' and "
+        "add an entry to '%s/MANIFEST.json' — a JSON list of "
+        "{\"staged\": \"<path under %s>\", \"target\": \"<absolute original "
+        "path>\", \"summary\": \"<one line>\"} — plus a short '%s/CHANGES.md'. "
+        "The user approves saving by voice; you never overwrite their "
+        "originals yourself." % (listing, box, box, box, box))
+
+
 def _kill_tree(proc):
     """SIGKILL the agent's whole process group (start_new_session put it in
     its own), so children it spawned die with it. Falls back to the direct
@@ -195,9 +215,10 @@ async def run_agent(task, ctx):
     resume, refusal = _resume_session(task, ctx)
     if refusal is not None:
         return refusal  # data["error"] auto-ranks as interrupt
+    prompt = (task.request.instructions + PROMPT_SUFFIX
+              + _user_docs_convention(task))
     try:
-        argv = runtime.command(task.request.instructions + PROMPT_SUFFIX,
-                               resume=resume)
+        argv = runtime.command(prompt, resume=resume)
     except Exception as exc:  # e.g. a directory fixture ran out of scripts
         return TaskResult(say="The agent couldn't start: %s" % exc,
                           priority="interrupt", data={"error": str(exc)})

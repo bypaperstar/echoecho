@@ -103,6 +103,24 @@ def vm_boot_timeout():
     return float(os.environ.get("ECHO_VM_BOOT_TIMEOUT", "180"))
 
 
+def user_docs():
+    """ECHO_USER_DOCS: host folders the user shares with Echo (e.g.
+    ~/Documents:~/Desktop). They mount READ-ONLY into the VM; the ONLY path
+    back to them is the outbox + spoken approval (workers/outbox.py). Returns
+    absolute, user-expanded, existing directories."""
+    raw = os.environ.get("ECHO_USER_DOCS", "").strip()
+    out = []
+    for part in raw.replace(os.pathsep, " ").split():
+        p = Path(part).expanduser()
+        if p not in out:
+            out.append(p)
+    return out
+
+
+OUTBOX_DIR = "outbox"  # workspace/outbox/<task>/ : staged user-doc changes
+OUTBOX_BACKUP_SUFFIX = ".echo-bak"  # <original>.echo-bak-<ts> on apply
+
+
 def vm_pass_env():
     """Env var NAMES forwarded into the guest over SSH (SendEnv; the golden
     image's sshd AcceptEnv-lists them) so the in-guest agent can reach its
@@ -174,15 +192,25 @@ SYSTEM_PROMPT_TEMPLATE = (
     "time — refer to tasks by what they are (\"the lease review\"), never by "
     "raw ids. To steer, extend, or answer a question from an earlier agent "
     "task, dispatch the same kind again with args.task_id set to that "
-    "task's id. Call end_session when the user says something like "
-    "\"that's it\".")
+    "task's id.%(approval)s Call end_session when the user says something "
+    "like \"that's it\".")
+
+# Appended only when the user has shared folders (workers/outbox.py): agents
+# can't touch real documents directly, so surface the approval step.
+APPROVAL_GUIDANCE = (
+    " Your documents are never changed directly: an agent stages proposed "
+    "edits and you approve them out loud. When a task reports staged changes, "
+    "tell the user what changed and that they can say \"apply it\" to save "
+    "over the originals; on \"apply it\", dispatch outbox.apply.")
 
 
 def system_prompt():
     """The tuned prompt with the kinds line generated from the registry —
     call after load_all() so every advertised worker has registered."""
     from echo_app.workers import base  # lazy: workers import config
-    return SYSTEM_PROMPT_TEMPLATE % {"kinds": base.kinds_fragment() or "(none)"}
+    approval = APPROVAL_GUIDANCE if user_docs() else ""
+    return SYSTEM_PROMPT_TEMPLATE % {
+        "kinds": base.kinds_fragment() or "(none)", "approval": approval}
 
 # Matches "that's it", "thats it", "that's all", "that is all", "that is it".
 END_PHRASE_RE = re.compile(r"\bthat(?:'s|s| is) (?:it|all)\b", re.IGNORECASE)

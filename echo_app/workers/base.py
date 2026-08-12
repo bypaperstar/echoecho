@@ -16,15 +16,20 @@ REGISTRY = {}
 PLUGINS_PACKAGE = "echo_app.plugins"
 
 
-def register(kind, description="", arg_schema=None, advertise=True):
+def register(kind, description="", arg_schema=None, advertise=True,
+             advertise_when=None):
     """Attach Contract-B metadata to the worker fn and add it to REGISTRY.
     advertise=False keeps a kind dispatchable (tests, scripts, follow_ups)
-    without ever showing it to the voice model."""
+    without ever showing it to the voice model. advertise_when is an optional
+    predicate () -> bool checked at prompt-build time, so a kind can appear
+    only when its feature is configured (e.g. outbox.apply once the user has
+    shared folders)."""
     def deco(fn):
         fn.kind = kind
         fn.description = description
         fn.arg_schema = arg_schema or {}
         fn.advertise = advertise
+        fn.advertise_when = advertise_when
         fn.is_plugin = fn.__module__.startswith(PLUGINS_PACKAGE)
         REGISTRY[kind] = fn
         return fn
@@ -61,10 +66,20 @@ def load_all():
 
 def advertised():
     """Worker fns the voice model may dispatch, sorted by kind. Plugins are
-    included only when ECHO_PLUGINS=1 (they stay dispatchable regardless)."""
+    included only when ECHO_PLUGINS=1 (they stay dispatchable regardless); a
+    kind with an advertise_when predicate appears only when it returns true."""
     from echo_app import config  # lazy: config never imports workers
-    return [fn for _, fn in sorted(REGISTRY.items())
-            if fn.advertise and (not fn.is_plugin or config.echo_plugins())]
+    out = []
+    for _, fn in sorted(REGISTRY.items()):
+        if not fn.advertise:
+            continue
+        if fn.is_plugin and not config.echo_plugins():
+            continue
+        when = getattr(fn, "advertise_when", None)
+        if when is not None and not when():
+            continue
+        out.append(fn)
+    return out
 
 
 def kinds_enum():

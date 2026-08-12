@@ -128,6 +128,16 @@ Build the golden image once on the Mac: `AGENT=1 bash scripts/vm_golden.sh` (pul
 (host subprocess); the whole VM code path is exercised keyless/Linux via a `FakeVM`
 behind the same port, so CI never needs a Mac.
 
+PR 13 adds **mediated access to your real documents**. Point Echo at folders with
+`ECHO_USER_DOCS=~/Documents:~/Desktop`; they mount **read-only** into the VM, so an
+agent can read them but never write them. Proposed edits are staged in
+`workspace/outbox/<task>/` (full updated files + a `MANIFEST.json` mapping each to its
+original + a `CHANGES.md`), and nothing touches a real document until you say **"apply
+it"** — which dispatches the tier-0 `outbox.apply` worker. That worker re-validates
+every target against your shared-folder allowlist (the agent's manifest is not
+trusted), backs up each original with a timestamp, then writes atomically. With no
+folders shared, `outbox.apply` isn't even advertised and the approval flow is absent.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.

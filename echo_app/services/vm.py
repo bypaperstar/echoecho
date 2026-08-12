@@ -111,17 +111,26 @@ class LumeVM:
     def _is_running(self, info):
         return bool(info) and str(info.get("status", "")).lower() == "running"
 
+    def _boot_argv(self, exe="lume"):
+        """`lume run` argv: the workspace mounts read-WRITE; each shared
+        user-doc folder (config.user_docs()) mounts read-ONLY, so an agent can
+        read the user's documents but the only write path back is the outbox +
+        spoken approval (workers/outbox.py)."""
+        argv = [exe, "run", self.vm_name, "--no-display"]
+        if self.workspace is not None:
+            argv += ["--shared-dir", "%s:rw" % self.workspace]
+        for doc in config.user_docs():
+            argv += ["--shared-dir", "%s:ro" % doc]
+        return argv
+
     async def _boot(self):
         exe = shutil.which("lume")
         if exe is None:
             raise SandboxUnavailable("lume is not installed")
-        argv = [exe, "run", self.vm_name, "--no-display"]
-        if self.workspace is not None:
-            argv += ["--shared-dir", "%s:rw" % self.workspace]
         # detached: `lume run` stays alive for the VM's lifetime in some lume
         # versions; the daemon owns the VM either way, we only poll state
         self._runner = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.DEVNULL,
+            *self._boot_argv(exe), stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
 
     async def _wait_ready(self, timeout=None):
