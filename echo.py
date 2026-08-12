@@ -29,6 +29,10 @@ def parse_args(argv=None):
                         "ECHO_OUTPUT_DEVICE ('' = system default)")
     p.add_argument("--list-devices", action="store_true",
                    help="print an indexed audio device table and exit")
+    p.add_argument("--no-record", action="store_true",
+                   help="disable session recordings (same as ECHO_RECORD=0)")
+    p.add_argument("--recordings", action="store_true",
+                   help="list saved session recordings and exit")
     return p.parse_args(argv)
 
 
@@ -100,6 +104,41 @@ def mic_check(seconds=5.0):
         time.sleep(seconds)
 
 
+def list_recordings():
+    """--recordings: table of saved session recordings + how to review them."""
+    import json
+    from echo_app import config
+
+    root = config.recordings_dir()
+    dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    if not dirs:
+        print("no recordings yet — every --voice session records itself into "
+              "%s/ (--no-record or ECHO_RECORD=0 to opt out; ECHO_RECORD=1 "
+              "records --text/--script runs too)" % root)
+        return
+    print("%-32s %7s %7s  %-18s %8s" % ("session", "audio", "turns",
+                                        "end_reason", "size"))
+    total = 0
+    for d in dirs:
+        size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+        total += size
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            meta = None  # crashed mid-session: events.jsonl still there
+        audio_s = max(meta.get("mic_s") or 0, meta.get("echo_s") or 0) if meta else 0
+        print("%-32s %7s %7s  %-18s %7.1fM" % (
+            d.name,
+            "%d:%02d" % (int(audio_s) // 60, int(audio_s) % 60) if audio_s else "-",
+            "%s/%s" % (meta.get("user_turns", 0),
+                       meta.get("assistant_turns", 0)) if meta else "?",
+            (meta.get("end_reason") or "?") if meta else "(incomplete)",
+            size / 1e6))
+    print("\n%d recording(s), %.1f MB in %s/. To review one: open its "
+          "session.wav (left = you, right = Echo) and read transcript.md; "
+          "events.jsonl is the raw timeline." % (len(dirs), total / 1e6, root))
+
+
 def make_tool_handler(orch, port):
     """Contract A: the 4 tools, backed by the orchestrator + workspace."""
     from echo_app import config
@@ -127,12 +166,15 @@ def make_tool_handler(orch, port):
 
 
 async def amain(args):
-    from echo_app import config
+    from echo_app import config, recorder
     from echo_app.conversation.session import Session
     from echo_app.orchestrator.core import Orchestrator
     from echo_app.workers.base import load_all
 
     session = Session()
+    mode = "script" if args.script else "text"
+    if config.echo_record(mode):  # opt-in for text/script (ECHO_RECORD=1)
+        recorder.start(mode)
     if args.script:
         from echo_app.conversation.scripted import ScriptedAgent
         port = ScriptedAgent(args.script, session=session)
@@ -161,6 +203,7 @@ async def amain(args):
         await orch.drain(timeout=2.0)  # let in-flight demo workers log
     finally:
         orch_loop.cancel()
+        recorder.stop(end_reason=session.end_reason)
         if viewer:
             viewer.stop()
 
@@ -199,7 +242,7 @@ async def voice_main(args):
     import threading
     import time
 
-    from echo_app import config, events
+    from echo_app import config, events, recorder
     from echo_app.conversation.audio import AudioIO
     from echo_app.conversation.realtime import (RealtimeClient,
                                                 WebSocketTransport)
@@ -256,6 +299,8 @@ async def voice_main(args):
                     if not manual_wake.is_set():
                         continue
                     manual_wake.clear()
+            if config.echo_record("voice"):  # feedback loop: record each use
+                recorder.start("voice")      # (before the wake emit: teed too)
             events.emit("wake", via=wake_via)
             # -- WAKE -> ACTIVE session --------------------------------------
             since = None  # "[since last session]" for tasks done while IDLE
@@ -296,11 +341,14 @@ async def voice_main(args):
                 # session streams closed -> refresh -> wake mic reopens with
                 # fresh device resolution -> detector re-armed
                 end_session_audio(mic, audio, detector)
+                # streams are closed: everything audible is on disk; finalize
+                recorder.stop(end_reason=session.end_reason)
                 manual_wake.clear()  # enter pressed mid-session: no ghost wake
             print("[wake] session over (%s) — listening for '%s' again"
                   % (session.end_reason, config.WAKE_PHRASE))
     finally:
         mic.stop()
+        recorder.stop(end_reason="shutdown")  # no-op unless mid-session
         orch_loop.cancel()
         if viewer:
             viewer.stop()
@@ -317,6 +365,11 @@ def main(argv=None):
     if args.text:
         os.environ["ECHO_TEXT"] = "1"
     apply_device_args(args)  # flags beat ECHO_INPUT_DEVICE/ECHO_OUTPUT_DEVICE
+    if args.no_record:
+        os.environ["ECHO_RECORD"] = "0"
+    if args.recordings:
+        list_recordings()
+        return
     if args.list_devices:
         list_devices()
         return

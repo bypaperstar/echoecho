@@ -153,6 +153,39 @@ and shows what it bound (`🎧 mic: … → speaker: …` in the live transcript
   python3 echo.py --voice --input-device "macbook pro microphone" --output-device "pods"
   ```
 
+## Session recordings — the dev feedback loop
+
+Every `--voice` session records itself so each real use of the product can be
+reviewed afterwards: listen to what actually happened, compare it against
+what you wanted, and turn the gap into the next fix. A session directory
+lands in `recordings/` (gitignored, local only) at every wake:
+
+```
+recordings/2026-08-12_183104_voice/
+├── session.wav     open this one — stereo review mix: left = you, right = Echo
+├── mic.wav         what the mic heard (24 kHz mono; feed it to an STT to audit wake/VAD)
+├── echo.wav        what actually reached the speaker, chimes included
+├── transcript.md   review sheet: conversation + tools/tasks/injections, mm:ss offsets
+├── events.jsonl    the raw event timeline (flushed per line — survives a crash)
+└── meta.json       end reason, durations, devices, model, per-type counts
+```
+
+The review habit: `python3 echo.py --recordings` for the table of saved
+sessions, open the newest `session.wav`, skim `transcript.md` next to it, and
+note anything where what Echo *did* wasn't what you *meant* — missed wakes
+and false wakes, wrong tool/kind picked, results injected at awkward moments,
+barge-in weirdness. `meta.json`'s `end_reason` tells you how sessions die
+(`end_phrase` / `silence_timeout` / `crash` / `transport_closed`).
+
+- Only ACTIVE sessions are recorded — never the idle wake-word listening.
+  Recording starts at the wake chime and stops when the session closes.
+- Opt out with `--no-record` (or `ECHO_RECORD=0`); relocate with
+  `ECHO_RECORDINGS_DIR`. Disk math: ~5.8 MB per minute of session.
+- `ECHO_RECORD=1` also records `--text` / `--script` runs (events + transcript,
+  no audio) — handy for reviewing scripted changes with the same tooling.
+- Recording is never load-bearing: any failure (full disk, dead dir) prints a
+  `[record]` note and the daemon keeps running.
+
 ## Status
 
 Prototype complete as a stack of PRs (`echo/01-…` through `echo/06-…`), each headlessly testable — the full orchestrator/worker/artifact loop runs with no audio and no API key (text REPL + fixtures + FakeTransport event replay). Only the mic/speaker and the real Realtime connection need your Mac. A stretch `code` task kind (headless `codex exec` / `claude -p` subprocess) registers automatically when one of those CLIs is on PATH.

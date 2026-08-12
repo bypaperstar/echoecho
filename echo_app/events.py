@@ -12,6 +12,11 @@ from echo_app import config
 
 FEED_NAME = ".events.jsonl"
 
+# Per-session recording hook: cb(rec_dict, serialized_line), set/cleared by
+# echo_app.recorder while a session recording is active. Called guarded —
+# like the feed itself, the tee is never load-bearing.
+TEE = None
+
 
 def feed_path():
     """Resolved at call time so tests can monkeypatch config.WORKSPACE_DIR."""
@@ -19,17 +24,27 @@ def feed_path():
 
 
 def emit(etype, **fields):
-    """Append one event line to the feed. Swallows ALL exceptions."""
+    """Append one event line to the feed (and mirror it to the active session
+    recording, if any). Swallows ALL exceptions."""
     try:
         rec = {"ts": time.time(), "type": etype}
         rec.update(fields)
         line = json.dumps(rec, default=str)
+    except Exception:
+        return
+    try:
         path = feed_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass  # the feed is best-effort UI plumbing, never load-bearing
+    tee = TEE
+    if tee is not None:
+        try:
+            tee(rec, line)
+        except Exception:
+            pass  # a broken recording must never break the feed (or the app)
 
 
 def reset(mode="text"):

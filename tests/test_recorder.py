@@ -1,0 +1,306 @@
+"""PR 9: per-session recordings (audio + events) — the dev feedback loop.
+
+All headless: SessionRecorder is pure stdlib (wave/queue/threading), and the
+AudioIO taps are exercised by invoking the PortAudio callbacks directly, so
+no sounddevice and no audio hardware are needed. The scripted-run test drives
+the real amain() wiring end to end.
+"""
+import asyncio
+import json
+import os
+import wave
+from array import array
+
+import pytest
+
+import echo
+from echo_app import config, events, recorder
+from echo_app.conversation.audio import AudioIO
+from echo_app.conversation.realtime import PlaybackTracker
+
+
+@pytest.fixture
+def rec_env(tmp_path, monkeypatch):
+    """Isolated workspace + recordings root; never leaks an active recorder."""
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path / "ws")
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path / "rec")
+    monkeypatch.delenv("ECHO_RECORDINGS_DIR", raising=False)
+    monkeypatch.delenv("ECHO_RECORD", raising=False)
+    yield tmp_path / "rec"
+    recorder.stop()
+
+
+def read_wav(path):
+    """(params, samples) for a wav file."""
+    with wave.open(str(path), "rb") as w:
+        samples = array("h", w.readframes(w.getnframes()))
+        return w, samples  # w is closed but params remain readable
+
+
+def session_dirs(root):
+    return sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+
+
+# -- config --------------------------------------------------------------------
+
+
+def test_echo_record_defaults_to_voice_only(monkeypatch):
+    monkeypatch.delenv("ECHO_RECORD", raising=False)
+    assert config.echo_record("voice") is True
+    assert config.echo_record("text") is False
+    assert config.echo_record("script") is False
+    monkeypatch.setenv("ECHO_RECORD", "0")
+    assert config.echo_record("voice") is False
+    monkeypatch.setenv("ECHO_RECORD", "false")
+    assert config.echo_record("voice") is False
+    monkeypatch.setenv("ECHO_RECORD", "1")
+    assert config.echo_record("text") is True
+    assert config.echo_record("script") is True
+
+
+def test_recordings_dir_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ECHO_RECORDINGS_DIR", str(tmp_path / "elsewhere"))
+    assert config.recordings_dir() == tmp_path / "elsewhere"
+    monkeypatch.delenv("ECHO_RECORDINGS_DIR")
+    assert config.recordings_dir() == config.RECORDINGS_DIR
+
+
+# -- events tee ------------------------------------------------------------------
+
+
+def test_start_tees_events_and_still_feeds_the_viewer(rec_env, capsys):
+    rec = recorder.start("voice")
+    assert recorder.active() is rec
+    events.emit("wake", via="voice")
+    events.emit("user_text", text="add milk to the list")
+    # the viewer's live feed keeps working unchanged
+    feed = (config.WORKSPACE_DIR / events.FEED_NAME).read_text()
+    assert "add milk" in feed
+    # ...and the session gets its own durable copy
+    lines = (rec.dir / "events.jsonl").read_text().splitlines()
+    assert [json.loads(ln)["type"] for ln in lines] == ["wake", "user_text"]
+    recorder.stop(end_reason="end_phrase")
+    assert recorder.active() is None
+    assert events.TEE is None
+    events.emit("user_text", text="after close")  # must not raise or leak in
+    assert "after close" not in (rec.dir / "events.jsonl").read_text()
+    out = capsys.readouterr().out
+    assert "[record] session -> " in out and "[record] saved " in out
+
+
+def test_stop_writes_transcript_and_meta(rec_env):
+    rec = recorder.start("voice")
+    events.emit("wake", via="voice")
+    events.emit("audio", input="MacBook Pro Microphone", output="AirPods Pro")
+    events.emit("session", event="connected", model="gpt-realtime-2.1-mini")
+    events.emit("user_text", text="add milk")
+    events.emit("tool_call", name="dispatch_task", args={"kind": "grocery.merge"})
+    events.emit("assistant_text", text="On it.")
+    events.emit("state", frm="ACTIVE", to="IDLE", reason="end_phrase")
+    recorder.stop()  # no explicit reason: falls back to the state event's
+    transcript = (rec.dir / "transcript.md").read_text()
+    assert "you:** add milk" in transcript
+    assert "echo:** On it." in transcript
+    assert "⚙ dispatch_task" in transcript and "grocery.merge" in transcript
+    assert "🎧 mic: MacBook Pro Microphone" in transcript
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    assert meta["mode"] == "voice"
+    assert meta["end_reason"] == "end_phrase"
+    assert meta["wake_via"] == "voice"
+    assert meta["model"] == "gpt-realtime-2.1-mini"
+    assert meta["devices"] == {"input": "MacBook Pro Microphone",
+                               "output": "AirPods Pro"}
+    assert meta["user_turns"] == 1 and meta["assistant_turns"] == 1
+    assert meta["tool_calls"] == ["dispatch_task"]
+    assert meta["event_counts"]["user_text"] == 1
+    assert meta["write_errors"] == 0
+
+
+def test_render_transcript_offsets_and_lines():
+    evs = [
+        {"ts": 1000.0, "type": "wake", "via": "voice"},
+        {"ts": 1002.0, "type": "user_text", "text": "hi"},
+        {"ts": 1065.0, "type": "assistant_text", "text": "hello"},
+        {"ts": 1000.0 + 3661, "type": "injection", "priority": "ambient",
+         "text": "[task t1 done] ok"},
+        {"ts": 1001.0, "type": "totally_new_event", "detail": 7},
+    ]
+    text = recorder.render_transcript(evs, started=1000.0)
+    assert "[00:00] ⏰ wake (voice)" in text
+    assert "**[00:02] you:** hi" in text
+    assert "**[01:05] echo:** hello" in text
+    assert "[1:01:01] ↪ injected (ambient): [task t1 done] ok" in text
+    # unknown event types are never dropped from the review sheet
+    assert "totally_new_event" in text and '"detail": 7' in text
+
+
+# -- audio tracks -----------------------------------------------------------------
+
+
+def test_wavs_written_and_mixed_stereo(rec_env):
+    rec = recorder.start("voice")
+    rec.write_mic(b"\x01\x00" * 2400)   # 0.1 s of sample value 1
+    rec.write_echo(b"\x02\x00" * 4800)  # 0.2 s of sample value 2
+    recorder.stop()
+    w, mic = read_wav(rec.dir / "mic.wav")
+    assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1, 2, 24000)
+    assert len(mic) == 2400 and mic[0] == 1
+    w, echo_track = read_wav(rec.dir / "echo.wav")
+    assert len(echo_track) == 4800 and echo_track[0] == 2
+    w, mix = read_wav(rec.dir / "session.wav")
+    assert w.getnchannels() == 2
+    assert len(mix) == 2 * 4800  # padded to the longer track
+    assert mix[0] == 1 and mix[1] == 2          # frame 0: L=mic, R=echo
+    assert mix[2 * 2400] == 0                   # past mic EOF: left is silence
+    assert mix[2 * 2400 + 1] == 2               # ...echo continues on the right
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    assert meta["mic_s"] == 0.1 and meta["echo_s"] == 0.2
+
+
+def test_events_only_session_has_no_wavs(rec_env):
+    rec = recorder.start("text")
+    events.emit("user_text", text="hi")
+    recorder.stop(end_reason="end_phrase")
+    names = sorted(p.name for p in rec.dir.iterdir())
+    assert names == ["events.jsonl", "meta.json", "transcript.md"]
+
+
+def test_in_callback_taps_mic_even_when_not_sending(rec_env):
+    rec = recorder.start("voice")
+    audio = AudioIO()
+    audio._in_callback(b"\x07\x00" * 10, 10, None, None)  # no loop/send wired
+    audio.muted_capture = True  # teardown tail: still audible, still recorded
+    audio._in_callback(b"\x07\x00" * 10, 10, None, None)
+    recorder.stop()
+    _, mic = read_wav(rec.dir / "mic.wav")
+    assert len(mic) == 20 and set(mic) == {7}
+
+
+def test_out_callback_records_exactly_what_played(rec_env):
+    rec = recorder.start("voice")
+    audio = AudioIO()
+    audio.tracker = PlaybackTracker()
+    audio.tracker.append("item-1", 100.0)
+    audio.feed_pcm(b"\x05\x00" * 100)  # only 100 of 2400 frames available
+    outdata = bytearray(4800)
+    audio._out_callback(outdata, 2400, None, None)
+    # speaker got the audio + zero-fill, exactly as before
+    got = array("h", bytes(outdata))
+    assert got[0] == 5 and got[99] == 5 and got[100] == 0
+    # tracker cursor still advances by REAL audio only (barge-in math intact):
+    # 200 bytes played = 100 samples at 24 kHz ≈ 4.17 ms
+    assert audio.tracker._played_ms == pytest.approx(200 / (24000 * 2.0) * 1000.0)
+    recorder.stop()
+    _, echo_track = read_wav(rec.dir / "echo.wav")
+    assert len(echo_track) == 2400  # zero-fill recorded: timeline == wall clock
+    assert echo_track[0] == 5 and echo_track[100] == 0
+
+
+def test_callbacks_are_noops_without_active_recording(rec_env):
+    audio = AudioIO()
+    audio._in_callback(b"\x01\x00" * 10, 10, None, None)
+    audio._out_callback(bytearray(200), 100, None, None)
+    assert not rec_env.exists()  # nothing recorded, no dir created
+
+
+# -- robustness -------------------------------------------------------------------
+
+
+def test_recording_failures_never_reach_the_app(rec_env):
+    rec = recorder.start("voice")
+    rec._events_fh.close()  # simulate the disk going away mid-session
+    events.emit("user_text", text="still fine")  # must not raise
+    assert rec.errors >= 1
+    recorder.stop(end_reason="end_phrase")  # close of a broken recorder: fine
+    meta = json.loads((rec.dir / "meta.json").read_text())
+    assert meta["write_errors"] >= 1
+    # the event still made the transcript (memory copy) and the live feed
+    assert "still fine" in (rec.dir / "transcript.md").read_text()
+    assert "still fine" in (config.WORKSPACE_DIR / events.FEED_NAME).read_text()
+
+
+def test_start_failure_disables_recording_politely(rec_env, monkeypatch, capsys):
+    blocked = rec_env.parent / "blocked"
+    blocked.write_text("")  # a FILE where the recordings root should be
+    monkeypatch.setattr(config, "RECORDINGS_DIR", blocked)
+    assert recorder.start("voice") is None
+    assert recorder.active() is None and events.TEE is None
+    assert "[record] disabled for this session" in capsys.readouterr().out
+    events.emit("user_text", text="app still works")  # tee-less emit is fine
+
+
+def test_same_second_wakes_never_clobber(rec_env):
+    a = recorder.SessionRecorder("voice", root=rec_env, clock=lambda: 1000.0)
+    b = recorder.SessionRecorder("voice", root=rec_env, clock=lambda: 1000.0)
+    assert a.dir != b.dir and a.dir.exists() and b.dir.exists()
+    a.close()
+    b.close()
+    assert b.dir.name.endswith("-2")
+
+
+def test_stop_is_idempotent_and_start_replaces_stale(rec_env):
+    rec = recorder.start("voice")
+    rec2 = recorder.start("voice")  # forgot to stop: old one is finalized
+    assert rec.closed and not rec2.closed
+    recorder.stop()
+    recorder.stop()  # double stop: no-op
+    rec2.close()     # double close: no-op
+    assert recorder.active() is None
+
+
+# -- end-to-end wiring --------------------------------------------------------------
+
+
+def scripted_args(tmp_path, lines):
+    script = tmp_path / "script.txt"
+    script.write_text("\n".join(lines) + "\n")
+    return echo.parse_args(["--script", str(script)])
+
+
+def test_scripted_run_records_when_opted_in(rec_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("ECHO_RECORD", "1")
+    monkeypatch.setenv("ECHO_FAKE_LLM", "1")
+    args = scripted_args(tmp_path, ["echo echo", "hello there", "that's it"])
+    asyncio.new_event_loop().run_until_complete(echo.amain(args))
+    dirs = session_dirs(rec_env)
+    assert len(dirs) == 1 and dirs[0].name.endswith("_script")
+    meta = json.loads((dirs[0] / "meta.json").read_text())
+    assert meta["end_reason"] == "end_phrase"
+    assert meta["mode"] == "script"
+    transcript = (dirs[0] / "transcript.md").read_text()
+    assert "you:** hello there" in transcript
+    assert "state ACTIVE → ENDING (end_phrase)" in transcript
+
+
+def test_scripted_run_does_not_record_by_default(rec_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("ECHO_FAKE_LLM", "1")
+    args = scripted_args(tmp_path, ["echo echo", "hi", "that's it"])
+    asyncio.new_event_loop().run_until_complete(echo.amain(args))
+    assert session_dirs(rec_env) == []
+
+
+# -- the --recordings listing --------------------------------------------------------
+
+
+def test_list_recordings_empty_and_table(rec_env, capsys):
+    echo.list_recordings()
+    assert "no recordings yet" in capsys.readouterr().out
+    rec = recorder.start("voice")
+    events.emit("user_text", text="hi")
+    events.emit("assistant_text", text="hey")
+    rec.write_mic(b"\x00\x00" * 24000)  # 1 s
+    recorder.stop(end_reason="end_phrase")
+    (rec_env / "2026-01-01_000000_voice").mkdir()  # crashed session: no meta
+    echo.list_recordings()
+    out = capsys.readouterr().out
+    assert rec.dir.name in out
+    assert "0:01" in out and "1/1" in out and "end_phrase" in out
+    assert "(incomplete)" in out
+    assert "session.wav" in out  # the how-to-review pointer
+
+
+def test_no_record_flag_maps_to_env(rec_env, monkeypatch, capsys):
+    monkeypatch.setenv("ECHO_RECORD", "sentinel")  # restored by monkeypatch
+    echo.main(["--no-record", "--recordings"])     # exits after the listing
+    assert os.environ["ECHO_RECORD"] == "0"
+    assert "no recordings yet" in capsys.readouterr().out

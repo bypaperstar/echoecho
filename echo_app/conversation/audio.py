@@ -14,7 +14,7 @@ import math
 import struct
 import threading
 
-from echo_app import events
+from echo_app import events, recorder
 
 RATE = 24000
 BLOCK_FRAMES = 2400  # 100 ms at 24 kHz
@@ -148,10 +148,17 @@ class AudioIO:
     def _in_callback(self, indata, frames, time_info, status):
         # Bind locally: stop() nulls these from another thread mid-callback.
         send, loop = self.send_event, self.loop
-        if self.muted_capture or send is None or loop is None:
+        rec = recorder.active()
+        sending = not (self.muted_capture or send is None or loop is None)
+        if rec is None and not sending:
+            return
+        data = bytes(indata)
+        if rec is not None:
+            rec.write_mic(data)  # what Echo heard, muted teardown tail included
+        if not sending:
             return
         event = {"type": "input_audio_buffer.append",
-                 "audio": base64.b64encode(bytes(indata)).decode("ascii")}
+                 "audio": base64.b64encode(data).decode("ascii")}
 
         # sounddevice callbacks run on a PortAudio thread; hop to the loop.
         # Retrieve task exceptions: a send racing transport close is expected
@@ -181,11 +188,15 @@ class AudioIO:
         with self._lock:
             chunk = bytes(self._buf[:need])
             del self._buf[:need]
-        outdata[:len(chunk)] = chunk
-        if len(chunk) < need:
-            outdata[len(chunk):need] = b"\x00" * (need - len(chunk))
-        if self.tracker is not None and chunk:
-            self.tracker.advance(len(chunk) / (self.rate * 2.0) * 1000.0)
+        played = len(chunk)
+        if played < need:
+            chunk += b"\x00" * (need - played)
+        outdata[:need] = chunk
+        if self.tracker is not None and played:
+            self.tracker.advance(played / (self.rate * 2.0) * 1000.0)
+        rec = recorder.active()
+        if rec is not None:
+            rec.write_echo(chunk)  # zero-fill included: timeline stays real
 
     def play_chime(self, kind):
         self.feed_pcm(wake_chime() if kind == "wake" else end_chime())

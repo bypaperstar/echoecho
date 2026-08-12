@@ -9,6 +9,7 @@ FIXTURES_DIR = REPO_ROOT / "fixtures"
 MODELS_DIR = REPO_ROOT / "models"
 VOSK_MODEL_DIR = MODELS_DIR / "vosk-model-small-en-us-0.15"
 TASKS_LOG = WORKSPACE_DIR / ".tasks.jsonl"
+RECORDINGS_DIR = REPO_ROOT / "recordings"
 ENV_LOCAL = REPO_ROOT / ".env.local"
 
 
@@ -59,6 +60,24 @@ def output_device():
     """ECHO_OUTPUT_DEVICE: speaker device index or name substring; "" =
     follow the system default, re-checked at every session start."""
     return os.environ.get("ECHO_OUTPUT_DEVICE", "").strip()
+
+
+def recordings_dir():
+    """Where session recordings land (gitignored recordings/ by default);
+    ECHO_RECORDINGS_DIR overrides. Resolved at call time for tests."""
+    raw = os.environ.get("ECHO_RECORDINGS_DIR", "").strip()
+    return Path(raw) if raw else RECORDINGS_DIR
+
+
+def echo_record(mode="voice"):
+    """Session recording on/off (the dev feedback loop). ECHO_RECORD unset:
+    record real product use (--voice) only. Set: "0"/"false"/"no" disables
+    everywhere; anything else enables everywhere (so ECHO_RECORD=1 records
+    --text/--script runs too)."""
+    raw = os.environ.get("ECHO_RECORD", "").strip().lower()
+    if raw == "":
+        return mode == "voice"
+    return raw not in ("0", "false", "no")
 
 
 WAKE_PHRASE = "echo echo"
