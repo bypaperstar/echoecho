@@ -11,7 +11,7 @@ decisions, driving the real Session FSM + orchestrator. Script line format:
 import asyncio
 import json
 
-from echo_app import config
+from echo_app import config, events
 from echo_app.conversation.port import ConversationPort, TOOL_NAMES
 from echo_app.conversation.session import Session
 
@@ -73,13 +73,16 @@ class ScriptedAgent(ConversationPort):
             return
         # plain user utterance
         self.out("[user] %s" % line)
+        events.emit("user_text", text=line)
         session.note_user_speech_started()
         session.note_user_speech_stopped()
         if session.handle_transcript(line):
             self.out("[echo] Okay — talk soon.")
+            events.emit("assistant_text", text="Okay — talk soon.")
             session.finish()
             return
         self.out("[echo] (chats back)")
+        events.emit("assistant_text", text="(chats back)")
         session.note_assistant_response_done()
         self._drain()
         session.check_silence()
@@ -87,11 +90,14 @@ class ScriptedAgent(ConversationPort):
     def _call_tool(self, name, args):
         assert name in TOOL_NAMES, "unknown tool %r" % name
         self.out("[tool] %s %s" % (name, json.dumps(args)))
+        events.emit("tool_call", name=name, args=args)
         result = self._tool_cb(name, args) if self._tool_cb else {}
         self.out("[tool] -> %s" % json.dumps(result))
         if name == "dispatch_task":
-            self.out("[echo] On it — task %s is queued; I'll keep talking."
-                     % result.get("task_id"))
+            ack = ("On it — task %s is queued; I'll keep talking."
+                   % result.get("task_id"))
+            self.out("[echo] %s" % ack)
+            events.emit("assistant_text", text=ack)
         if name == "end_session":
             self.session.begin_ending("end_session_tool")
             return
@@ -102,9 +108,12 @@ class ScriptedAgent(ConversationPort):
         for inj in self.session.drain_injections():
             self.out("[gate] turn boundary — injecting (%s) %s"
                      % (inj.priority, inj.text))
+            events.emit("injection", text=inj.text, priority=inj.priority)
             if inj.priority == "interrupt":
                 self.out("[echo] (speaks up) %s"
                          % inj.text.split("] ", 1)[-1])
+                events.emit("assistant_text",
+                            text=inj.text.split("] ", 1)[-1])
 
     def _on_state_change(self, old, new, reason):
         self.out("[state] %s -> %s (%s)" % (old, new, reason))

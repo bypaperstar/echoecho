@@ -1,9 +1,11 @@
 """Live workspace viewer: stdlib HTTP + SSE, no dependencies.
 
-GET /            -> index.html (marked.js tabs page)
+GET /            -> index.html (marked.js tabs page + live transcript pane)
 GET /doc?f=name  -> raw markdown; basename'd, *.md only, inside workspace only
+GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
-                    and whenever a 250ms mtime poll sees a change
+                    and whenever a 250ms mtime poll sees a change to a *.md
+                    doc OR to the .events.jsonl feed
 
 Workspace writes are atomic (tmp + os.rename), so /doc never serves a
 half-written file.
@@ -17,6 +19,8 @@ from pathlib import Path
 
 POLL_INTERVAL = 0.25
 INDEX = Path(__file__).with_name("index.html")
+EVENTS_FEED = ".events.jsonl"  # echo_app.events feed inside the workspace
+TRANSCRIPT_LIMIT = 400
 
 
 def workspace_state(workspace):
@@ -35,6 +39,38 @@ def workspace_state(workspace):
     return state
 
 
+def events_feed_state(workspace):
+    """(mtime, size, inode) of the .events.jsonl feed, or None if missing —
+    folded into the SSE poll snapshot so transcript appends also fire it."""
+    try:
+        st = (Path(workspace) / EVENTS_FEED).stat()
+        return (st.st_mtime, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
+def read_transcript(workspace, limit=TRANSCRIPT_LIMIT):
+    """Last `limit` events from the feed as dicts; malformed lines skipped,
+    [] when the feed doesn't exist yet."""
+    path = Path(workspace) / EVENTS_FEED
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
 class _Handler(BaseHTTPRequestHandler):
     workspace = None   # set on the subclass by ViewerServer
     stopping = None    # threading.Event
@@ -48,6 +84,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(200, "text/html; charset=utf-8", INDEX.read_bytes())
         elif parsed.path == "/doc":
             self._doc(parsed)
+        elif parsed.path == "/transcript":
+            body = json.dumps(read_transcript(self.workspace)).encode("utf-8")
+            self._respond(200, "application/json; charset=utf-8", body)
         elif parsed.path == "/events":
             self._events()
         else:
@@ -82,11 +121,15 @@ class _Handler(BaseHTTPRequestHandler):
         last = None
         try:
             while not self.stopping.is_set():
-                state = workspace_state(self.workspace)
+                docs = workspace_state(self.workspace)
+                state = dict(docs)
+                # non-doc sentinel: a transcript append must also fire SSE,
+                # but "files" below stays *.md-only (the tabs JS depends on it)
+                state["__events__"] = events_feed_state(self.workspace)
                 if state != last:
                     last = state
                     data = json.dumps({"files": [
-                        {"name": n, "mtime": v[0]} for n, v in state.items()]})
+                        {"name": n, "mtime": v[0]} for n, v in docs.items()]})
                     self.wfile.write(
                         ("event: reload\ndata: %s\n\n" % data).encode("utf-8"))
                     self.wfile.flush()

@@ -124,7 +124,7 @@ async def voice_main(args):
     import threading
     import time
 
-    from echo_app import config
+    from echo_app import config, events
     from echo_app.conversation.audio import AudioIO
     from echo_app.conversation.realtime import (RealtimeClient,
                                                 WebSocketTransport)
@@ -167,14 +167,18 @@ async def voice_main(args):
     try:
         while True:
             # -- IDLE: pump mic chunks through the detector -----------------
+            wake_via = "manual"
             if manual_wake.is_set():
                 manual_wake.clear()
             else:
                 chunk = await loop.run_in_executor(None, mic.read, 0.2)
-                if chunk is None or not detector.detect(chunk):
+                if chunk is not None and detector.detect(chunk):
+                    wake_via = "voice"
+                else:
                     if not manual_wake.is_set():
                         continue
                     manual_wake.clear()
+            events.emit("wake", via=wake_via)
             # -- WAKE -> ACTIVE session --------------------------------------
             since = None  # "[since last session]" for tasks done while IDLE
             missed = orch.results_since(idle_since) if idle_since else []
@@ -231,6 +235,9 @@ def main(argv=None):
     if args.mic_check:
         mic_check()
         return
+    from echo_app import events
+    events.reset(mode="voice" if args.voice else
+                 ("script" if args.script else "text"))
     if args.voice:
         try:
             import sounddevice  # noqa: F401  (lazy: voice-mode-only dependency)

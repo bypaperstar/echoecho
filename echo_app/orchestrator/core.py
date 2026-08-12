@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from echo_app import config
+from echo_app import config, events
 from echo_app.bus import Injection, Task, TaskRequest, TaskResult
 from echo_app.orchestrator import log as tasklog
 from echo_app.orchestrator.ranker import rank
@@ -61,6 +61,7 @@ class Orchestrator:
         tasklog.append_event(self.log_path, "queued", task_id=task.id,
                              kind=task.kind, instructions=request.instructions,
                              source=request.source)
+        events.emit("task", task_id=task.id, kind=task.kind, status="queued")
         self.inbox.put_nowait(task)
         return task
 
@@ -95,6 +96,7 @@ class Orchestrator:
 
     async def _run_task(self, task):  # type: (Task) -> None
         task.status = "running"
+        events.emit("task", task_id=task.id, kind=task.kind, status="running")
         worker = self.registry.get(task.kind)
         try:
             if worker is None:
@@ -114,6 +116,8 @@ class Orchestrator:
                              kind=task.kind, say=result.say, priority=priority,
                              artifacts_touched=result.artifacts_touched,
                              follow_ups=[f.kind for f in result.follow_ups])
+        events.emit("task", task_id=task.id, kind=task.kind,
+                    status=task.status, say=result.say, priority=priority)
         for follow in result.follow_ups:  # generic chaining
             follow.source = "follow_up"
             self.submit(follow)

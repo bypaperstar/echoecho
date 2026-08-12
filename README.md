@@ -35,7 +35,9 @@ python3 -m sounddevice
 # 4. Fetch the Vosk wake-word model (~40 MB into models/, gitignored):
 bash scripts/fetch_models.sh
 
-# 5. Key:
+# 5. Key: put it in .env.local (gitignored, loaded at startup)...
+echo 'OPENAI_API_KEY=sk-...' > .env.local
+#    ...or export it — a real env var always beats .env.local:
 export OPENAI_API_KEY=sk-...
 
 # 6. Step zero every time you use a new terminal app: mic check.
@@ -53,6 +55,29 @@ Then open the live workspace at <http://127.0.0.1:8765/>, say **"echo echo"**
 (or press enter in the terminal as the manual-wake override), talk, and say
 **"that's it"** when you're done. The wake loop idles at ~2% of one core and
 $0 of API while no session is open.
+
+### Live UI
+
+The browser tab at <http://127.0.0.1:8765/> (override the port with
+`ECHO_VIEWER_PORT`, skip it with `--no-viewer`) is the live "what is
+happening" view, in two panes:
+
+- **Left — transcript & activity.** The running conversation as chat bubbles
+  (you right, Echo left) interleaved with plainly-explained activity lines:
+  wake events, session state changes, tasks dispatched to background workers,
+  worker completions (with what the interrupt/ambient/silent priority means),
+  and results being handed back into the live conversation. A collapsible
+  "How Echo works" box sits at the top. Driven by an append-only
+  `workspace/.events.jsonl` feed (truncated on each run) served at
+  `/transcript`; the header shows the session state badge, connected Realtime
+  model, and a running-task counter.
+- **Right — workspace docs.** One tab per `workspace/*.md` file, rendered
+  with marked.js, auto-focusing the most recently modified file and flashing
+  changed sections — exactly as before.
+
+Both panes update from the same SSE stream; `--text` and `--script` runs
+populate the transcript the same way voice does, so the whole UI works
+keyless and headless.
 
 ### Model / cost flags
 

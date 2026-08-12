@@ -14,7 +14,7 @@ import os
 import time
 from pathlib import Path
 
-from echo_app import config
+from echo_app import config, events
 from echo_app.conversation.port import ConversationPort
 from echo_app.conversation.session import ACTIVE, ENDING, Session
 from echo_app.conversation.textmode import SYSTEM_PROMPT, TOOLS
@@ -268,6 +268,8 @@ class RealtimeClient(ConversationPort):
         elif self.since_last_session:
             # tasks that finished while IDLE, surfaced on wake
             await self.transport.send(_system_item(self.since_last_session))
+        events.emit("session", event="connected",
+                    model=getattr(self.transport, "model", ""))
         self._connected_at = self.clock()
         self.session.wake()  # no-op if the FSM is already ACTIVE
 
@@ -281,6 +283,9 @@ class RealtimeClient(ConversationPort):
             await asyncio.sleep(self.reconnect_backoff * self._reconnects)
             self._log("transport lost — reconnect %d/%d"
                       % (self._reconnects, self.max_reconnects))
+            events.emit("session", event="reconnecting",
+                        detail="attempt %d/%d" % (self._reconnects,
+                                                  self.max_reconnects))
             try:
                 self.transport = self._transport_factory()
                 await self._connect(reconnect=True)
@@ -322,7 +327,12 @@ class RealtimeClient(ConversationPort):
         elif t == "input_audio_buffer.speech_stopped":
             self.session.note_user_speech_stopped()
         elif t == "conversation.item.input_audio_transcription.completed":
+            events.emit("user_text", text=event.get("transcript", ""))
             self.session.handle_transcript(event.get("transcript", ""))
+        elif t in ("response.output_audio_transcript.done",
+                   "response.audio_transcript.done"):  # GA sibling name
+            # purely additive UI feed: what Echo actually said out loud
+            events.emit("assistant_text", text=event.get("transcript", ""))
         elif t == "error":
             self._log("server error: %s" % json.dumps(event.get("error", {})))
 
@@ -354,6 +364,7 @@ class RealtimeClient(ConversationPort):
                 self._log("malformed tool arguments for %s: %r"
                           % (call.get("name"), raw))
                 args = {}
+            events.emit("tool_call", name=call.get("name"), args=args)
             try:
                 result = self._tool_cb(call["name"], args) if self._tool_cb else {}
             except Exception as exc:  # a handler bug must not kill the session
@@ -401,6 +412,7 @@ class RealtimeClient(ConversationPort):
             if text.startswith("[task"):
                 text += " Weave in naturally."
             await self.transport.send(_system_item(text))
+            events.emit("injection", text=inj.text, priority=inj.priority)
             interrupt = interrupt or inj.priority == "interrupt"
         if interrupt:
             await self.transport.send({"type": "response.create"})
@@ -408,6 +420,8 @@ class RealtimeClient(ConversationPort):
 
     async def _shutdown(self):
         self._done = True
+        events.emit("session", event="closed",
+                    detail=self.session.end_reason or "")
         try:
             await self.transport.close()
         except Exception:

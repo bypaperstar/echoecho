@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 
-from echo_app import config
+from echo_app import config, events
 from echo_app.conversation.port import ConversationPort
 from echo_app.conversation.session import Session
 
@@ -169,10 +169,12 @@ class TextRepl(ConversationPort):
                 session.wake()
                 self.history = []
                 self.out("[echo] (chime) I'm listening.")
+                events.emit("assistant_text", text="(chime) I'm listening.")
             else:
                 self.out('(asleep — say "echo echo")')
             return
         self.out("[user] %s" % line)
+        events.emit("user_text", text=line)
         session.note_user_speech_started()
         session.note_user_speech_stopped()
         session.handle_transcript(line)  # end-phrase regex belt-and-suspenders
@@ -183,6 +185,7 @@ class TextRepl(ConversationPort):
         session.check_silence()
         if session.state == "ENDING":
             self.out("[echo] Okay — talk soon.")
+            events.emit("assistant_text", text="Okay — talk soon.")
             session.finish()
 
     async def _tool_loop(self):
@@ -192,6 +195,7 @@ class TextRepl(ConversationPort):
             for item in items:
                 if item["type"] == "message":
                     self.out("[echo] %s" % item["text"])
+                    events.emit("assistant_text", text=item["text"])
                     self.history.append({"role": "assistant",
                                          "content": item["text"]})
                 elif item["type"] == "function_call":
@@ -204,6 +208,7 @@ class TextRepl(ConversationPort):
                 if isinstance(args, str):
                     args = json.loads(args) if args.strip() else {}
                 self.out("[tool] %s %s" % (call["name"], json.dumps(args)))
+                events.emit("tool_call", name=call["name"], args=args)
                 result = self._tool_cb(call["name"], args) if self._tool_cb else {}
                 self.out("[tool] -> %s" % json.dumps(result))
                 self.history.append({"type": "function_call_output",
@@ -219,4 +224,5 @@ class TextRepl(ConversationPort):
             if text.startswith("[task"):
                 text += " Weave in naturally."
             self.out("[inject/%s] %s" % (inj.priority, text))
+            events.emit("injection", text=inj.text, priority=inj.priority)
             self.history.append({"role": "system", "content": text})

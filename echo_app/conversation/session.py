@@ -5,7 +5,7 @@ the same object. Clock is injectable so the 600s silence timeout tests fast.
 """
 import time
 
-from echo_app import config
+from echo_app import config, events
 
 IDLE = "IDLE"
 ACTIVE = "ACTIVE"
@@ -33,6 +33,7 @@ class Session:
 
     def _move(self, new, reason=""):
         old, self.state = self.state, new
+        events.emit("state", frm=old, to=new, reason=reason)  # UI feed only
         self.on_state_change(old, new, reason)
 
     def wake(self):

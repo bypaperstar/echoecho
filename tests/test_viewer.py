@@ -1,10 +1,13 @@
-"""Viewer server: GET /, /doc safety, SSE reload latency, no partial reads."""
+"""Viewer server: GET /, /doc safety, /transcript feed, SSE reload latency,
+no partial reads."""
 import http.client
+import json
 import threading
 import time
 
 import pytest
 
+from echo_app import config, events
 from echo_app.services import artifacts
 from echo_app.viewer.server import ViewerServer
 
@@ -83,6 +86,76 @@ def test_sse_reload_within_500ms_of_touch(server, tmp_path):
         ev = read_sse_event(resp, t0 + 0.5)
         assert time.monotonic() - t0 < 0.5
         assert "event: reload" in ev and "doc.md" in ev
+    finally:
+        conn.close()
+
+
+def test_transcript_empty_without_feed(server):
+    status, body = get(server, "/transcript")
+    assert status == 200
+    assert json.loads(body) == []
+
+
+def test_transcript_returns_emitted_events(server, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)  # emit -> server ws
+    events.emit("user_text", text="hello echo")
+    events.emit("task", task_id="t1", kind="sleep.echo", status="done",
+                say="done!", priority="interrupt")
+    # malformed lines must be skipped, not break the endpoint
+    with open(tmp_path / events.FEED_NAME, "a") as f:
+        f.write("{not json}\n")
+    events.emit("injection", text="[task t1 done] done!", priority="interrupt")
+    status, body = get(server, "/transcript")
+    assert status == 200
+    got = json.loads(body)
+    assert [e["type"] for e in got] == ["user_text", "task", "injection"]
+    assert got[0]["text"] == "hello echo"
+    assert got[1]["say"] == "done!"
+
+
+def test_transcript_caps_at_last_400_events(server, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)
+    with open(tmp_path / events.FEED_NAME, "w") as f:
+        for i in range(450):
+            f.write(json.dumps({"ts": float(i), "type": "user_text",
+                                "text": "line %d" % i}) + "\n")
+    _, body = get(server, "/transcript")
+    got = json.loads(body)
+    assert len(got) == 400
+    assert got[0]["text"] == "line 50" and got[-1]["text"] == "line 449"
+
+
+def test_sse_fires_within_500ms_of_an_emit(server, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)
+    host, port = server.httpd.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    conn.request("GET", "/events")
+    resp = conn.getresponse()
+    try:
+        read_sse_event(resp, time.monotonic() + 1.0)  # initial snapshot
+        events.emit("user_text", text="wake the poll")
+        t0 = time.monotonic()
+        ev = read_sse_event(resp, t0 + 0.5)
+        assert time.monotonic() - t0 < 0.5
+        assert "event: reload" in ev
+    finally:
+        conn.close()
+
+
+def test_reload_files_list_stays_md_only(server, tmp_path, monkeypatch):
+    """The events feed drives SSE but must never leak into 'files' — the
+    tabs JS (and this contract) depend on it holding only *.md docs."""
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)
+    artifacts.write_atomic(tmp_path, "doc.md", "# hi")
+    events.emit("user_text", text="not a doc")
+    host, port = server.httpd.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    conn.request("GET", "/events")
+    resp = conn.getresponse()
+    try:
+        ev = read_sse_event(resp, time.monotonic() + 1.0)
+        data = json.loads(ev.split("data: ", 1)[1])
+        assert [f["name"] for f in data["files"]] == ["doc.md"]
     finally:
         conn.close()
 
