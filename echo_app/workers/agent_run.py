@@ -18,16 +18,21 @@ import signal
 from echo_app import config
 from echo_app.bus import TaskResult
 from echo_app.services import agent_cli, artifacts
+from echo_app.services import vm as vm_mod
 from echo_app.workers.base import register
 
 KIND = "agent.run"
 DESCRIPTION = ("hand any other task to a background agent that can research, "
                "write or edit any workspace file, and run code; pass "
                "args.task_id to steer, extend, or answer a previous agent "
-               "task")
+               "task; args.sandbox='vm' runs it inside Echo's own Mac VM "
+               "(pick it for risky or code-heavy work)")
 ARG_SCHEMA = {"task_id": {
     "type": "string",
-    "description": "resume a previous agent task: same agent session"}}
+    "description": "resume a previous agent task: same agent session"},
+    "sandbox": {
+    "type": "string", "enum": ["shell", "vm"],
+    "description": "where the agent runs; vm = Echo's own disposable Mac"}}
 
 STDERR_TAIL = 2000
 SAY_LIMIT = 240
@@ -197,13 +202,26 @@ async def run_agent(task, ctx):
         return TaskResult(say="The agent couldn't start: %s" % exc,
                           priority="interrupt", data={"error": str(exc)})
 
+    # sandbox ladder (PR 12): the tier decides what host argv actually runs —
+    # tier 1 spawns the CLI directly, tier 2 wraps it in ssh into Echo's VM
+    # with the workspace virtiofs-mounted; the pipeline below is identical
+    sandbox = vm_mod.for_task(task, ctx)
+    try:
+        await sandbox.prepare()
+    except Exception as exc:
+        return TaskResult(
+            say="The %s sandbox couldn't start: %s"
+                % (sandbox.name, _speakable(str(exc))),
+            data={"error": "sandbox: %s" % exc, "sandbox": sandbox.name})
+    argv, cwd = sandbox.command(argv, ctx.workspace)
+
     # read the budget BEFORE spawning: a misconfigured ECHO_AGENT_TIMEOUT
     # must fail fast, never after a live agent is already running (the
     # finally below can only reap a process it got to assign to `proc`)
     budget = config.agent_timeout()
     before = _snapshot(ctx.workspace)
     proc = await asyncio.create_subprocess_exec(
-        *argv, cwd=str(ctx.workspace),
+        *argv, cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         # own process group: the agent spawns its own children (builds, dev
         # servers, tool subprocesses); a budget kill must take the whole tree,
@@ -234,7 +252,7 @@ async def run_agent(task, ctx):
     touched = sorted(name for name, mt in _snapshot(ctx.workspace).items()
                      if before.get(name) != mt)
     data = {"result": state["result"], "cli": runtime.name, "exit_code": rc,
-            "session_id": state["session_id"],
+            "session_id": state["session_id"], "sandbox": sandbox.name,
             "progress": state["progress"][-5:]}
     if state["cost_usd"] is not None:
         data["cost_usd"] = state["cost_usd"]

@@ -117,6 +117,17 @@ agents are bounded by a wall-clock budget (`ECHO_AGENT_TIMEOUT`, default
 15 min); on breach the agent is stopped and the partial work is left staged
 and resumable.
 
+PR 12 adds the sandbox ladder's tier 2 — **Echo's own macOS VM**. `ECHO_SANDBOX=vm`
+(or a per-task `args.sandbox="vm"`) runs the agent inside a macOS guest managed by
+[Lume](https://github.com/trycua/cua) over SSH, with `workspace/` shared read-write
+so the viewer and touched-file detection keep working unchanged. Scratch VMs are
+APFS-clones of a golden image, so rollback ("undo that") is a delete + re-clone.
+Build the golden image once on the Mac: `AGENT=1 bash scripts/vm_golden.sh` (pulls a
+~18 GB base image, installs Echo's SSH key, allows model API keys through the guest
+`sshd`, and installs the `claude` CLI in the guest). The default tier stays `shell`
+(host subprocess); the whole VM code path is exercised keyless/Linux via a `FakeVM`
+behind the same port, so CI never needs a Mac.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.

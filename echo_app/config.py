@@ -65,6 +65,53 @@ def agent_timeout():
     return float(os.environ.get("ECHO_AGENT_TIMEOUT", "900"))
 
 
+# -- sandbox ladder tier 2: Echo's own macOS VM (services/vm.py, PR 12) -------
+
+def sandbox_tier():
+    """ECHO_SANDBOX: default tier for agent.run — "shell" (host subprocess,
+    cwd=workspace) or "vm" (Echo's own macOS guest via lume). Per-task
+    override: dispatch args {"sandbox": "vm"}."""
+    return os.environ.get("ECHO_SANDBOX", "shell").strip() or "shell"
+
+
+def vm_name():
+    return os.environ.get("ECHO_VM_NAME", "echo-vm").strip()
+
+
+def vm_golden():
+    """The golden image VM (agent CLI + ssh key preinstalled) that scratch
+    VMs are APFS-cloned from; built once by scripts/vm_golden.sh."""
+    return os.environ.get("ECHO_VM_GOLDEN", "echo-golden").strip()
+
+
+def vm_guest_user():
+    return os.environ.get("ECHO_VM_USER", "lume").strip()
+
+
+def vm_ssh_key():
+    return os.environ.get("ECHO_VM_SSH_KEY", "~/.ssh/echo_vm_ed25519").strip()
+
+
+def vm_guest_workspace():
+    """Where the shared workspace appears inside the guest (virtiofs mount;
+    macOS guests surface shared dirs under /Volumes/My Shared Files)."""
+    return os.environ.get("ECHO_VM_GUEST_WORKSPACE",
+                          "/Volumes/My Shared Files/workspace").strip()
+
+
+def vm_boot_timeout():
+    return float(os.environ.get("ECHO_VM_BOOT_TIMEOUT", "180"))
+
+
+def vm_pass_env():
+    """Env var NAMES forwarded into the guest over SSH (SendEnv; the golden
+    image's sshd AcceptEnv-lists them) so the in-guest agent can reach its
+    model API."""
+    raw = os.environ.get("ECHO_VM_PASS_ENV",
+                         "ANTHROPIC_API_KEY OPENAI_API_KEY")
+    return [n for n in raw.replace(",", " ").split() if n]
+
+
 def realtime_model():
     return os.environ.get("ECHO_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 
