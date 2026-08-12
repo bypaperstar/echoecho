@@ -246,8 +246,12 @@ async def run_agent(task, ctx):
         drain.cancel()
         await asyncio.gather(pump, drain, return_exceptions=True)
         if proc.returncode is None:
-            _kill_tree(proc)
+            _kill_tree(proc)  # tier 1: the agent tree. tier 2: only local ssh
             await proc.wait()
+            # tier 2's real agent runs in the guest, unreachable over the now
+            # dead ssh — dispose the whole VM so no guest child outlives the
+            # budget (no-op for shell/fake without a reset())
+            await vm_mod.discard(sandbox)
 
     touched = sorted(name for name, mt in _snapshot(ctx.workspace).items()
                      if before.get(name) != mt)

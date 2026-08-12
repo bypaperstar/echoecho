@@ -97,10 +97,14 @@ fi
 gssh() { ssh -i "$KEY" $SSH_OPTS "$GUEST_USER@$IP" "$@"; }
 say "key auth OK: $(gssh 'echo ok from $(hostname)')"
 
-if ! gssh "grep -q '^AcceptEnv ANTHROPIC_API_KEY' /etc/ssh/sshd_config" 2>/dev/null; then
-  say "allowing model API keys through the guest sshd (AcceptEnv)"
+# least privilege: allow ONLY the key the in-guest runtime needs. Default is
+# claude -> ANTHROPIC_API_KEY; override ACCEPT_ENV for a codex/other guest.
+ACCEPT_ENV=${ACCEPT_ENV:-ANTHROPIC_API_KEY}
+if ! gssh "grep -q '^AcceptEnv $ACCEPT_ENV' /etc/ssh/sshd_config" 2>/dev/null; then
+  say "allowing $ACCEPT_ENV through the guest sshd (AcceptEnv)"
   gssh "echo '$GUEST_PASS' | sudo -S sh -c \
-    'echo \"AcceptEnv ANTHROPIC_API_KEY OPENAI_API_KEY\" >> /etc/ssh/sshd_config'"
+    'echo \"AcceptEnv $ACCEPT_ENV\" >> /etc/ssh/sshd_config \
+     && launchctl kickstart -k system/com.openssh.sshd 2>/dev/null || true'"
 fi
 
 # -- 5. optional: the agent runtime inside the guest -----------------------------

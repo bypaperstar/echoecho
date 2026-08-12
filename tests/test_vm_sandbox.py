@@ -160,7 +160,10 @@ def test_lume_vm_wraps_argv_in_ssh(monkeypatch):
     vm.ip = "192.168.64.7"
     argv, cwd = vm.command(["claude", "-p", "do a thing", "--resume", "s1"],
                            Path("/host/ws"))
-    assert argv[0] == "ssh" and "-tt" in argv
+    assert argv[0] == "ssh"
+    # NO -tt: a PTY would merge guest stdout+stderr (corrupts the JSONL parse
+    # + empties the stderr tail); teardown is via discard(), not tty HUP
+    assert "-tt" not in argv
     assert "lume@192.168.64.7" in argv
     assert "-i" in argv and "/keys/echo" in argv
     assert any("SendEnv=ANTHROPIC_API_KEY" in a for a in argv)
@@ -172,7 +175,83 @@ def test_lume_vm_wraps_argv_in_ssh(monkeypatch):
     assert cwd == Path("/host/ws")
 
 
+def test_vm_pass_env_defaults_to_anthropic_only(monkeypatch):
+    """Least privilege: the untrusted VM gets ONLY the key its guest runtime
+    (claude) needs — never Echo's OpenAI voice key by default."""
+    monkeypatch.delenv("ECHO_VM_PASS_ENV", raising=False)
+    assert config.vm_pass_env() == ["ANTHROPIC_API_KEY"]
+    monkeypatch.setenv("ECHO_VM_PASS_ENV", "OPENAI_API_KEY FOO_KEY")
+    assert config.vm_pass_env() == ["OPENAI_API_KEY", "FOO_KEY"]
+    vm = LumeVM(vm_name="echo-vm")
+    vm.ip = "10.0.0.2"
+    argv, _ = vm.command(["claude", "-p", "x"], Path("/ws"))
+    monkeypatch.delenv("ECHO_VM_PASS_ENV", raising=False)
+    argv2, _ = vm.command(["claude", "-p", "x"], Path("/ws"))
+    assert not any("OPENAI_API_KEY" in a for a in argv2)  # default keeps it out
+
+
 def test_lume_vm_command_requires_prepared_ip():
     vm = LumeVM(vm_name="echo-vm")
     with pytest.raises(vm_mod.SandboxUnavailable):
         vm.command(["claude"], Path("/ws"))
+
+
+# -- forced-kill disposes the VM (guest orphans can't outlive the budget) -----
+
+def test_budget_kill_discards_the_vm_via_reset(tmp_path, monkeypatch):
+    """On a budget breach the local ssh dies but can't reap guest children,
+    so the worker must dispose the whole VM. Proven with a FakeVM whose
+    reset() records it, driven through the real timeout+kill path."""
+    monkeypatch.setenv("ECHO_AGENT_TIMEOUT", "0.3")
+
+    class RecordingVM(FakeVM):
+        def __init__(self, root):
+            super().__init__(root)
+            self.reset_calls = 0
+
+        async def reset(self):
+            self.reset_calls += 1
+
+        def command(self, argv, workspace):
+            # ignore the (hanging) agent argv: simulate an ssh that hangs
+            return ["sh", "-c", "sleep 30"], Path(workspace)
+
+    vm = RecordingVM(tmp_path / "guest")
+    orch, _, _ = run_orch(
+        [TaskRequest(kind="agent.run", instructions="loop", args={"sandbox": "vm"})],
+        tmp_path, extra={"agent_cli": ClaudeCLI(), "sandbox": vm}, timeout=10.0)
+    assert "budget" in orch.tasks["t1"].result.say
+    assert vm.reset_calls == 1  # the VM was thrown away on the kill
+
+
+def test_discard_clears_the_warm_singleton(monkeypatch):
+    monkeypatch.setenv("ECHO_SANDBOX", "vm")
+    vm_mod._shared_vm = None
+    ctx = WorkerContext(workspace=Path("/tmp"))
+    warm = for_task(Task(id="t1", request=TaskRequest(kind="agent.run")), ctx)
+    assert vm_mod._shared_vm is warm
+
+    async def fake_reset():
+        fake_reset.called = True
+    fake_reset.called = False
+    warm.reset = fake_reset
+    asyncio.run(vm_mod.discard(warm))
+    assert fake_reset.called
+    assert vm_mod._shared_vm is None  # next task re-clones a clean guest
+
+
+def test_clean_completion_does_not_discard(tmp_path):
+    """A normally-finished task must NOT reset the warm VM."""
+    calls = {"reset": 0}
+
+    class CountingVM(FakeVM):
+        async def reset(self):
+            calls["reset"] += 1
+
+    script = write_script(tmp_path / "s.jsonl", [
+        {"type": "result", "is_error": False, "session_id": "s", "result": "ok"}])
+    run_orch([TaskRequest(kind="agent.run", instructions="x",
+                          args={"sandbox": "vm"})],
+             tmp_path, extra={"agent_cli": FakeAgentCLI(script),
+                              "sandbox": CountingVM(tmp_path / "g")})
+    assert calls["reset"] == 0  # no forced kill -> VM kept warm

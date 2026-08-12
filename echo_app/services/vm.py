@@ -6,17 +6,21 @@ worker's whole subprocess pipeline (streaming, budgets, process-group kill)
 is identical across tiers:
 
   ShellSandbox  tier 1: the CLI runs on the host, cwd=workspace/ (default)
-  LumeVM        tier 2: the CLI runs inside a macOS guest over ssh -tt, the
-                workspace virtiofs-mounted read-write; the VM is an APFS
-                clone of a golden image (scripts/vm_golden.sh), so reset()
-                = delete + re-clone — "undo that" is cheap by construction
+  LumeVM        tier 2: the CLI runs inside a macOS guest over ssh (separate
+                stdout/stderr, so the JSONL parse and the stderr tail behave
+                exactly as tier 1), the workspace virtiofs-mounted
+                read-write; the VM is an APFS clone of a golden image
+                (scripts/vm_golden.sh), so reset() = delete + re-clone —
+                "undo that" is cheap by construction
   FakeVM        CI: same port, local tmpdir as the "guest"; keeps the whole
                 vm code path keyless and Linux-runnable
 
 Warm policy: one shared LumeVM per process, booted on first use and left
 running between tasks (clone ~seconds, cold boot ~30s, warm exec ~instant).
-Killing the host ssh (budget breach) drops the tty, which HUPs the remote
-tree — and the VM is disposable anyway.
+Teardown on a forced kill (budget breach) can't reach guest children over a
+dead ssh, so the worker calls discard() — reset() throws the whole disposable
+VM away and the next task re-clones a clean one; that, not SIGHUP, is what
+guarantees no guest orphan outlives its budget.
 """
 import asyncio
 import json
@@ -158,7 +162,11 @@ class LumeVM:
         remote = "cd %s && exec %s" % (
             shlex.quote(config.vm_guest_workspace()),
             " ".join(shlex.quote(a) for a in argv))
-        ssh = ["ssh", "-tt",  # tty: killing host ssh HUPs the remote tree
+        # NO -tt: a PTY would merge the guest agent's stdout+stderr onto one
+        # channel (empties the stderr tail, can splice stderr bytes into the
+        # JSONL stream and corrupt the result line). Guest teardown on a kill
+        # is handled by discard()/reset(), not by tty HUP.
+        ssh = ["ssh",
                "-i", str(Path(config.vm_ssh_key()).expanduser()),
                "-o", "StrictHostKeyChecking=no",
                "-o", "UserKnownHostsFile=/dev/null",
@@ -207,6 +215,23 @@ def shared_vm(workspace=None):
     if _shared_vm is None:
         _shared_vm = LumeVM(workspace=workspace)
     return _shared_vm
+
+
+async def discard(sandbox):
+    """Called by the worker after it had to FORCE-KILL an agent (budget
+    breach, exception): a dead local ssh can't reap guest children, so throw
+    the whole disposable VM away. reset() is a no-op tier for shell (host
+    process-group kill already took the tree). Clears the warm singleton so
+    the next task re-clones a clean guest."""
+    global _shared_vm
+    reset = getattr(sandbox, "reset", None)
+    if reset is not None:
+        try:
+            await reset()
+        except Exception:
+            pass
+    if sandbox is _shared_vm:
+        _shared_vm = None
 
 
 def for_task(task, ctx):

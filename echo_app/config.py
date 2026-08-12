@@ -106,9 +106,11 @@ def vm_boot_timeout():
 def vm_pass_env():
     """Env var NAMES forwarded into the guest over SSH (SendEnv; the golden
     image's sshd AcceptEnv-lists them) so the in-guest agent can reach its
-    model API."""
-    raw = os.environ.get("ECHO_VM_PASS_ENV",
-                         "ANTHROPIC_API_KEY OPENAI_API_KEY")
+    model API. Least privilege: default to ANTHROPIC_API_KEY only — the
+    golden image ships the `claude` CLI, which needs nothing else, and the
+    vm tier runs untrusted code, so Echo's other keys (the OpenAI voice key)
+    stay out of the guest. A codex guest sets ECHO_VM_PASS_ENV explicitly."""
+    raw = os.environ.get("ECHO_VM_PASS_ENV", "ANTHROPIC_API_KEY")
     return [n for n in raw.replace(",", " ").split() if n]
 
 
