@@ -7,10 +7,13 @@ MODEL="vosk-model-small-en-us-0.15"
 DEST="$ROOT/models"
 URL="https://alphacephei.com/vosk/models/$MODEL.zip"
 
-if [ -d "$DEST/$MODEL" ]; then
+# Check for an actual model file, not just the directory — sync tools can
+# recreate the (gitignored) tree as empty dirs, which must not skip the fetch.
+if [ -f "$DEST/$MODEL/am/final.mdl" ]; then
     echo "already present: $DEST/$MODEL"
     exit 0
 fi
+rm -rf "$DEST/$MODEL"
 
 mkdir -p "$DEST"
 echo "downloading $URL ..."
