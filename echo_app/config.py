@@ -9,6 +9,23 @@ FIXTURES_DIR = REPO_ROOT / "fixtures"
 MODELS_DIR = REPO_ROOT / "models"
 VOSK_MODEL_DIR = MODELS_DIR / "vosk-model-small-en-us-0.15"
 TASKS_LOG = WORKSPACE_DIR / ".tasks.jsonl"
+ENV_LOCAL = REPO_ROOT / ".env.local"
+
+
+def load_env_local(path=None):
+    """Load KEY=VALUE lines from .env.local into os.environ (gitignored;
+    holds OPENAI_API_KEY etc. for local runs). Real env vars win."""
+    path = Path(path) if path else ENV_LOCAL
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
 
 
 def _flag(name):

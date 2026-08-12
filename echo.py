@@ -219,6 +219,8 @@ async def voice_main(args):
 
 
 def main(argv=None):
+    from echo_app import config
+    config.load_env_local()  # .env.local secrets; real env vars win
     args = parse_args(argv)
     if args.model:
         os.environ["ECHO_REALTIME_MODEL"] = args.model
