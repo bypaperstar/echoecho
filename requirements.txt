@@ -2,3 +2,4 @@ openai==2.48.0
 websockets==15.0.1
 vosk
 recipe-scrapers
+audioop-lts; python_version >= "3.13"  # test-only: WAV resample in tests/test_wake.py
