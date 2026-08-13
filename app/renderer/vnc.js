@@ -45,6 +45,9 @@
   let statusEl = null;
   let connected = false;
   let viewOnly = false;
+  // Bumped by teardown(): an in-flight open() whose captured gen falls behind
+  // is superseded and must not touch module state or the (rebuilt) DOM.
+  let openGen = 0;
 
   function setStatus(text) {
     if (!statusEl) return;
@@ -71,6 +74,7 @@
   }
 
   function teardown() {
+    openGen++;
     if (rfb) {
       try { rfb.disconnect(); } catch {}
       rfb = null;
@@ -86,6 +90,7 @@
     async open(container, opts = {}) {
       teardown();
       buildDom(container);
+      const gen = openGen; // superseded once a later teardown() bumps past us
       viewOnly = !!opts.viewOnly;
       setStatus("Waking Echo's Mac…");
 
@@ -93,18 +98,26 @@
       try {
         info = await window.orb.vncConnect();
       } catch (err) {
+        if (gen !== openGen) throw new Error('superseded');
         setStatus("Echo's Mac is asleep");
         throw err;
       }
+      if (gen !== openGen) throw new Error('superseded');
       let RFB;
       try {
         RFB = await loadRFB();
       } catch (err) {
+        if (gen !== openGen) throw new Error('superseded');
         setStatus("Echo's Mac view failed to load");
         throw err;
       }
+      if (gen !== openGen) throw new Error('superseded');
 
       return new Promise((resolve, reject) => {
+        if (gen !== openGen) {
+          reject(new Error('superseded'));
+          return;
+        }
         let settled = false;
         rfb = new RFB(screenEl, info.wsUrl, {
           credentials: { password: info.password || '' },
@@ -117,12 +130,20 @@
         rfb.viewOnly = viewOnly;
 
         rfb.addEventListener('connect', () => {
+          if (gen !== openGen) {
+            if (!settled) { settled = true; reject(new Error('superseded')); }
+            return;
+          }
           connected = true;
           setStatus('');
           try { rfb.focus(); } catch {}
           if (!settled) { settled = true; resolve(); }
         });
         rfb.addEventListener('disconnect', (e) => {
+          if (gen !== openGen) {
+            if (!settled) { settled = true; reject(new Error('superseded')); }
+            return;
+          }
           connected = false;
           const clean = !!(e.detail && e.detail.clean);
           setStatus(clean ? "Echo's Mac closed the session" : "Echo's Mac is asleep");
@@ -132,10 +153,12 @@
           }
         });
         rfb.addEventListener('credentialsrequired', () => {
+          if (gen !== openGen) return;
           if (info.password) rfb.sendCredentials({ password: info.password });
           else setStatus("Echo's Mac wants a password Echo doesn't have");
         });
         rfb.addEventListener('securityfailure', (e) => {
+          if (gen !== openGen) return;
           const reason = e.detail && e.detail.reason;
           setStatus("Echo's Mac refused the connection" + (reason ? `: ${reason}` : ''));
         });

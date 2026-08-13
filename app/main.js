@@ -67,27 +67,46 @@ function createWindow() {
   // demo mode reaches the renderer as a query param — the clean channel
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'),
                DEMO ? { query: { demo: '1' } } : undefined);
+  win.webContents.on('did-finish-load', () => {
+    const queued = pendingSends;
+    pendingSends = [];
+    for (const [channel, payload] of queued) win.webContents.send(channel, payload);
+  });
   win.on('blur', () => {
     // Clicking away dismisses, like a menu-bar popover — unless the user is
     // driving Echo's Mac, where focus loss is routine (drag, cmd-tab test).
-    if (visible && !SMOKE) win.webContents.send('orb:blur');
+    if (visible && !SMOKE) sendToScene('orb:blur');
   });
   win.on('closed', () => {
+    // Mirrors orb:hidden so the tray/shortcut toggle summons after a WM close.
+    visible = false;
     win = null;
   });
 }
 
 // webContents.send before the renderer finishes loading is silently lost —
 // and the first summon (or a wake arriving during startup) races the load.
+// Sends queue until did-finish-load and flush in order; lifecycle channels
+// are last-intent-wins, so only the newest reveal/dismiss/blur survives.
+const LIFECYCLE = new Set(['orb:reveal', 'orb:dismiss', 'orb:blur']);
+let pendingSends = [];
+
 function sendToScene(channel, payload) {
   if (!win) return;
   const wc = win.webContents;
   if (wc.isLoadingMainFrame()) {
-    wc.once('did-finish-load', () => wc.send(channel, payload));
+    if (LIFECYCLE.has(channel)) {
+      pendingSends = pendingSends.filter(([ch]) => !LIFECYCLE.has(ch));
+    }
+    pendingSends.push([channel, payload]);
   } else {
     wc.send(channel, payload);
   }
 }
+
+// Only an orb:hidden that answers our own orb:dismiss may hide the window;
+// stale ones (from a dismissal superseded by a summon) must not.
+let dismissing = false;
 
 function summon(reason) {
   if (!win) createWindow();
@@ -95,13 +114,15 @@ function summon(reason) {
   const fresh = sceneBounds();
   if (Math.abs(bounds.width - fresh.width) > 200) win.setBounds(fresh);
   visible = true;
+  dismissing = false;
   win.show();
   sendToScene('orb:reveal', { anchor: anchorPoint(win.getBounds()), reason });
 }
 
 function dismiss() {
   if (!win || !visible) return;
-  win.webContents.send('orb:dismiss');
+  dismissing = true;
+  sendToScene('orb:dismiss');
 }
 
 function toggle() {
@@ -120,13 +141,17 @@ app.whenReady().then(() => {
     tray = new Tray(trayIcon());
     tray.setToolTip('Echo');
     tray.on('click', toggle);
-    tray.setContextMenu(
-      Menu.buildFromTemplate([
-        { label: 'Summon Echo', click: () => summon('menu') },
-        { type: 'separator' },
-        { label: 'Quit Echo Orb', click: () => app.quit() },
-      ])
-    );
+    const menu = Menu.buildFromTemplate([
+      { label: 'Summon Echo', click: () => summon('menu') },
+      { type: 'separator' },
+      { label: 'Quit Echo Orb', click: () => app.quit() },
+    ]);
+    if (process.platform === 'darwin') {
+      // setContextMenu on macOS opens the menu on LEFT click too, killing toggle.
+      tray.on('right-click', () => tray.popUpContextMenu(menu));
+    } else {
+      tray.setContextMenu(menu);
+    }
   } catch (err) {
     // Headless CI has no tray; the window + shortcuts still work.
     console.error('[orb] tray unavailable:', err.message);
@@ -135,12 +160,10 @@ app.whenReady().then(() => {
   createWindow();
 
   viewer = new ViewerClient(VIEWER_BASE);
-  viewer.on('events', (evts) => {
-    if (win) win.webContents.send('viewer:events', evts);
-  });
+  viewer.on('events', (evts) => sendToScene('viewer:events', evts));
   viewer.on('wake', () => summon('wake'));
-  viewer.on('connected', () => win && win.webContents.send('viewer:status', { connected: true }));
-  viewer.on('disconnected', () => win && win.webContents.send('viewer:status', { connected: false }));
+  viewer.on('connected', () => sendToScene('viewer:status', { connected: true }));
+  viewer.on('disconnected', () => sendToScene('viewer:status', { connected: false }));
   viewer.start();
 
   globalShortcut.register('CommandOrControl+Shift+E', toggle);
@@ -201,6 +224,8 @@ ipcMain.handle('viewer:transcript', () => viewer.transcript());
 ipcMain.handle('viewer:doc', (_e, relpath) => viewer.doc(String(relpath)));
 
 ipcMain.on('orb:hidden', () => {
+  if (!dismissing) return;
+  dismissing = false;
   visible = false;
   if (win) win.hide();
 });

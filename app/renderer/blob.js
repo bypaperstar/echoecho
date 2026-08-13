@@ -54,12 +54,16 @@ function makeWobble(amp, fLo, fHi) {
 }
 
 // ------------------------------------------------------------------- layout
-const FSCALE = 2;                       // field buffer is 1/2 resolution
-let W, H, FW, FH, field, img, fcan, fctx;
+const FSCALE = 2;                       // field buffer is 1/2 device resolution
+let W, H, FW, FH, fpx, field, img, fcan, fctx;
 function resize() {
   W = window.innerWidth; H = window.innerHeight;
-  canvas.width = W; canvas.height = H;
-  FW = Math.ceil(W / FSCALE); FH = Math.ceil(H / FSCALE);
+  // backing store in device px (dpr capped: the field pass is O(pixels));
+  // CSS size comes from the #blob inset:0 rule. Public API stays CSS px.
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  FW = Math.ceil(canvas.width / FSCALE); FH = Math.ceil(canvas.height / FSCALE);
+  fpx = FSCALE / dpr;                   // CSS px per field cell
   field = new Float32Array(FW * FH);
   fcan = document.createElement('canvas'); fcan.width = FW; fcan.height = FH;
   fctx = fcan.getContext('2d');
@@ -196,7 +200,8 @@ function emissionBalls(em, t, pose, out) {
     const q = (t - em.cancelT) / EMIT.cancel;
     if (q >= 1) { em.dead = true; return; }
     retract = easeOutCubic(q); die = 1 - q;
-  } else if (em.releaseT < Infinity) {
+  } else if (em.releaseT < Infinity && t >= em.releaseT) {
+    // a release scheduled in the future keeps normal grow/hold until its time
     const q = (t - em.releaseT) / EMIT.release;
     if (q >= 1) { em.dead = true; return; }
     retract = easeOutBack(q); die = 1 - q;
@@ -347,7 +352,7 @@ function renderBlob(t, balls, R) {
   const K = 2.2;                                        // influence = K * r
   for (const [bx, by, br] of balls) {
     if (br <= 0.5) continue;
-    const cx = bx / FSCALE, cy = by / FSCALE, Ri = K * br / FSCALE;
+    const cx = bx / fpx, cy = by / fpx, Ri = K * br / fpx;
     const invR2 = 1 / (Ri * Ri);
     const ax = Math.max(1, Math.floor(cx - Ri)), bxx = Math.min(FW - 2, Math.ceil(cx + Ri));
     const ay = Math.max(1, Math.floor(cy - Ri)), byy = Math.min(FH - 2, Math.ceil(cy + Ri));
@@ -370,7 +375,7 @@ function renderBlob(t, balls, R) {
   x0 = Math.max(1, x0 - 3); y0 = Math.max(1, y0 - 3);
   x1 = Math.min(FW - 2, x1 + 3); y1 = Math.min(FH - 2, y1 + 3);
 
-  const HDEPTH = 0.55 * R / FSCALE;                     // hemisphere depth, px
+  const HDEPTH = 0.55 * R / fpx;                        // hemisphere depth, px
   // slow-orbiting secondary sheen light (half-vector, view = +z)
   const a2 = t * 0.21;
   const l2x = Math.cos(a2) * 0.52, l2y = Math.sin(a2) * 0.52, l2z = 0.75;
@@ -430,7 +435,7 @@ function renderBlob(t, balls, R) {
 function draw(t) {
   const balls = collectBalls(t);
   renderBlob(t, balls, evalPose(t).r);
-  ctx.clearRect(0, 0, W, H);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(fcan, 0, 0, FW, FH, 0, 0, FW * FSCALE, FH * FSCALE);
@@ -497,8 +502,8 @@ window.echoBlob = {
     let last = -1, misses = 0;
     const maxD = pose.r * 3;
     for (let d = 0; d <= maxD; d += 2) {
-      const fx = Math.round((pose.x + dx * d) / FSCALE);
-      const fy = Math.round((pose.y + dy * d) / FSCALE);
+      const fx = Math.round((pose.x + dx * d) / fpx);
+      const fy = Math.round((pose.y + dy * d) / fpx);
       if (fx < 0 || fy < 0 || fx >= FW || fy >= FH) break;
       if (field[fy * FW + fx] >= 1) { last = d; misses = 0; }
       else if (last >= 0 && ++misses > 3) break;

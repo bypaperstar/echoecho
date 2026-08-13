@@ -1,5 +1,7 @@
 import asyncio
+import json
 
+from echo_app import config, events
 from echo_app.bus import TaskRequest, TaskResult
 from echo_app.orchestrator import log as tasklog
 from echo_app.orchestrator.core import Orchestrator
@@ -111,6 +113,24 @@ def test_workspace_snapshot_fanout_is_capped(tmp_path):
     assert len(snaps) == 6  # 5 file snapshots + 1 "and N more" summary
     assert "and 3 more files changed" in snaps[-1].text
     assert all(i.priority == "ambient" for i in snaps)
+
+
+def test_task_feed_event_carries_artifacts_touched(tmp_path, monkeypatch):
+    """The viewer's transcript reads the UI feed, so the terminal task event
+    must name the files the task touched."""
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)
+
+    async def writer(task, ctx):
+        return TaskResult(say="wrote", priority="ambient",
+                          artifacts_touched=["doc.md", "notes.md"])
+
+    run_orch({"w": writer}, [TaskRequest(kind="w")], tmp_path)
+    recs = [json.loads(ln) for ln in
+            (tmp_path / events.FEED_NAME).read_text().splitlines()
+            if ln.strip()]
+    done = [r for r in recs
+            if r["type"] == "task" and r.get("status") == "done"]
+    assert done and done[0]["artifacts_touched"] == ["doc.md", "notes.md"]
 
 
 def test_summaries_single_task(tmp_path):

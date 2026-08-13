@@ -213,13 +213,7 @@ function spawnMac(opts = {}) {
 
 // -------------------------------------------------------- expand / restore
 const EXPAND_MS = 550;
-function expand(it) {
-  if (expanded || (it.mode !== 'float' && it.mode !== 'held')) return;
-  releaseNeck(it);
-  expanded = it;
-  it.mode = 'expanded';
-  it.el.style.transformOrigin = '50% 50%';
-  it.el.classList.add('anim', 'expanded');
+function layoutExpanded(it) {
   let w, h;
   if (it.kind === 'mac') {
     w = Math.min(innerWidth * 0.92, ((innerHeight * 0.92) - MAC_TITLE_H - MAC_PAD * 2) * 1.6 + MAC_PAD * 2);
@@ -233,6 +227,16 @@ function expand(it) {
   it.el.style.width = Math.round(w) + 'px';
   it.el.style.height = Math.round(h) + 'px';
   setTransform(it, 1, 1, 1);
+}
+
+function expand(it) {
+  if (expanded || (it.mode !== 'float' && it.mode !== 'held')) return;
+  releaseNeck(it);
+  expanded = it;
+  it.mode = 'expanded';
+  it.el.style.transformOrigin = '50% 50%';
+  it.el.classList.add('anim', 'expanded');
+  layoutExpanded(it);
   applyRest(true);                       // blob becomes a small companion
 }
 
@@ -278,7 +282,8 @@ function wisp(role, text) {
   el.style.opacity = 0;
   itemsEl.appendChild(el);
   // conversation drifts up the blob's left; items emerge to its right
-  const x = pose.x - (pose.r * 1.5 + 64) + (role === 'user' ? -12 : 30);
+  const x = clamp(pose.x - (pose.r * 1.5 + 64) + (role === 'user' ? -12 : 30),
+                  140, innerWidth - 140);
   const y = pose.y - pose.r * (role === 'user' ? 0.55 : 1.1);
   wisps.push({ el, x, y, t0: now(), life: 7, ph: wisps.length * 2.4 });
   while (wisps.length > 5) { wisps[0].el.remove(); wisps.shift(); }
@@ -439,6 +444,14 @@ function frame() {
 }
 requestAnimationFrame(frame);
 
-addEventListener('resize', () => applyRest(!!expanded));
+addEventListener('resize', () => {
+  applyRest(!!expanded);
+  if (expanded) layoutExpanded(expanded);
+  // keep float/restore targets onscreen (same margins as spawnPointFor)
+  for (const it of items) {
+    it.base.x = clamp(it.base.x, it.w / 2 + 12, innerWidth - it.w / 2 - 12);
+    it.base.y = clamp(it.base.y, it.h / 2 + 12, innerHeight - it.h / 2 - 12);
+  }
+});
 
 })();

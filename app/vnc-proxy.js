@@ -7,6 +7,7 @@
 // renderer over IPC) and is never logged.
 'use strict';
 
+const crypto = require('crypto');
 const net = require('net');
 const { WebSocketServer } = require('ws');
 
@@ -16,6 +17,18 @@ const PROBE_TIMEOUT_MS = 4000;
 const HIGH_WATER = 1 << 20;
 
 let state = null; // { key, info, wss, conns: Set<{ws, tcp}> }
+let warnedNoPassword = false;
+
+// start/stop both mutate the single module-level `state`; interleaved calls
+// (rapid open/close from the renderer) would race — e.g. a stop() landing
+// mid-start leaks the half-built wss — so every operation runs through this
+// promise chain, one at a time, in call order.
+let op = Promise.resolve();
+function serialize(fn) {
+  const run = op.then(fn);
+  op = run.then(() => undefined, () => undefined); // keep the chain alive
+  return run;
+}
 
 // vnc://[user[:password]@]host[:port] — lume emits vnc://:pass@ip:port.
 function parseVncUrl(raw) {
@@ -91,15 +104,33 @@ function bridge(ws, target, conns) {
   });
 }
 
-async function start(targetUrl) {
+async function doStart(targetUrl) {
   const target = parseVncUrl(targetUrl);
   const key = `${target.host}:${target.port}#${target.password}`;
   if (state && state.key === key) return state.info; // same target: reuse
-  await stop(); // different target: tear the old bridge down first
+  await doStop(); // different target: tear the old bridge down first
+
+  if (!target.password && !warnedNoPassword) {
+    warnedNoPassword = true;
+    console.warn('[vnc-proxy] VNC target has no password — the endpoint is unauthenticated');
+  }
 
   await probe(target);
 
-  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  // The bridge listens on loopback but any local process could reach it;
+  // upgrades must present the per-bridge token (never logged) to ride it.
+  const token = crypto.randomBytes(16).toString('hex');
+  const wss = new WebSocketServer({
+    host: '127.0.0.1',
+    port: 0,
+    verifyClient: ({ req }) => {
+      try {
+        return new URL(req.url, 'ws://127.0.0.1').searchParams.get('token') === token;
+      } catch {
+        return false;
+      }
+    },
+  });
   await new Promise((resolve, reject) => {
     wss.once('listening', resolve);
     wss.once('error', reject);
@@ -107,18 +138,19 @@ async function start(targetUrl) {
   const conns = new Set();
   wss.on('connection', (ws) => bridge(ws, target, conns));
 
+  const port = wss.address().port;
   const info = {
-    wsUrl: `ws://127.0.0.1:${wss.address().port}`,
+    wsUrl: `ws://127.0.0.1:${port}/?token=${token}`,
     password: target.password,
     host: target.host,
     port: target.port,
   };
   state = { key, info, wss, conns };
-  console.log(`[vnc-proxy] bridging ${info.wsUrl} -> ${target.host}:${target.port}`);
+  console.log(`[vnc-proxy] bridging ws://127.0.0.1:${port} -> ${target.host}:${target.port}`);
   return info;
 }
 
-function stop() {
+function doStop() {
   if (!state) return Promise.resolve();
   const { wss, conns } = state;
   state = null;
@@ -128,6 +160,14 @@ function stop() {
   }
   conns.clear();
   return new Promise((resolve) => wss.close(() => resolve()));
+}
+
+function start(targetUrl) {
+  return serialize(() => doStart(targetUrl));
+}
+
+function stop() {
+  return serialize(doStop);
 }
 
 module.exports = { start, stop, parseVncUrl };

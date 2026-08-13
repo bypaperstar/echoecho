@@ -7,7 +7,10 @@
 // forwarded to the renderer over IPC.
 'use strict';
 
+const fs = require('fs');
 const http = require('http');
+const os = require('os');
+const path = require('path');
 const { EventEmitter } = require('events');
 
 class ViewerClient extends EventEmitter {
@@ -15,12 +18,14 @@ class ViewerClient extends EventEmitter {
     super();
     this.base = base.replace(/\/$/, '');
     this.lastTs = 0;
+    this.primed = false;
     this.stopped = false;
     this.req = null;
+    this.retryTimer = null;
   }
 
-  async json(path) {
-    const res = await fetch(this.base + path);
+  async json(path, headers) {
+    const res = await fetch(this.base + path, headers ? { headers } : undefined);
     if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
     return res.json();
   }
@@ -39,25 +44,42 @@ class ViewerClient extends EventEmitter {
     return this.text('/doc?f=' + encodeURIComponent(relpath));
   }
 
-  vncInfo() {
-    return this.json('/vnc-info');
+  // /vnc-info serves credentials, so it alone requires the viewer token the
+  // server writes at startup (env ECHO_VIEWER_TOKEN_FILE or ~/.echo/viewer.token,
+  // regenerated per run). Read fresh per call; missing file means the viewer
+  // server isn't running.
+  async vncInfo() {
+    const file = process.env.ECHO_VIEWER_TOKEN_FILE ||
+      path.join(os.homedir(), '.echo', 'viewer.token');
+    let token;
+    try {
+      token = fs.readFileSync(file, 'utf8').trim();
+    } catch {
+      throw new Error(`viewer token file not found (${file})`);
+    }
+    return this.json('/vnc-info', { Authorization: `Bearer ${token}` });
   }
 
   // Long-lived SSE subscription to /events with reconnect. Each 'reload'
-  // triggers a /transcript refetch; events newer than the watermark are
-  // emitted as ('events', [..]) and any wake event additionally as ('wake').
+  // triggers a /transcript refetch; the first fetch only primes the watermark
+  // (nothing emitted), so only events after launch are emitted as
+  // ('events', [..]) and any wake event additionally as ('wake').
   start() {
     this.stopped = false;
+    this.primed = false;
     this._connect();
   }
 
   stop() {
     this.stopped = true;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     if (this.req) this.req.destroy();
   }
 
   _connect() {
     if (this.stopped) return;
+    this.retryTimer = null;
     const url = new URL(this.base + '/events');
     const req = http.get(
       { host: url.hostname, port: url.port, path: url.pathname, headers: { Accept: 'text/event-stream' } },
@@ -88,9 +110,11 @@ class ViewerClient extends EventEmitter {
   }
 
   _retry() {
-    if (this.stopped) return;
+    // A dropped connection fires several close callbacks; dedup so one drop
+    // schedules exactly one reconnect.
+    if (this.stopped || this.retryTimer) return;
     this.emit('disconnected');
-    setTimeout(() => this._connect(), 2000);
+    this.retryTimer = setTimeout(() => this._connect(), 2000);
   }
 
   async _onReload() {
@@ -100,11 +124,21 @@ class ViewerClient extends EventEmitter {
     } catch {
       return; // transient; the next reload retries
     }
+    if (!this.primed) {
+      this.primed = true;
+      this.lastTs = events.reduce(
+        (m, e) => (typeof e.ts === 'number' && e.ts > m ? e.ts : m), 0);
+      return;
+    }
     const fresh = events.filter((e) => typeof e.ts === 'number' && e.ts > this.lastTs);
     if (!fresh.length) return;
     this.lastTs = fresh[fresh.length - 1].ts;
     this.emit('events', fresh);
-    if (fresh.some((e) => e.type === 'wake')) this.emit('wake');
+    // Only the voice daemon emits type='wake'; text/script modes emit just the
+    // FSM transition (state IDLE->ACTIVE with reason='wake').
+    const isWake = (e) => e.type === 'wake' ||
+      (e.type === 'state' && e.to === 'ACTIVE' && e.reason === 'wake');
+    if (fresh.some(isWake)) this.emit('wake');
   }
 }
 

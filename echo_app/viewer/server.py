@@ -16,13 +16,21 @@ GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
                     OR an append to the .events.jsonl feed
 GET /vnc-info    -> {"url": "vnc://[:pass@]host:port"} for Echo's Mac, or 503
                     {"error": ...}; source: ECHO_VNC_URL env override, else
-                    lume (vm tier only), read fresh on every call
+                    lume (vm tier, or lume on PATH — the tier may be chosen
+                    per-task), read fresh on every call. The ONLY route that
+                    serves credentials, so it alone requires
+                    "Authorization: Bearer <token>" (else 403); the token is
+                    regenerated per run and written 0o600 to
+                    ECHO_VIEWER_TOKEN_FILE (default ~/.echo/viewer.token),
+                    where the Electron portal reads it fresh per call
 
 Workspace writes are atomic (tmp + os.rename), so /doc never serves a
 half-written file.
 """
 import json
 import os
+import secrets
+import shutil
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -94,9 +102,35 @@ def read_transcript(workspace, limit=TRANSCRIPT_LIMIT):
     return out
 
 
+def token_path():
+    """Where the per-run viewer token lives — the Electron portal reads the
+    same path, so the two sides must agree byte-for-byte."""
+    raw = os.environ.get("ECHO_VIEWER_TOKEN_FILE", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".echo" / "viewer.token"
+
+
+def _write_token(token):
+    """Persist the token 0o600 (parent dir 0o700 if we create it): it gates
+    the one route that serves credentials, so only this user may read it."""
+    path = token_path()
+    if not path.parent.is_dir():
+        path.parent.mkdir(parents=True)
+        os.chmod(str(path.parent), 0o700)
+    # O_CREAT's mode is umask-filtered and skipped for an existing file, so
+    # the explicit chmod below is what actually guarantees 0o600
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token)
+    os.chmod(str(path), 0o600)
+    return path
+
+
 class _Handler(BaseHTTPRequestHandler):
     workspace = None   # set on the subclass by ViewerServer
     stopping = None    # threading.Event
+    token = None       # per-run bearer token gating /vnc-info
 
     def log_message(self, fmt, *args):  # keep the demo console quiet
         pass
@@ -119,14 +153,22 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _vnc_info(self):
         """Where Echo's Mac's VNC lives: ECHO_VNC_URL override (tests/CI, or
-        "I already know my VM") -> else ask lume on the vm tier -> else 503.
-        Never cached: a re-cloned VM changes address, and a stale URL would
-        strand the portal on a dead endpoint."""
+        "I already know my VM") -> else ask lume when the vm tier is
+        configured OR lume is on PATH (the tier may be chosen per-task) ->
+        else 503. Never cached: a re-cloned VM changes address, and a stale
+        URL would strand the portal on a dead endpoint. Token-gated before
+        any work: this is the only route that serves credentials."""
+        auth = self.headers.get("Authorization") or ""
+        if not secrets.compare_digest(
+                auth.encode("utf-8", "replace"),
+                ("Bearer %s" % self.token).encode("utf-8")):
+            self._json(403, {"error": "missing or bad viewer token"})
+            return
         override = os.environ.get("ECHO_VNC_URL", "").strip()
         if override:
             self._json(200, {"url": override})
             return
-        if config.sandbox_tier() != "vm":
+        if config.sandbox_tier() != "vm" and shutil.which("lume") is None:
             self._json(503, {"error": (
                 "no VM configured: set ECHO_SANDBOX=vm, or point "
                 "ECHO_VNC_URL at any VNC server")})
@@ -208,8 +250,13 @@ class ViewerServer:
 
     def __init__(self, workspace, host="127.0.0.1", port=8765):
         self._stopping = threading.Event()
+        # per-run /vnc-info token, generated once per server (never per
+        # request) and written where the portal expects to read it
+        self.token = secrets.token_hex(16)
+        _write_token(self.token)
         handler = type("Handler", (_Handler,), {
-            "workspace": Path(workspace), "stopping": self._stopping})
+            "workspace": Path(workspace), "stopping": self._stopping,
+            "token": self.token})
         self.httpd = ThreadingHTTPServer((host, port), handler)
         self.httpd.daemon_threads = True
         self._thread = None

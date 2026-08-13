@@ -283,7 +283,8 @@ class Orchestrator:
                              follow_ups=[f.kind for f in result.follow_ups],
                              session_id=task.session_id)
         events.emit("task", task_id=task.id, kind=task.kind,
-                    status=task.status, say=result.say, priority=priority)
+                    status=task.status, say=result.say, priority=priority,
+                    artifacts_touched=result.artifacts_touched)
         for follow in result.follow_ups:  # generic chaining
             follow.source = "follow_up"
             self.submit(follow)
