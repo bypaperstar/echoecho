@@ -12,6 +12,7 @@ const { trayIcon } = require('./lib/trayicon');
 const { ViewerClient } = require('./lib/backend');
 
 const SMOKE = process.env.ECHO_ORB_SMOKE === '1';
+const DEMO = process.env.ECHO_ORB_DEMO === '1';
 const VIEWER_PORT = process.env.ECHO_VIEWER_PORT || '8765';
 const VIEWER_BASE = `http://127.0.0.1:${VIEWER_PORT}`;
 
@@ -63,7 +64,9 @@ function createWindow() {
     },
   });
   win.setAlwaysOnTop(true, 'floating');
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // demo mode reaches the renderer as a query param — the clean channel
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'),
+               DEMO ? { query: { demo: '1' } } : undefined);
   win.on('blur', () => {
     // Clicking away dismisses, like a menu-bar popover — unless the user is
     // driving Echo's Mac, where focus loss is routine (drag, cmd-tab test).
@@ -142,7 +145,30 @@ app.whenReady().then(() => {
 
   globalShortcut.register('CommandOrControl+Shift+E', toggle);
 
-  if (SMOKE) {
+  if (SMOKE && DEMO) {
+    // series capture of the scripted demo, aligned to the scene's own clock
+    // (the renderer signals orb:demo-started when its timeline begins)
+    summon('smoke');
+    ipcMain.once('orb:demo-started', () => {
+      const fs = require('fs');
+      fs.mkdirSync('/tmp/orbscene', { recursive: true });
+      const shots = [[500, '05'], [3000, '3'], [6000, '6'], [9000, '9'], [12000, '12'], [15000, '15']];
+      let pending = shots.length;
+      for (const [ms, name] of shots) {
+        setTimeout(async () => {
+          try {
+            const img = await win.webContents.capturePage();
+            fs.writeFileSync(`/tmp/orbscene/shot-${name}s.png`, img.toPNG());
+            console.log(`[smoke] wrote /tmp/orbscene/shot-${name}s.png`);
+          } catch (err) {
+            console.error('[smoke] capture failed:', err);
+            process.exitCode = 1;
+          }
+          if (--pending === 0) app.quit();
+        }, ms);
+      }
+    });
+  } else if (SMOKE) {
     summon('smoke');
     setTimeout(async () => {
       try {
@@ -155,6 +181,8 @@ app.whenReady().then(() => {
       }
       app.quit();
     }, 6000);
+  } else if (DEMO) {
+    summon('demo');
   }
 });
 
@@ -180,15 +208,22 @@ ipcMain.on('orb:dismiss-request', () => dismiss());
 
 // Renderer asks for Echo's Mac: resolve the VNC endpoint (env override first,
 // then the viewer's /vnc-info), start the WS<->TCP bridge, hand back a local
-// WebSocket URL + password for noVNC.
+// WebSocket URL + password for noVNC. Failure ("asleep") is marshalled as a
+// value — an IPC rejection would console.error in main, and an unreachable
+// Mac is expected degradation, not an error. preload rethrows it, so the
+// renderer still sees a rejected promise.
 ipcMain.handle('vnc:connect', async () => {
-  let target = process.env.ECHO_VNC_URL || null;
-  if (!target) {
-    const info = await viewer.vncInfo(); // throws -> renderer shows "asleep"
-    target = info.url;
+  try {
+    let target = process.env.ECHO_VNC_URL || null;
+    if (!target) {
+      const info = await viewer.vncInfo(); // throws -> renderer shows "asleep"
+      target = info.url;
+    }
+    if (!vncProxy) vncProxy = require('./vnc-proxy');
+    return await vncProxy.start(target);
+  } catch (err) {
+    return { error: String((err && err.message) || err) };
   }
-  if (!vncProxy) vncProxy = require('./vnc-proxy');
-  return vncProxy.start(target);
 });
 
 ipcMain.handle('vnc:disconnect', () => {
