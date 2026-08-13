@@ -116,7 +116,9 @@ cmd_install_app() {
   [ -w "/Applications" ] || target="$HOME/Applications/Echo.app"
   mkdir -p "$(dirname "$target")"
   pkill -f "Echo\.app/Contents/MacOS/Echo" 2>/dev/null || true
-  pkill -f "$APP_DIR/node_modules/.bin/electron" 2>/dev/null || true
+  # dev orb: its cmdline is relative, so match the stable node_modules paths
+  pkill -f "node_modules/\.bin/electron" 2>/dev/null || true
+  pkill -f "node_modules/electron/dist/Electron\.app" 2>/dev/null || true
   sleep 1
   rm -rf "$target"
   ditto "$APP_DIR/dist/Echo-darwin-arm64/Echo.app" "$target"
@@ -131,7 +133,8 @@ cmd_start_app() {
 
 cmd_stop_app() {
   pkill -f "Echo\.app/Contents/MacOS/Echo" 2>/dev/null || true
-  pkill -f "$APP_DIR/node_modules/.bin/electron" 2>/dev/null || true
+  pkill -f "node_modules/\.bin/electron" 2>/dev/null || true
+  pkill -f "node_modules/electron/dist/Electron\.app" 2>/dev/null || true
   echo "app stopped"
 }
 
