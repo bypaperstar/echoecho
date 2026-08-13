@@ -81,6 +81,10 @@ function createWindow() {
     },
   });
   win.setAlwaysOnTop(true, 'floating');
+  // The window spans most of the screen but only the blob and its items may
+  // eat clicks. Start click-through; the renderer toggles it from hover
+  // (forward:true keeps mousemove flowing while ignored, so hover works).
+  win.setIgnoreMouseEvents(true, { forward: true });
   // demo mode reaches the renderer as a query param — the clean channel
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'),
                DEMO ? { query: { demo: '1' } } : undefined);
@@ -89,11 +93,9 @@ function createWindow() {
     pendingSends = [];
     for (const [channel, payload] of queued) win.webContents.send(channel, payload);
   });
-  win.on('blur', () => {
-    // Clicking away dismisses, like a menu-bar popover — unless the user is
-    // driving Echo's Mac, where focus loss is routine (drag, cmd-tab test).
-    if (visible && !SMOKE) sendToScene('orb:blur');
-  });
+  // No blur-dismiss: the scene is click-through outside the blob, so losing
+  // focus is routine (the whole point is working next to Echo). Dismissal is
+  // deliberate: Escape, the tray toggle, or Cmd-Shift-E.
   win.on('closed', () => {
     // Mirrors orb:hidden so the tray/shortcut toggle summons after a WM close.
     visible = false;
@@ -104,8 +106,8 @@ function createWindow() {
 // webContents.send before the renderer finishes loading is silently lost —
 // and the first summon (or a wake arriving during startup) races the load.
 // Sends queue until did-finish-load and flush in order; lifecycle channels
-// are last-intent-wins, so only the newest reveal/dismiss/blur survives.
-const LIFECYCLE = new Set(['orb:reveal', 'orb:dismiss', 'orb:blur']);
+// are last-intent-wins, so only the newest reveal/dismiss survives.
+const LIFECYCLE = new Set(['orb:reveal', 'orb:dismiss']);
 let pendingSends = [];
 
 function sendToScene(channel, payload) {
@@ -306,6 +308,12 @@ ipcMain.on('orb:hidden', () => {
   if (win) win.hide();
 });
 ipcMain.on('orb:dismiss-request', () => dismiss());
+
+// Renderer hover tracking: ignore=true (click-through) everywhere except over
+// the blob's silhouette or an item; forward keeps mousemove alive while ignored.
+ipcMain.on('orb:passthrough', (_e, on) => {
+  if (win) win.setIgnoreMouseEvents(!!on, { forward: true });
+});
 
 // Renderer asks for Echo's Mac: resolve the VNC endpoint (env override first,
 // then the viewer's /vnc-info), start the WS<->TCP bridge, hand back a local
