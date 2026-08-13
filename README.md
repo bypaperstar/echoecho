@@ -128,6 +128,21 @@ Build the golden image once on the Mac: `AGENT=1 bash scripts/vm_golden.sh` (pul
 (host subprocess); the whole VM code path is exercised keyless/Linux via a `FakeVM`
 behind the same port, so CI never needs a Mac.
 
+PR 14 adds **GUI computer-use** — the sandbox ladder's GUI tier. The
+`computer.use` kind (advertised when `ECHO_SANDBOX=vm`) drives real Mac apps
+inside the VM by a sequence of steps (`launch` / `type` / `key` / `wait` /
+`screenshot`) via a `GuiDriver` port: `SshGuiDriver` uses only macOS built-ins
+(`open`, `osascript`, `screencapture`) over the same SSH channel as the agent
+tier, and a screenshot after every step lands in `workspace/screens/<task>/`
+(the viewer renders them — that shot trail is the recording). Live-validated
+on a real VM: app launch + screenshots work end-to-end (screenshots reach the
+host via virtiofs). **Caveat:** synthetic keystrokes (`type`/`key`) need macOS
+Accessibility permission, which a SIP-enabled vanilla image won't grant to an
+SSH-invoked process — the golden image must pre-grant it (SIP-off build + TCC,
+or a PPPC profile); until then those steps fail fast with a clear message
+rather than hanging. Coordinate clicks and a model-driven perceive→act loop
+are the follow-up.
+
 PR 13 adds **mediated access to your real documents**. Point Echo at folders with
 `ECHO_USER_DOCS=~/Documents:~/Desktop`; they mount **read-only** into the VM, so an
 agent can read them but never write them. Proposed edits are staged in
