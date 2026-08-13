@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Echo blob — technique 3: raw WebGL2 SDF field</title>
+<!--
+  Echo's blob, "shader demo scene" take: the whole organism is ONE draw call.
+
+  A 2D signed-distance field of 12 metaballs + 10 capsules (2 pseudopods, 7
+  pour-stream links, 1 emit neck) combined with polynomial smooth-min,
+  domain-warped by 3-octave fbm value
+  noise for the liquid surface wobble. Alpha comes from a smoothstep over the
+  field edge; shading builds a fake 3D normal from the field gradient
+  (screen-space derivatives dFdx/dFdy) for the specular sheen + cool fresnel rim
+  + faint inner glow, so the black body reads on any background. The white
+  document card (180x120 rounded rect, procedural "text" lines) is a second SDF
+  in the same shader; the blob layer is composited OVER the card, so the card
+  literally slides out from under the liquid, held by a tapering neck capsule
+  that snaps back. Emit-absorb cycle repeats every 6 s (first cycle starts at
+  t = 4 s, after the reveal settles).
+
+  Reveal t in [0,1] (eased over the first 2.5 s): metaballs string out along a
+  cubic bezier from the menu-bar anchor (top-right) to screen center — each ball
+  lags the reveal by its rank, which stretches the body into a poured genie
+  stream in between.
+
+  Primitive positions/radii are animated on the CPU (a few dozen muls per frame)
+  and uploaded as uniforms; the fragment shader never recomputes per-ball
+  animation per pixel.
+
+  Query params:
+    ?t=SECONDS   advance the internal animation clock by SECONDS on load
+                 (the clock then keeps running from there)
+    &still       freeze the clock exactly at t — reproducible screenshots
+    &seed=N      noise seed (default 43.719); JS layout PRNG is fixed (1337)
+    &dump        print the per-frame primitive uniforms into the page (debug)
+
+  Everything procedural, zero assets, zero libraries.
+-->
+<style>
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden; }
+  canvas { position:fixed; inset:0; display:block; width:100vw; height:100vh; }
+  #err { position:fixed; top:8px; left:8px; color:#f66;
+         font:12px/1.4 monospace; white-space:pre; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="err"></div>
+<script>
+"use strict";
+
+/* ---------------- clock & params ---------------- */
+const Q        = new URLSearchParams(location.search);
+const T_OFFSET = parseFloat(Q.get('t') || '0') || 0;
+const STILL    = Q.has('still');
+const SEED     = parseFloat(Q.get('seed') || '43.719');
+
+/* ---------------- GL boilerplate ---------------- */
+const canvas = document.getElementById('c');
+const errEl  = document.getElementById('err');
+const gl = canvas.getContext('webgl2', {
+  alpha: true, antialias: false, premultipliedAlpha: true,
+  depth: false, stencil: false, powerPreference: 'low-power'
+});
+if (!gl) errEl.textContent = 'WebGL2 unavailable';
+
+const VS = `#version 300 es
+void main(){
+  vec2 v = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(v * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+
+uniform vec2  u_res;
+uniform float u_time;
+uniform float u_seed;
+uniform float u_px;          // device pixel ratio
+uniform vec3  u_balls[12];   // xy pos, z radius (device px)
+uniform vec4  u_caps[9];     // capsules: a.xy, b.xy  (pods + pour-stream links)
+uniform vec2  u_capR[9];     // radii at a / b
+uniform vec4  u_neck;        // emit-neck capsule: a.xy, b.xy
+uniform vec2  u_neckR;       // radii at a / b
+uniform vec4  u_card;        // center.xy, half-size.zw
+uniform vec4  u_cardM;       // rotation, contentFade, alpha, cornerRadius
+
+out vec4 O;
+
+/* seeded hash / value noise / fbm ------------------------------------ */
+float hash21(vec2 p){
+  p = fract(p * vec2(234.34, 435.345));
+  p += dot(p, p + 34.23 + u_seed);
+  return fract(p.x * p.y);
+}
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash21(i),               hash21(i + vec2(1, 0)), u.x),
+             mix(hash21(i + vec2(0, 1)),  hash21(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm(vec2 p){
+  float s = 0.0, a = 0.5;
+  mat2 m = mat2(0.8, 0.6, -0.6, 0.8);
+  for (int i = 0; i < 3; i++){ s += a * vnoise(p); p = m * p * 2.02 + 17.7; a *= 0.5; }
+  return s;                                   // ~[0, 0.875], mean ~0.44
+}
+
+/* SDF toolbox --------------------------------------------------------- */
+float smin(float a, float b, float k){
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+float sdCapsule2(vec2 p, vec2 a, vec2 b, float ra, float rb){
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-5), 0.0, 1.0);
+  return length(pa - ba * h) - mix(ra, rb, h);
+}
+float sdRBox(vec2 p, vec2 b, float r){
+  vec2 q = abs(p) - b + r;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+/* the organism: metaballs + pods + neck, one smooth-min union --------- */
+float fieldRaw(vec2 p){
+  float d = 1e6;
+  for (int i = 0; i < 12; i++)
+    d = smin(d, length(p - u_balls[i].xy) - u_balls[i].z, 26.0 * u_px);
+  for (int i = 0; i < 9; i++)
+    d = smin(d, sdCapsule2(p, u_caps[i].xy, u_caps[i].zw,
+                           u_capR[i].x, u_capR[i].y), 21.0 * u_px);
+  d = smin(d, sdCapsule2(p, u_neck.xy, u_neck.zw, u_neckR.x, u_neckR.y), 24.0 * u_px);
+  return d;
+}
+
+/* fbm domain warp = travelling surface waves -------------------------- */
+vec2 warpP(vec2 p){
+  float t = u_time * 0.35;
+  vec2 q = p * (0.011 / u_px);
+  float n1 = fbm(q + vec2(       t * 0.70, -t * 0.55));
+  float n2 = fbm(q + vec2(5.2 -  t * 0.60,  9.1 + t * 0.80));
+  return p + (vec2(n1, n2) - 0.44) * 26.0 * u_px;
+}
+
+void main(){
+  vec2 p   = vec2(gl_FragCoord.x, u_res.y - gl_FragCoord.y);  // y-down, matches JS
+  float px = u_px;
+
+  /* crisp (unwarped) card SDF in rotated local space */
+  vec2 rel = p - u_card.xy;
+  float cs = cos(u_cardM.x), sn = sin(u_cardM.x);
+  mat2 Rm  = mat2(cs, -sn, sn, cs);
+  vec2 lp  = Rm * rel;
+  float dCard = sdRBox(lp, u_card.zw, u_cardM.w);
+  vec2 lps = Rm * (rel - vec2(6.0, 13.0) * px);              // shadow offset
+  float dSh = sdRBox(lps, u_card.zw, u_cardM.w);
+
+  float d0    = fieldRaw(p);       // cheap un-warped bound for the early out
+  float cardA = u_cardM.z;
+
+  vec3  acc  = vec3(0.0);
+  float accA = 0.0;
+
+  if (d0 < 90.0 * px || (cardA > 0.001 && dCard < 70.0 * px)) {
+
+    /* 1 — card drop shadow (bottom layer) */
+    float shA = (1.0 - smoothstep(-6.0 * px, 26.0 * px, dSh)) * 0.20 * cardA;
+    acc  = vec3(0.008, 0.010, 0.016) * shA;
+    accA = shA;
+
+    /* 2 — the document card */
+    if (cardA > 0.001) {
+      float aaC = clamp(fwidth(dCard), 0.75, 3.0 * px);   // clamp: derivatives are
+                                       // garbage on the early-out branch contour
+      float cA  = (1.0 - smoothstep(-aaC, aaC, dCard)) * cardA;
+      float gv  = clamp((lp.y + u_card.w) / max(2.0 * u_card.w, 1.0), 0.0, 1.0);
+      vec3 paper = mix(vec3(0.995, 0.997, 1.0), vec3(0.930, 0.941, 0.960), gv);
+      paper *= 1.0 - 0.05 * smoothstep(-2.5 * px, -0.5 * px, dCard);
+      float cf = u_cardM.y;
+      if (cf > 0.001) {                         // procedural "document" content
+        vec2 cl = lp / px;
+        float hw = u_card.z / px, hh = u_card.w / px;
+        float dt = sdRBox(cl - vec2(-hw + 39.0, -hh + 20.0), vec2(27.0, 5.0), 5.0);
+        float dl = 1e6, lw;
+        lw = (hw - 14.0) * 0.88; dl = min(dl, sdRBox(cl - vec2(-hw + 12.0 + lw, -hh + 42.0), vec2(lw, 2.3), 2.3));
+        lw = (hw - 14.0) * 0.76; dl = min(dl, sdRBox(cl - vec2(-hw + 12.0 + lw, -hh + 56.0), vec2(lw, 2.3), 2.3));
+        lw = (hw - 14.0) * 0.83; dl = min(dl, sdRBox(cl - vec2(-hw + 12.0 + lw, -hh + 70.0), vec2(lw, 2.3), 2.3));
+        lw = (hw - 14.0) * 0.47; dl = min(dl, sdRBox(cl - vec2(-hw + 12.0 + lw, -hh + 84.0), vec2(lw, 2.3), 2.3));
+        float tA = (1.0 - smoothstep(-0.8, 0.8, dt)) * cf;
+        float lA = (1.0 - smoothstep(-0.8, 0.8, dl)) * cf;
+        paper = mix(paper, vec3(0.73, 0.76, 0.81), lA);
+        paper = mix(paper, vec3(0.16, 0.19, 0.26), tA);
+      }
+      acc  = paper * cA + acc * (1.0 - cA);
+      accA = cA + accA * (1.0 - cA);
+    }
+
+    /* 3 — the blob on top: it swallows / releases the card */
+    if (d0 < 90.0 * px) {
+      vec2 wp = warpP(p);
+      float d = fieldRaw(wp);
+      d += (fbm(p * (0.06 / px) + vec2(u_time * 0.30, -u_time * 0.22)) - 0.44) * 3.2 * px;
+
+      float aa    = clamp(fwidth(d), 0.75, 3.0 * px);
+      float bodyA = 1.0 - smoothstep(-aa, aa, d);
+      float haze  = exp(-max(d, 0.0) / (11.0 * px)) * 0.10;    // cool outer halo
+
+      /* fake 3D normal from screen-space derivatives of the field */
+      vec2 g  = vec2(dFdx(d), dFdy(d));
+      vec2 gn = g / max(length(g), 1e-4);
+      float qd = clamp(-d / (30.0 * px), 0.0, 1.0);
+      float nz = 1.0 - pow(1.0 - qd, 2.2);                     // 0 at rim -> 1 deep
+      vec3 n = vec3(gn * sqrt(max(1.0 - nz * nz, 0.0)), nz);
+
+      vec3 V = vec3(0.0, 0.0, 1.0);
+      vec3 L = normalize(vec3(-0.48, -0.62, 0.62));            // key, upper-left
+      float spec = pow(max(dot(n, normalize(L + V)), 0.0), 64.0);
+      spec *= 0.45 + 0.85 * fbm(p * (0.025 / px) + vec2(0.0, u_time * 0.15)); // wet streaks
+      vec3 L2 = normalize(vec3(0.55, 0.75, 0.35));             // dim fill, lower-right
+      float spec2 = pow(max(dot(n, normalize(L2 + V)), 0.0), 24.0);
+
+      float fres = pow(1.0 - nz, 3.0);
+      float lf   = 0.42 + 0.58 * clamp(dot(gn, normalize(vec2(-0.55, -0.84))), 0.0, 1.0);
+      float ig   = exp(d / (13.0 * px));                       // inner glow at silhouette
+      vec3 rimC  = vec3(0.42, 0.60, 0.95);
+
+      vec3 shade = vec3(0.016, 0.019, 0.026);                  // deep black body
+      shade += vec3(0.010, 0.012, 0.016) * fbm(wp * (0.016 / px) + 3.1);
+      shade += rimC * (fres * lf * 0.42 + ig * 0.18);
+      shade += vec3(0.85, 0.92, 1.0) * spec * 0.85;
+      shade += vec3(0.45, 0.60, 0.90) * spec2 * 0.10;
+
+      vec3  bl  = shade * bodyA + rimC * 0.7 * haze * (1.0 - bodyA);
+      float blA = bodyA + haze * (1.0 - bodyA);
+      acc  = bl + acc * (1.0 - blA);
+      accA = blA + accA * (1.0 - blA);
+    }
+  }
+  accA = min(accA, 1.0);
+  O = vec4(min(acc, vec3(accA)), accA);        // premultiplied out
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    errEl.textContent += gl.getShaderInfoLog(s) + '\n';
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  errEl.textContent += gl.getProgramInfoLog(prog) + '\n';
+gl.useProgram(prog);
+
+const U = {};
+for (const n of ['u_res','u_time','u_seed','u_px','u_balls','u_caps','u_capR',
+                 'u_neck','u_neckR','u_card','u_cardM'])
+  U[n] = gl.getUniformLocation(prog, n);
+
+/* ---------------- deterministic layout PRNG ---------------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;
+  return((t^t>>>14)>>>0)/4294967296;};}
+const rnd = mulberry32(1337);
+function h1(x){ const s = Math.sin(x * 12.9898 + 78.233) * 43758.5453; return s - Math.floor(s); }
+function ss(a, b, x){ x = (x - a) / (b - a); x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); }
+
+const NB = 10;                       // body metaballs
+const ballP = [];
+for (let i = 0; i < NB; i++){
+  ballP.push({
+    fi:   i / (NB - 1),              // rank along the pour (0 = head)
+    rest: i === 0 ? 82 : 30 + 28 * rnd(),
+    orbR: i === 0 ? 6  : 14 + 42 * rnd(),
+    w:    (0.10 + 0.30 * rnd()) * (rnd() < 0.5 ? -1 : 1),
+    ph:   rnd() * Math.PI * 2
+  });
+}
+
+/* ---------------- per-frame CPU animation ---------------- */
+const ballArr = new Float32Array(36);
+const capArr  = new Float32Array(36);
+const capRArr = new Float32Array(18);
+const neckArr = new Float32Array(4);
+const neckR   = new Float32Array(2);
+const cardArr = new Float32Array(4);
+const cardM   = new Float32Array(4);
+
+let W = 1, H = 1, dpr = 1;
+function setBall(i, x, y, r){ ballArr[i*3] = x*dpr; ballArr[i*3+1] = y*dpr; ballArr[i*3+2] = r*dpr; }
+function setCap(k, ax, ay, bx, by, ra, rb){
+  capArr[k*4] = ax*dpr; capArr[k*4+1] = ay*dpr; capArr[k*4+2] = bx*dpr; capArr[k*4+3] = by*dpr;
+  capRArr[k*2] = ra*dpr; capRArr[k*2+1] = rb*dpr;
+}
+function bez(s, A, P1, P2, C){
+  const u = 1 - s, a = u*u*u, b = 3*u*u*s, c = 3*u*s*s, d = s*s*s;
+  return [a*A[0]+b*P1[0]+c*P2[0]+d*C[0], a*A[1]+b*P1[1]+c*P2[1]+d*C[1]];
+}
+
+function update(time){
+  const w = W, h = H;
+  const A  = [w - 30, 22];                       // menu-bar anchor (top-right)
+  const C  = [w * 0.5, h * 0.52];                // resting center
+  const P1 = [A[0] - w * 0.02, A[1] + h * 0.34]; // pour: straight down first...
+  const P2 = [C[0] + w * 0.20, C[1] - h * 0.38]; // ...then curl into center
+
+  /* reveal t: 0 = droplet at anchor, 1 = at rest center (2.5 s ease) */
+  const r = Math.max(0, Math.min(1, time / 2.5));
+  const e = r * r * (3 - 2 * r);
+  let settle = 1;
+  if (time > 2.5){ const ts = time - 2.5; settle = 1 + 0.05 * Math.sin(ts * 7) * Math.exp(-ts * 2.4); }
+
+  const wan = [7 * Math.sin(time * 0.23 + 1.7) + 4 * Math.sin(time * 0.11),
+               6 * Math.cos(time * 0.19 + 0.4) + 3 * Math.sin(time * 0.147 + 2.2)];
+
+  /* ---- emit cycle: 6 s, first cycle starts at t = 4 s ---- */
+  const TE = 6, TS = 4;
+  let tau = -1, cyc = 0;
+  if (time >= TS){ const et = time - TS; cyc = Math.floor(et / TE); tau = et - cyc * TE; }
+  const dirAng = -0.16 + (h1(cyc * 3.7 + 11.3) - 0.5) * 0.45;
+  const dirE = [Math.cos(dirAng), Math.sin(dirAng)];
+  let bulge = 0, neckAmp = 0, cardA = 0, sx = 0, sy = 0, cf = 0,
+      rot = 0, recoil = 0, dist = 0, restAmt = 0;
+  if (tau >= 0){
+    bulge = ss(0, 0.55, tau) * (1 - ss(0.95, 1.6, tau));       // blob leans + bulges
+    const m  = ss(0.6, 2.9, tau);                              // card travel
+    const ab = ss(4.6, 5.75, tau); const pull = ab * ab;       // re-absorb pull
+    dist = (30 + 238 * m) * (1 - pull) + 14 * pull;
+    sx = ss(0.55, 1.45, tau) * (1 - ss(5.05, 5.8, tau));       // unfurl x then y
+    sy = ss(0.85, 2.0,  tau) * (1 - ss(4.9, 5.6, tau));
+    cf = ss(1.7, 2.5, tau) * (1 - ss(4.7, 5.1, tau));          // content fade
+    cardA = ss(0.55, 0.75, tau) * (1 - ss(5.78, 5.94, tau));
+    restAmt = ss(3.15, 3.55, tau) * (1 - ss(4.45, 4.85, tau)); // bobbing window
+    const nE = ss(0.5, 1.05, tau) * (1 - ss(2.95, 3.3, tau));  // neck: emit...
+    const nA = ss(4.75, 5.05, tau) * (1 - ss(5.7, 5.9, tau));  // ...and re-grab
+    neckAmp = Math.max(nE * (1 - 0.45 * m), nA * 0.8);
+    if (tau > 3.3) recoil = 0.05 * Math.exp(-(tau - 3.3) * 3.2) * Math.sin((tau - 3.3) * 15);
+    rot = -0.05 + 0.035 * Math.sin(time * 0.83 + cyc * 1.7);
+  }
+
+  const lean  = [dirE[0] * (9 * bulge + 6 * neckAmp), dirE[1] * (9 * bulge + 6 * neckAmp)];
+  const blobC = [C[0] + wan[0] + lean[0], C[1] + wan[1] + lean[1]];
+  const gScale = (0.5 + 0.5 * e) * settle
+               * (1 + 0.028 * Math.sin(time * 0.9 + 0.5)) * (1 + recoil);
+
+  /* ---- body metaballs: strung along the pour, orbiting at rest ---- */
+  const st = 0.85;
+  const bpos = [];                               // css-px positions for stream links
+  for (let i = 0; i < NB; i++){
+    const B  = ballP[i];
+    const si = Math.max(0, Math.min(1, e * (1 + st) - st * B.fi));
+    const u  = 1 - (1 - si) * (1 - si);
+    const bp = bez(u, A, P1, P2, C);
+    const oa = B.w * time + B.ph;
+    const rest = [blobC[0] + B.orbR * Math.cos(oa), blobC[1] + B.orbR * 0.8 * Math.sin(oa)];
+    const k  = Math.pow(si, 0.7);
+    const breath = 1 + 0.055 * Math.sin(time * 0.77 + B.ph * 2.3);
+    const x = bp[0] + (rest[0] - C[0]) * si * si;
+    const y = bp[1] + (rest[1] - C[1]) * si * si;
+    const rr = ((7 + 7 * (1 - B.fi)) * (1 - k) + B.rest * breath * k) * gScale;
+    bpos.push([x, y, rr]);
+    setBall(i, x, y, rr);
+  }
+
+  /* hanging droplet left at the anchor while pouring */
+  const rA = 13 * Math.pow(1 - e, 1.4);
+  if (rA > 0.4) setBall(10, A[0], A[1] + 2 * e, rA); else setBall(10, -9999, -9999, 0);
+
+  /* pre-emit bulge toward the spawn point */
+  if (bulge > 0.02)
+    setBall(11, blobC[0] + dirE[0] * (62 + 42 * bulge),
+                blobC[1] + dirE[1] * (62 + 42 * bulge), 40 * bulge);
+  else setBall(11, -9999, -9999, 0);
+
+  /* ---- capsules 0,1: pseudopods — reach out, hold, retract ---- */
+  const podL = [9.7, 13.9], podO = [0.35, 0.68];
+  for (let k = 0; k < 2; k++){
+    const uu = time / podL[k] + podO[k];
+    const ci = Math.floor(uu), qf = uu - ci;
+    let ext = ss(0.06, 0.42, qf) * (1 - ss(0.55, 0.92, qf));
+    ext *= ss(0.92, 1.0, e);                    // only once the reveal has landed
+    if (ext < 0.012){ setCap(k, -9999, -9999, -9998, -9998, 0, 0); continue; }
+    const ang = h1(ci * 7.13 + k * 91.7) * Math.PI * 2;
+    const dk  = [Math.cos(ang), Math.sin(ang)];
+    const reach = (62 + 132 * ext) * gScale;
+    setCap(k, blobC[0] + dk[0] * 40,    blobC[1] + dk[1] * 40,
+              blobC[0] + dk[0] * reach, blobC[1] + dk[1] * reach,
+              24, 3.5 + 10.5 * ext);
+  }
+
+  /* ---- capsules 2..8: pour-stream links welding the metaball chain ---- */
+  for (let g = 0; g < 7; g++){
+    if (e < 0.999){
+      const a = bpos[g], b = bpos[g + 1];
+      setCap(2 + g, a[0], a[1], b[0], b[1], a[2] * 0.55, b[2] * 0.55);
+    } else {
+      setCap(2 + g, -9999, -9999, -9998, -9998, 0, 0);
+    }
+  }
+
+  /* ---- card + liquid neck ---- */
+  const hw = 90 * sx, hh = 60 * sy;              // 180x120 when unfurled
+  let cardC = [-9999, -9999];
+  if (cardA > 0.003)
+    cardC = [blobC[0] + dirE[0] * dist,
+             blobC[1] + dirE[1] * dist + 3.5 * Math.sin(time * 2.1) * restAmt];
+  let cr = Math.min(12 * Math.min(sx, sy) * 1.6, 12);
+  cr = Math.max(0, Math.min(cr, Math.max(hw, 0.001) * 0.9, Math.max(hh, 0.001) * 0.9));
+  cardArr[0] = cardC[0] * dpr; cardArr[1] = cardC[1] * dpr;
+  cardArr[2] = Math.max(hw, 0.5) * dpr; cardArr[3] = Math.max(hh, 0.5) * dpr;
+  cardM[0] = rot; cardM[1] = cf; cardM[2] = cardA; cardM[3] = cr * dpr;
+
+  if (neckAmp > 0.015 && cardA > 0.003){
+    const proj = Math.abs(dirE[0]) * hw + Math.abs(dirE[1]) * hh;
+    neckArr[0] = (blobC[0] + dirE[0] * 50) * dpr;
+    neckArr[1] = (blobC[1] + dirE[1] * 50) * dpr;
+    neckArr[2] = (cardC[0] - dirE[0] * Math.max(proj - 8, 0)) * dpr;
+    neckArr[3] = (cardC[1] - dirE[1] * Math.max(proj - 8, 0)) * dpr;
+    neckR[0] = 25 * neckAmp * dpr; neckR[1] = 8.5 * neckAmp * dpr;
+  } else {
+    neckArr[0] = -9999; neckArr[1] = -9999; neckArr[2] = -9998; neckArr[3] = -9998;
+    neckR[0] = 0; neckR[1] = 0;
+  }
+}
+
+/* ---------------- resize / render loop ---------------- */
+function resize(){
+  dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.max(1, Math.round(W * dpr));
+  canvas.height = Math.max(1, Math.round(H * dpr));
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+gl.disable(gl.BLEND);                 // we output premultiplied alpha directly
+gl.clearColor(0, 0, 0, 0);
+
+let t0 = null;
+function frame(now){
+  if (t0 === null) t0 = now;
+  const time = T_OFFSET + (STILL ? 0 : (now - t0) / 1000);
+  update(time);
+  if (Q.has('dump'))
+    errEl.textContent = JSON.stringify({t: time,
+      balls: Array.from(ballArr).map(v => Math.round(v * 10) / 10),
+      caps:  Array.from(capArr).map(v => Math.round(v * 10) / 10),
+      capR:  Array.from(capRArr).map(v => Math.round(v * 10) / 10)});
+  gl.uniform2f(U.u_res, canvas.width, canvas.height);
+  gl.uniform1f(U.u_time, time);
+  gl.uniform1f(U.u_seed, SEED);
+  gl.uniform1f(U.u_px, dpr);
+  gl.uniform3fv(U.u_balls, ballArr);
+  gl.uniform4fv(U.u_caps, capArr);
+  gl.uniform2fv(U.u_capR, capRArr);
+  gl.uniform4fv(U.u_neck, neckArr);
+  gl.uniform2fv(U.u_neckR, neckR);
+  gl.uniform4fv(U.u_card, cardArr);
+  gl.uniform4fv(U.u_cardM, cardM);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
