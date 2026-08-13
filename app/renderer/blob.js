@@ -88,8 +88,9 @@ const POSE_DUR = 0.9;
 let poseFrom = { x: W * 0.5, y: H * 0.55, r: Math.min(W, H) * 0.14 };
 let poseTo = { ...poseFrom };
 let poseT0 = -1e9;
+let poseDur = POSE_DUR;
 function evalPose(t) {
-  const k = easeInOut(clamp((t - poseT0) / POSE_DUR, 0, 1));
+  const k = easeInOut(clamp((t - poseT0) / poseDur, 0, 1));
   return { x: lerp(poseFrom.x, poseTo.x, k),
            y: lerp(poseFrom.y, poseTo.y, k),
            r: lerp(poseFrom.r, poseTo.r, k) };
@@ -456,12 +457,23 @@ window.echoechoBlob = {
     if (a) anchor = a;
   },
 
-  // where the body idles; the blob flows there over ~0.9 s
-  setRest(cx, cy, r) {
+  // where the body idles; the blob flows there over ~0.9 s (or `dur` seconds
+  // — dragging passes a short one so the body trails the cursor, not lags it)
+  setRest(cx, cy, r, dur) {
     const t = clock();
     poseFrom = evalPose(t);
     poseTo = { x: cx, y: cy, r };
     poseT0 = t;
+    poseDur = dur > 0 ? dur : POSE_DUR;
+  },
+
+  // is (x, y) on the rendered body? Samples last frame's field: 1.0 is the
+  // drawn iso-surface, 0.8 sits a few px outside it — a tight hit region that
+  // hugs the silhouette (pods, necks and all) with just enough grab slack.
+  hitTest(x, y) {
+    const fx = Math.round(x / fpx), fy = Math.round(y / fpx);
+    if (fx < 0 || fy < 0 || fx >= FW || fy >= FH) return false;
+    return field[fy * FW + fx] >= 0.8;
   },
 
   // grow a neck toward (x, y); progress is eased 0..1, the neck tip sits at

@@ -2,7 +2,8 @@
 // (doc cards, transcript wisps, echoecho's Mac), expansion to ~92% of the scene,
 // and the live viewer wiring. Lifecycle contract with main.js:
 //   orb:reveal -> ease reveal to 1; orb:dismiss -> ease to 0 then orb.hidden();
-//   blur dismisses only when nothing is expanded and the VNC is disconnected.
+// The window is click-through except tightly over the blob and its items
+// (hover-tracked via orb.setPassthrough); the blob itself is draggable.
 // Demo mode (?demo=1, passed by main from ECHOECHO_ORB_DEMO=1) runs a scripted,
 // deterministic timeline with no server: wisps, a fake doc, echoecho's Mac
 // (asleep), expand/restore, absorb.
@@ -24,6 +25,14 @@ const easeOutBack = (p) => { const k = 1.35; const q = p - 1; return 1 + q * q *
 const now = () => performance.now() / 1000;
 
 // -------------------------------------------------------------- rest layout
+// Where the user last dragged the blob, as window fractions (survives
+// restarts and resizes); null means the default rest spot.
+let userPose = null;
+try {
+  const saved = JSON.parse(localStorage.getItem('echo.pose'));
+  if (saved && isFinite(saved.fx) && isFinite(saved.fy)) userPose = saved;
+} catch { /* default spot */ }
+
 function restPose(shrunk) {
   if (shrunk) {
     // companion: peeks from the free bottom-left corner beside the expanded
@@ -33,7 +42,13 @@ function restPose(shrunk) {
              r: clamp(free * 0.7, 36, 64) };
   }
   const m = Math.min(innerWidth, innerHeight);
-  return { x: innerWidth * 0.38, y: innerHeight * 0.62, r: m * 0.135 };
+  const r = m * 0.135;
+  if (userPose) {
+    return { x: clamp(userPose.fx * innerWidth, r * 0.5, innerWidth - r * 0.5),
+             y: clamp(userPose.fy * innerHeight, r * 0.5, innerHeight - r * 0.5),
+             r };
+  }
+  return { x: innerWidth * 0.38, y: innerHeight * 0.62, r };
 }
 let pose = restPose(false);
 function applyRest(shrunk) {
@@ -356,12 +371,6 @@ function dismissScene() {
 }
 window.orb.onDismiss(dismissScene);
 
-window.orb.onBlur(() => {
-  if (!expanded && !(window.echoVnc && window.echoVnc.connected)) {
-    window.orb.dismissRequest();
-  }
-});
-
 addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (expanded) restore();
@@ -374,9 +383,80 @@ canvas.addEventListener('click', (e) => {
   if (Math.hypot(e.clientX - pose.x, e.clientY - pose.y) < pose.r * 1.8) restore();
 });
 canvas.addEventListener('dblclick', (e) => {
-  if (expanded || rv.value < 0.99) return;
+  if (expanded || rv.value < 0.99 || now() - lastDragEnd < 0.4) return;
   if (Math.hypot(e.clientX - pose.x, e.clientY - pose.y) < pose.r * 1.8) spawnMac();
 });
+
+// ---------------------------------------------- tight hit region + dragging
+// The window spans most of the screen; everywhere except the blob's own
+// silhouette and the items must let clicks fall through to whatever is
+// behind. Main keeps forwarding mousemove while ignored, so hover decides.
+let passthrough = null;               // tri-state: avoid IPC spam per frame
+function setPassthrough(on) {
+  if (passthrough === on) return;
+  passthrough = on;
+  window.orb.setPassthrough(on);
+}
+
+function overItem(x, y) {
+  for (const it of items) {
+    const r = it.el.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+  }
+  return false;
+}
+
+let drag = null;                      // { dx, dy, moved }
+let lastDragEnd = -1e9;
+
+function updateHover(x, y) {
+  const onBlob = blob.hitTest(x, y);
+  setPassthrough(!(drag || onBlob || overItem(x, y)));
+  canvas.style.cursor =
+    drag ? 'grabbing' : onBlob ? (expanded ? 'pointer' : 'grab') : '';
+}
+
+window.addEventListener('mousedown', (e) => {
+  // grab the landed blob (not the companion — clicking that restores); only
+  // from the canvas itself, so item presses that overlap the silhouette
+  // (bubbled here) never start a drag
+  if (e.button !== 0 || e.target !== canvas || expanded || rv.value < 0.95) return;
+  if (!blob.hitTest(e.clientX, e.clientY)) return;
+  drag = { dx: pose.x - e.clientX, dy: pose.y - e.clientY, moved: false };
+  updateHover(e.clientX, e.clientY);
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (drag) {
+    const nx = e.clientX + drag.dx, ny = e.clientY + drag.dy;
+    if (!drag.moved && Math.hypot(nx - pose.x, ny - pose.y) > 3) drag.moved = true;
+    if (drag.moved) {
+      const r = pose.r;
+      pose = { x: clamp(nx, r * 0.5, innerWidth - r * 0.5),
+               y: clamp(ny, r * 0.5, innerHeight - r * 0.5), r };
+      blob.setRest(pose.x, pose.y, r, 0.12);   // short ease: liquid trail
+    }
+  } else if (e.buttons) {
+    // mid-press over an item (VNC drag, text selection in a doc): freeze the
+    // passthrough state so the gesture can stray off the item without the
+    // window going click-through under it
+    return;
+  }
+  updateHover(e.clientX, e.clientY);
+});
+
+window.addEventListener('mouseup', (e) => {
+  if (!drag) return;
+  if (drag.moved) {
+    lastDragEnd = now();                       // swallow the trailing dblclick
+    userPose = { fx: pose.x / innerWidth, fy: pose.y / innerHeight };
+    try { localStorage.setItem('echo.pose', JSON.stringify(userPose)); } catch {}
+  }
+  drag = null;
+  updateHover(e.clientX, e.clientY);
+});
+
+document.addEventListener('mouseleave', () => setPassthrough(true));
 
 function clearItems() {
   while (items.length) removeItem(items[items.length - 1]);
@@ -433,6 +513,7 @@ function frame() {
   if (hideWhenDone && rv.target === 0 && k >= 1) {
     hideWhenDone = false;
     clearItems();
+    setPassthrough(true);   // next summon starts click-through until hover
     window.orb.hidden();
   }
   if (demoT0 !== null) {

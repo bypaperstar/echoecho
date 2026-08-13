@@ -6,9 +6,10 @@ contextBridge.exposeInMainWorld('orb', {
   // lifecycle
   onReveal: (cb) => ipcRenderer.on('orb:reveal', (_e, p) => cb(p)),
   onDismiss: (cb) => ipcRenderer.on('orb:dismiss', () => cb()),
-  onBlur: (cb) => ipcRenderer.on('orb:blur', () => cb()),
   hidden: () => ipcRenderer.send('orb:hidden'),
   dismissRequest: () => ipcRenderer.send('orb:dismiss-request'),
+  // true = clicks fall through to whatever is behind the window
+  setPassthrough: (on) => ipcRenderer.send('orb:passthrough', on),
 
   // viewer data plane (proxied through main; see lib/backend.js)
   transcript: () => ipcRenderer.invoke('viewer:transcript'),

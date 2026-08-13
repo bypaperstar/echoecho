@@ -43,7 +43,14 @@ python viewer server (:8765)  ──  GET /vnc-info → {"url": "vnc://:pass@ip:
 
 - **Window**: frameless, transparent, always-on-top, resizable "scene" anchored
   near the tray icon; hidden (not destroyed) on dismiss so the blob keeps its
-  state. `Esc` or tray click dismisses (reverse genie).
+  state. `Esc`, tray click, or `Cmd-Shift-E` dismisses (reverse genie).
+- **Click-through**: the window spans most of the screen, but only the blob's
+  rendered silhouette (field-sampled hit test, small slack) and the items eat
+  clicks — everywhere else clicks fall through to whatever is behind
+  (`setIgnoreMouseEvents` toggled from hover; mousemove keeps forwarding while
+  ignored). So losing focus is routine, and clicking away does *not* dismiss.
+- **Dragging**: grab the blob to move it; it trails the cursor liquidly and the
+  spot persists (localStorage, as window fractions) across dismissals/restarts.
 - **Genie reveal**: macOS reserves the real genie warp for its own windows, so we
   fake it *inside* the transparent window: a reveal parameter `t ∈ [0,1]` drives
   the blob shader — the blob streams from the tray anchor point and coalesces
