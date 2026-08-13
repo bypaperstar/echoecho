@@ -136,14 +136,18 @@ fi
 
 # -- 5. optional: the agent runtime inside the guest -----------------------------
 if [ "$AGENT" = "1" ]; then
-  if ! gssh "command -v claude" >/dev/null 2>&1; then
+  if ! gssh "test -x /usr/local/bin/claude || command -v claude" >/dev/null 2>&1; then
     say "installing node $NODE_VERSION + claude CLI inside the guest"
+    # npm's shebang is '#!/usr/bin/env node', so node MUST be on PATH for the
+    # npm run and for claude itself — pass it explicitly through sudo (which
+    # scrubs PATH) via `sudo env PATH=...`.
     gssh "curl -fsSL -o /tmp/node.tar.gz \
       https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-darwin-arm64.tar.gz \
       && echo '$GUEST_PASS' | sudo -S sh -c \
       'mkdir -p /usr/local && tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1' \
-      && echo '$GUEST_PASS' | sudo -S /usr/local/bin/npm install -g @anthropic-ai/claude-code \
-      && /usr/local/bin/claude --version"
+      && echo '$GUEST_PASS' | sudo -S env PATH=/usr/local/bin:/usr/bin:/bin \
+      /usr/local/bin/node /usr/local/bin/npm install -g @anthropic-ai/claude-code \
+      && /usr/local/bin/node /usr/local/bin/claude --version"
   else
     say "claude CLI already in the guest"
   fi
