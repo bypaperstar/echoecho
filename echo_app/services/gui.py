@@ -16,11 +16,22 @@ Deliberately built-in only (no cliclick/Quartz/pyobjc to preinstall): launch,
 type, key, screenshot, wait. Coordinate clicks and a model-driven perceive→act
 loop are the follow-up; a scripted app sequence (open TextEdit, write, save,
 screenshot) is already a real, testable capability.
+
+macOS TCC caveat (verified live): `open` and `screencapture` work out of the
+box, but `osascript`/System Events synthetic keystrokes need Accessibility
+permission, which a SIP-enabled vanilla image will not grant to an
+SSH-invoked process — the call would hang on an unanswerable GUI prompt. So
+every guest GUI command is bounded by a timeout (a blocked keystroke fails
+fast with a clear message instead of hanging the task), and the golden image
+must pre-grant Accessibility (SIP-disabled build + TCC entry, or a PPPC
+profile) for type/key to work. launch + screenshot need no such grant.
 """
 import asyncio
 import shlex
 
 from echo_app import config
+
+GUI_TIMEOUT = 20.0  # a TCC-blocked osascript would otherwise hang forever
 
 # osascript keystroke modifiers, and a few named keys by AppleScript key code.
 _MODS = {"cmd": "command down", "command": "command down",
@@ -86,13 +97,26 @@ class SshGuiDriver(GuiDriver):
         self.workspace = workspace
 
     async def _run(self, argv, capture=False):
-        """Run a built-in in the guest over ssh; raise on failure."""
+        """Run a built-in in the guest over ssh; raise on failure or timeout.
+        The timeout matters: a keystroke blocked on an Accessibility TCC
+        prompt never returns, so bound it and report instead of hanging."""
         remote = " ".join(shlex.quote(a) for a in argv)
         ssh = self.vm.ssh_argv(remote)
         proc = await asyncio.create_subprocess_exec(
             *ssh, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
-        out, err = await proc.communicate()
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), GUI_TIMEOUT)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise GuiError(
+                "guest GUI command timed out (%s) — likely an Accessibility "
+                "permission the VM hasn't granted; launch/screenshot work, "
+                "type/key need the golden image's TCC grant" % argv[0])
         if proc.returncode != 0:
             raise GuiError("guest GUI command failed (%s): %s"
                            % (argv[0], err.decode("utf-8", "replace")[-200:]))

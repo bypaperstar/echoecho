@@ -169,3 +169,22 @@ def test_ssh_gui_driver_builds_guest_commands(monkeypatch, tmp_path):
     # screenshot targets the guest mount path so the PNG lands on the host
     assert "screencapture" in argvs[2][-1]
     assert "/Volumes/Shared/ws/screens/t1/a.png" in argvs[2][-1]
+
+
+def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
+    """A keystroke blocked on an Accessibility TCC prompt never returns; the
+    driver must bound it and raise, not hang the whole task. Simulated with a
+    real sleeping subprocess in place of ssh."""
+    from echo_app.services import gui as gm
+    from echo_app.services.vm import LumeVM
+    monkeypatch.setattr(gm, "GUI_TIMEOUT", 0.3)
+    vm = LumeVM(vm_name="echo-vm")
+    vm.ip = "10.0.0.9"
+    vm.ssh_argv = lambda remote: ["sh", "-c", "sleep 30"]  # "hung" guest cmd
+    driver = SshGuiDriver(vm, tmp_path)
+    import time
+    t0 = time.monotonic()
+    with pytest.raises(gm.GuiError) as ei:
+        asyncio.run(driver.key("cmd+s"))
+    assert time.monotonic() - t0 < 5.0  # bounded, not a 30s hang
+    assert "Accessibility" in str(ei.value)
