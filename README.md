@@ -153,6 +153,23 @@ every target against your shared-folder allowlist (the agent's manifest is not
 trusted), backs up each original with a timestamp, then writes atomically. With no
 folders shared, `outbox.apply` isn't even advertised and the approval flow is absent.
 
+PR 15 adds the **Echo Orb** — a menu-bar app face for the viewer (`app/`,
+Electron) — and an **interactive portal into Echo's Mac**. Echo lives in the
+menu bar as a code-drawn orb; clicking it (or saying "echo echo" — the wake
+event arrives over the same SSE feed the web viewer uses) pours a black
+procedural blob out of the menu bar, genie-style, into a transparent
+always-on-top scene. Documents and transcript wisps emerge from the blob; the
+"Echo's Mac" item is a live VNC view of the Lume VM — interactive by default
+(it's Echo's Mac; the blast radius is the sandbox, and your shared folders stay
+read-only) with a view-only toggle. Lume already runs a password-protected VNC
+server even under `--no-display`, so the portal needs no VM changes: the app
+asks the viewer's new `/vnc-info` endpoint (or `ECHO_VNC_URL`) for the
+endpoint, bridges WebSocket↔TCP locally, and renders it with noVNC. Because
+VNC input lands at the virtual-hardware level, *you* can type in the VM even
+where the agent's `osascript` keystrokes are still TCC-blocked (see the PR 14
+caveat). Run it with `cd app && npm install && npm start`; the blob look-lab
+lives in `app/prototypes/`. The web viewer at :8765 is unchanged.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.

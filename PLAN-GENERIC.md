@@ -149,6 +149,14 @@ Every piece exists in the open; the *combination* (always-on wake-word voice + l
     worker + backup, approval phrases in the prompt.
 14. **`echo/14-computer-use`** (stretch) — GUI driving inside the VM (cua driver or
     screenshot+accessibility loop) for Mac-app tasks; screen-recording into the session recorder.
+15. **`echo/15-portal-app`** — the Echo Orb: an Electron menu-bar face for the viewer
+    (procedural black-blob scene, genie reveal on tray click or wake word, items emerge
+    from the blob) plus the interactive VM portal — `/vnc-info` on the viewer server,
+    a local WS↔TCP bridge, noVNC render of the Lume VM's built-in VNC server (available
+    even under `--no-display`). Human input over VNC arrives as virtual HID, sidestepping
+    the PR 14 TCC keystroke limit — groundwork for a `VncGuiDriver` (PR 16 candidate) so
+    the *agent* can type/click that way too. Deferred: LAN/remote serving with auth
+    (Mac-mini-as-body deployment), packaging/signing.
 
 ## Risks
 
