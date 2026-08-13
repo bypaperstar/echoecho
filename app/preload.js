@@ -28,3 +28,10 @@ contextBridge.exposeInMainWorld('orb', {
   // scene's demo timeline
   demoStarted: () => ipcRenderer.send('orb:demo-started'),
 });
+
+// control panel surface (same preload serves both windows)
+contextBridge.exposeInMainWorld('ctl', {
+  status: () => ipcRenderer.invoke('ctl:status'),
+  action: (name) => ipcRenderer.invoke('ctl:action', name),
+  setLoginItem: (enable) => ipcRenderer.invoke('ctl:login-item', enable),
+});

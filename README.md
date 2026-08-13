@@ -170,6 +170,17 @@ where the agent's `osascript` keystrokes are still TCC-blocked (see the PR 14
 caveat). Run it with `cd app && npm install && npm start`; the blob look-lab
 lives in `app/prototypes/`. The web viewer at :8765 is unchanged.
 
+The Orb installs as a real **Echo.app** (Dock icon, Launchpad, Spotlight):
+`bash scripts/echoctl.sh install-app` generates the icon procedurally (a
+zero-dependency PNG encoder in `app/lib/icon.js`, `iconutil` → icns), packages
+with `@electron/packager`, and drops it in `/Applications`. Opening Echo.app
+shows a **control panel** — daemon / VM / orb status plus Summon, Start/Stop
+daemon, Wake / Reset Echo's Mac, Update & relaunch (git pull → reinstall →
+rebuild → reopen), and a start-at-login toggle. The same lifecycle commands
+work from a terminal: `scripts/echoctl.sh {status|start-daemon|stop-daemon|
+boot-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
+`ECHO_INPUT_DEVICE`) live in `~/.echo/daemon.env`.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.
