@@ -29,12 +29,19 @@ if ! command -v lume >/dev/null 2>&1; then
 fi
 
 vm_json() { lume get "$GOLDEN" -f json 2>/dev/null || true; }
-vm_field() {  # $1 = key
-  vm_json | python3 -c '
+vm_field() {  # $1 = key. lume 0.5.x returns a JSON ARRAY (maybe log-prefixed):
+  vm_json | python3 -c '   # try each [/{ offset until one parses, unwrap [0]
 import json, sys
 raw = sys.stdin.read()
-i = raw.find("{")
-print(json.loads(raw[i:]).get(sys.argv[1], "") if i >= 0 else "")
+for i in sorted(j for j, c in enumerate(raw) if c in "[{"):
+    try:
+        d = json.loads(raw[i:])
+    except ValueError:
+        continue
+    if isinstance(d, list):
+        d = d[0] if d else {}
+    print(d.get(sys.argv[1], "") if isinstance(d, dict) else "")
+    break
 ' "$1"
 }
 
