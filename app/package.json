@@ -1,0 +1,18 @@
+{
+  "name": "echo-orb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Echo's menu-bar portal: the blob, the workspace, and Echo's Mac",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "ECHO_ORB_SMOKE=1 xvfb-run -a electron --no-sandbox ."
+  },
+  "devDependencies": {
+    "electron": "^38.2.0"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.5.0",
+    "ws": "^8.18.0"
+  }
+}
