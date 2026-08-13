@@ -172,18 +172,15 @@ class LumeVM:
         await self._lume("delete", self.vm_name, "--force")
         self.ip = None
 
-    # -- the one job: wrap the agent argv ------------------------------------
+    # -- ssh into the guest ---------------------------------------------------
 
-    def command(self, argv, workspace):
+    def ssh_argv(self, remote):
+        """ssh argv running one command string in the guest. NO -tt: a PTY
+        would merge stdout+stderr (empties the stderr tail, can splice stderr
+        into the JSONL stream). Shared by command() and the GUI driver
+        (services/gui.py); guest teardown on a kill is discard()/reset()."""
         if not self.ip:
             raise SandboxUnavailable("VM not prepared")
-        remote = "cd %s && exec %s" % (
-            shlex.quote(config.vm_guest_workspace()),
-            " ".join(shlex.quote(a) for a in argv))
-        # NO -tt: a PTY would merge the guest agent's stdout+stderr onto one
-        # channel (empties the stderr tail, can splice stderr bytes into the
-        # JSONL stream and corrupt the result line). Guest teardown on a kill
-        # is handled by discard()/reset(), not by tty HUP.
         ssh = ["ssh",
                "-i", str(Path(config.vm_ssh_key()).expanduser()),
                "-o", "StrictHostKeyChecking=no",
@@ -197,7 +194,20 @@ class LumeVM:
             ssh += ["-o", "SendEnv=%s" % env_name]
         ssh.append("%s@%s" % (config.vm_guest_user(), self.ip))
         ssh.append(remote)
-        return ssh, Path(workspace)
+        return ssh
+
+    # -- the one job: wrap the agent argv ------------------------------------
+
+    def command(self, argv, workspace):
+        remote = "cd %s && exec %s" % (
+            shlex.quote(config.vm_guest_workspace()),
+            " ".join(shlex.quote(a) for a in argv))
+        return self.ssh_argv(remote), Path(workspace)
+
+    def guest_path(self, name):
+        """Absolute path inside the guest for a workspace-relative name (the
+        virtiofs mount), shell-quoted."""
+        return shlex.quote(config.vm_guest_workspace().rstrip("/") + "/" + name)
 
 
 class FakeVM:

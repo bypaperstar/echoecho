@@ -147,7 +147,7 @@ if [ "$AGENT" = "1" ]; then
       'mkdir -p /usr/local && tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1' \
       && echo '$GUEST_PASS' | sudo -S env PATH=/usr/local/bin:/usr/bin:/bin \
       /usr/local/bin/node /usr/local/bin/npm install -g @anthropic-ai/claude-code \
-      && /usr/local/bin/node /usr/local/bin/claude --version"
+      && PATH=/usr/local/bin:\$PATH claude --version"  # claude's shebang finds node
   else
     say "claude CLI already in the guest"
   fi
