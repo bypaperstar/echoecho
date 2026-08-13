@@ -69,17 +69,22 @@ done
 say "guest is up at $IP"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+# PreferredAuthentications=password forces plain password: without it ssh
+# offers keyboard-interactive first, whose PAM prompt hangs a scripted expect
+# (learned the hard way validating this live).
+PW_OPTS="$SSH_OPTS -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
 
 ssh_pass() {  # password-auth ssh via expect (stock on macOS); $* = remote cmd
-  expect - "$GUEST_USER" "$GUEST_PASS" "$IP" "$*" <<'EXP'
+  expect - "$GUEST_USER" "$GUEST_PASS" "$IP" "$PW_OPTS" "$*" <<'EXP'
 set user [lindex $argv 0]
 set pass [lindex $argv 1]
 set host [lindex $argv 2]
-set cmd  [lindex $argv 3]
+set opts [lindex $argv 3]
+set cmd  [lindex $argv 4]
 set timeout 120
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $user@$host $cmd
+spawn ssh {*}[split $opts] $user@$host $cmd
 expect {
-  -re "(?i)password" { send "$pass\r"; exp_continue }
+  -re "(?i)password:" { send "$pass\r"; exp_continue }
   eof
 }
 catch wait result
@@ -90,9 +95,24 @@ EXP
 # -- 4. key auth + AcceptEnv (model API keys reach the in-guest agent) -----------
 if ! ssh -i "$KEY" $SSH_OPTS -o BatchMode=yes -o ConnectTimeout=5 \
      "$GUEST_USER@$IP" true 2>/dev/null; then
-  say "installing Echo's key in the guest (default creds)"
-  ssh_pass "mkdir -p ~/.ssh && echo '$PUBKEY' >> ~/.ssh/authorized_keys \
-    && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+  say "installing Echo's key in the guest (ssh-copy-id, default creds)"
+  # ssh-copy-id appends the key in the correct format and fixes perms itself
+  # (a hand-rolled echo/base64 append silently corrupted the key when tested
+  # live); -f skips its own key-auth precheck.
+  expect - "$GUEST_USER" "$GUEST_PASS" "$IP" "$KEY.pub" "$PW_OPTS" <<'EXP'
+set user [lindex $argv 0]
+set pass [lindex $argv 1]
+set host [lindex $argv 2]
+set pub  [lindex $argv 3]
+set opts [lindex $argv 4]
+set timeout 60
+spawn ssh-copy-id -f -i $pub {*}[split $opts] $user@$host
+expect {
+  -re "(?i)password:" { send "$pass\r"; exp_continue }
+  -re "Number of key.s. added|added: 1|WARNING: All keys" { }
+  eof
+}
+EXP
 fi
 gssh() { ssh -i "$KEY" $SSH_OPTS "$GUEST_USER@$IP" "$@"; }
 say "key auth OK: $(gssh 'echo ok from $(hostname)')"
