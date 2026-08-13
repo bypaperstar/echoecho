@@ -82,15 +82,24 @@ class LumeVM:
         return proc.returncode, out.decode("utf-8", "replace")
 
     async def _get(self):
-        """Parsed `lume get <vm> -f json`, or None while the VM is unknown."""
+        """Parsed `lume get <vm> -f json` as a dict, or None while the VM is
+        unknown. lume 0.5.x wraps the record in a JSON array ([{...}]) and may
+        prefix log lines like '[2026-..] INFO: ...' — whose '[' is NOT the
+        JSON — so try each '['/'{' start until one actually parses, then
+        unwrap a one-element list."""
         rc, out = await self._lume("get", self.vm_name, "-f", "json")
         if rc != 0:
             return None
-        try:
-            start = out.index("{")
-            return json.loads(out[start:])
-        except ValueError:
-            return None
+        starts = sorted(i for i, c in enumerate(out) if c in "[{")
+        for i in starts:
+            try:
+                data = json.loads(out[i:])
+            except ValueError:
+                continue
+            if isinstance(data, list):
+                data = data[0] if data else None
+            return data if isinstance(data, dict) else None
+        return None
 
     # -- lifecycle ------------------------------------------------------------
 

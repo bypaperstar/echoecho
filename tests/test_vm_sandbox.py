@@ -196,6 +196,45 @@ def test_lume_vm_command_requires_prepared_ip():
         vm.command(["claude"], Path("/ws"))
 
 
+# real `lume get -f json` output (0.5.3): a JSON ARRAY, prefixed by nothing
+# here but log lines in practice — captured live on the Mac
+LUME_GET_ARRAY = '''[
+  {
+    "status" : "running",
+    "os" : "macOS",
+    "ipAddress" : "192.168.64.3",
+    "name" : "echo-vm",
+    "sharedDirectories" : null
+  }
+]
+'''
+
+
+def test_lume_get_parses_array_output(monkeypatch):
+    """Regression (found live): lume 0.5.3 wraps the record in a JSON array;
+    the old `json.loads(out[out.index('{'):])` choked on the trailing ']'."""
+    vm = LumeVM(vm_name="echo-vm")
+
+    async def fake_lume(*args):
+        return 0, LUME_GET_ARRAY
+    vm._lume = fake_lume
+    info = asyncio.run(vm._get())
+    assert info["status"] == "running"
+    assert info["ipAddress"] == "192.168.64.3"
+
+    # log-line prefix (lume emits INFO lines before the JSON) is tolerated
+    async def fake_lume_prefixed(*args):
+        return 0, "[2026-08-13T02:00:00Z] INFO: fetching\n" + LUME_GET_ARRAY
+    vm._lume = fake_lume_prefixed
+    assert asyncio.run(vm._get())["ipAddress"] == "192.168.64.3"
+
+    # non-zero rc or garbage -> None, never a crash
+    async def fake_fail(*args):
+        return 1, "not found"
+    vm._lume = fake_fail
+    assert asyncio.run(vm._get()) is None
+
+
 # -- forced-kill disposes the VM (guest orphans can't outlive the budget) -----
 
 def test_budget_kill_discards_the_vm_via_reset(tmp_path, monkeypatch):
