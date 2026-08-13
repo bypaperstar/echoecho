@@ -29,7 +29,7 @@ const now = () => performance.now() / 1000;
 // restarts and resizes); null means the default rest spot.
 let userPose = null;
 try {
-  const saved = JSON.parse(localStorage.getItem('echo.pose'));
+  const saved = JSON.parse(localStorage.getItem('echoecho.pose'));
   if (saved && isFinite(saved.fx) && isFinite(saved.fy)) userPose = saved;
 } catch { /* default spot */ }
 
@@ -450,7 +450,7 @@ window.addEventListener('mouseup', (e) => {
   if (drag.moved) {
     lastDragEnd = now();                       // swallow the trailing dblclick
     userPose = { fx: pose.x / innerWidth, fy: pose.y / innerHeight };
-    try { localStorage.setItem('echo.pose', JSON.stringify(userPose)); } catch {}
+    try { localStorage.setItem('echoecho.pose', JSON.stringify(userPose)); } catch {}
   }
   drag = null;
   updateHover(e.clientX, e.clientY);
