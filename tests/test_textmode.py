@@ -5,12 +5,12 @@ read_artifact -> end_session -> back to IDLE."""
 import asyncio
 import json
 
-import echo
-from echo_app import config
-from echo_app.bus import TaskResult
-from echo_app.conversation.textmode import FakeConversationLLM, TextRepl
-from echo_app.orchestrator.core import Orchestrator
-from echo_app.services import artifacts
+import echoecho
+from echoecho_app import config
+from echoecho_app.bus import TaskResult
+from echoecho_app.conversation.textmode import FakeConversationLLM, TextRepl
+from echoecho_app.orchestrator.core import Orchestrator
+from echoecho_app.services import artifacts
 
 DOC = "# Doc\n\n## Goals\n- ship the demo\n"
 
@@ -49,7 +49,7 @@ def run_repl(tmp_path, monkeypatch, lines, rounds):
     orch = Orchestrator(registry={"doc.write": doc_write},
                         on_injection=repl.inject,
                         log_path=tmp_path / "tasks.jsonl", workspace=tmp_path)
-    repl.on_tool(echo.make_tool_handler(orch, repl))
+    repl.on_tool(echoecho.make_tool_handler(orch, repl))
 
     async def go():
         loop_task = asyncio.ensure_future(orch.run())
@@ -64,7 +64,7 @@ def run_repl(tmp_path, monkeypatch, lines, rounds):
 def test_full_tool_loop_keyless(tmp_path, monkeypatch):
     repl, out = run_repl(
         tmp_path, monkeypatch,
-        ["echo echo", "let's write the goals doc", "~wait 0.4",
+        ["echoecho", "let's write the goals doc", "~wait 0.4",
          "read me the goals", "that's it"],
         ROUNDS)
     text = "\n".join(out)
@@ -72,7 +72,7 @@ def test_full_tool_loop_keyless(tmp_path, monkeypatch):
     # dispatch acked instantly with a queued task id, then the model kept talking
     assert '[tool] dispatch_task {"kind": "doc.write"' in text
     assert '"task_id": "t1", "status": "queued"' in text
-    assert "[echo] On it — drafting the goals." in text
+    assert "[echoecho] On it — drafting the goals." in text
 
     # delayed result injected at a turn boundary with the prompt wording
     assert ("[inject/interrupt] [task t1 done] Drafted the goals doc. "
@@ -98,9 +98,9 @@ def test_full_tool_loop_keyless(tmp_path, monkeypatch):
 
 def test_script_exhausted_is_graceful(tmp_path, monkeypatch):
     repl, out = run_repl(tmp_path, monkeypatch,
-                         ["echo echo", "hello there", "hello again"],
+                         ["echoecho", "hello there", "hello again"],
                          [[{"type": "message", "text": "Hi!"}]])
     text = "\n".join(out)
-    assert "[echo] Hi!" in text
+    assert "[echoecho] Hi!" in text
     assert "(fake LLM: script exhausted)" in text
     assert repl.session.state == "IDLE"  # EOF forced a clean quit

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from echo_app import config, events
+from echoecho_app import config, events
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def read_feed(workspace):
 
 def test_emit_writes_parseable_json_lines_with_ts_and_type(workspace):
     events.emit("user_text", text="hello there")
-    events.emit("task", task_id="t1", kind="sleep.echo", status="queued")
+    events.emit("task", task_id="t1", kind="sleep.echoecho", status="queued")
     recs = read_feed(workspace)
     assert len(recs) == 2
     for rec in recs:
@@ -72,16 +72,16 @@ def test_reset_truncates_and_writes_run_marker(workspace):
 
 
 def test_smoke_script_populates_event_feed():
-    """ECHO_TEXT=1 ECHO_FAKE_LLM=1 echo.py --script fixtures/smoke.txt must
+    """ECHOECHO_TEXT=1 ECHOECHO_FAKE_LLM=1 echoecho.py --script fixtures/smoke.txt must
     leave a feed telling the whole story in a sane order: run marker, wake,
     the chat, the dispatched task's lifecycle, and the injected result."""
     import os
     import subprocess
     import sys
 
-    env = dict(os.environ, ECHO_TEXT="1", ECHO_FAKE_LLM="1")
+    env = dict(os.environ, ECHOECHO_TEXT="1", ECHOECHO_FAKE_LLM="1")
     proc = subprocess.run(
-        [sys.executable, str(config.REPO_ROOT / "echo.py"),
+        [sys.executable, str(config.REPO_ROOT / "echoecho.py"),
          "--script", str(config.FIXTURES_DIR / "smoke.txt")],
         capture_output=True, text=True, timeout=60, env=env,
         cwd=str(config.REPO_ROOT))
@@ -111,6 +111,6 @@ def test_smoke_script_populates_event_feed():
                   and r.get("reason") == "end_phrase")
     idle = first(lambda r: r["type"] == "state" and r.get("to") == "IDLE")
     assert woke < dispatched < queued < done < injected < ended < idle
-    assert recs[done]["kind"] == "sleep.echo"
+    assert recs[done]["kind"] == "sleep.echoecho"
     assert recs[done]["priority"] in config.PRIORITIES
     assert recs[injected]["priority"] == recs[done]["priority"]

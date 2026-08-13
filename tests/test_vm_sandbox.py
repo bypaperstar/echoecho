@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from echo_app import config
-from echo_app.bus import Task, TaskRequest, TaskResult
-from echo_app.orchestrator.core import Orchestrator, WorkerContext
-from echo_app.services import vm as vm_mod
-from echo_app.services.agent_cli import ClaudeCLI, FakeAgentCLI
-from echo_app.services.vm import FakeVM, LumeVM, ShellSandbox, for_task
-from echo_app.workers.base import load_all
+from echoecho_app import config
+from echoecho_app.bus import Task, TaskRequest, TaskResult
+from echoecho_app.orchestrator.core import Orchestrator, WorkerContext
+from echoecho_app.services import vm as vm_mod
+from echoecho_app.services.agent_cli import ClaudeCLI, FakeAgentCLI
+from echoecho_app.services.vm import FakeVM, LumeVM, ShellSandbox, for_task
+from echoecho_app.workers.base import load_all
 
 
 def write_script(path, events):
@@ -45,20 +45,20 @@ def run_orch(requests, tmp_path, extra, timeout=5.0):
 # -- tier selection -----------------------------------------------------------
 
 def test_for_task_defaults_to_shell(tmp_path, monkeypatch):
-    monkeypatch.delenv("ECHO_SANDBOX", raising=False)
+    monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)
     ctx = WorkerContext(workspace=tmp_path)
     task = Task(id="t1", request=TaskRequest(kind="agent.run"))
     assert isinstance(for_task(task, ctx), ShellSandbox)
 
 
 def test_env_and_arg_select_vm(tmp_path, monkeypatch):
-    monkeypatch.setenv("ECHO_SANDBOX", "vm")
+    monkeypatch.setenv("ECHOECHO_SANDBOX", "vm")
     vm_mod._shared_vm = None
     ctx = WorkerContext(workspace=tmp_path)
     assert isinstance(for_task(Task(id="t1", request=TaskRequest(
         kind="agent.run")), ctx), LumeVM)
     # a per-task arg overrides the env default either way
-    monkeypatch.delenv("ECHO_SANDBOX", raising=False)
+    monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)
     assert isinstance(for_task(Task(id="t2", request=TaskRequest(
         kind="agent.run", args={"sandbox": "vm"})), ctx), LumeVM)
     assert isinstance(for_task(Task(id="t3", request=TaskRequest(
@@ -74,7 +74,7 @@ def test_injected_sandbox_wins(tmp_path):
 
 
 def test_vm_tier_is_a_shared_warm_instance(tmp_path, monkeypatch):
-    monkeypatch.setenv("ECHO_SANDBOX", "vm")
+    monkeypatch.setenv("ECHOECHO_SANDBOX", "vm")
     vm_mod._shared_vm = None
     ctx = WorkerContext(workspace=tmp_path)
     a = for_task(Task(id="t1", request=TaskRequest(kind="agent.run")), ctx)
@@ -149,14 +149,14 @@ def test_sandbox_prepare_failure_is_a_clean_error(tmp_path):
 # -- LumeVM argv shape (no VM needed: pure string building) -------------------
 
 def test_lume_vm_wraps_argv_in_ssh(monkeypatch):
-    monkeypatch.setenv("ECHO_VM_USER", "lume")
-    monkeypatch.setenv("ECHO_VM_SSH_KEY", "/keys/echo")
+    monkeypatch.setenv("ECHOECHO_VM_USER", "lume")
+    monkeypatch.setenv("ECHOECHO_VM_SSH_KEY", "/keys/echoecho")
     # the real default guest mount has a space ("My Shared Files"): it MUST
     # be shell-quoted into the remote command
-    monkeypatch.setenv("ECHO_VM_GUEST_WORKSPACE",
+    monkeypatch.setenv("ECHOECHO_VM_GUEST_WORKSPACE",
                        "/Volumes/My Shared Files/workspace")
-    monkeypatch.setenv("ECHO_VM_PASS_ENV", "ANTHROPIC_API_KEY")
-    vm = LumeVM(vm_name="echo-vm")
+    monkeypatch.setenv("ECHOECHO_VM_PASS_ENV", "ANTHROPIC_API_KEY")
+    vm = LumeVM(vm_name="echoecho-vm")
     vm.ip = "192.168.64.7"
     argv, cwd = vm.command(["claude", "-p", "do a thing", "--resume", "s1"],
                            Path("/host/ws"))
@@ -165,7 +165,7 @@ def test_lume_vm_wraps_argv_in_ssh(monkeypatch):
     # + empties the stderr tail); teardown is via discard(), not tty HUP
     assert "-tt" not in argv
     assert "lume@192.168.64.7" in argv
-    assert "-i" in argv and "/keys/echo" in argv
+    assert "-i" in argv and "/keys/echoecho" in argv
     assert any("SendEnv=ANTHROPIC_API_KEY" in a for a in argv)
     remote = argv[-1]
     assert remote.startswith("cd '/Volumes/My Shared Files/workspace' && exec ")
@@ -177,21 +177,21 @@ def test_lume_vm_wraps_argv_in_ssh(monkeypatch):
 
 def test_vm_pass_env_defaults_to_anthropic_only(monkeypatch):
     """Least privilege: the untrusted VM gets ONLY the key its guest runtime
-    (claude) needs — never Echo's OpenAI voice key by default."""
-    monkeypatch.delenv("ECHO_VM_PASS_ENV", raising=False)
+    (claude) needs — never echoecho's OpenAI voice key by default."""
+    monkeypatch.delenv("ECHOECHO_VM_PASS_ENV", raising=False)
     assert config.vm_pass_env() == ["ANTHROPIC_API_KEY"]
-    monkeypatch.setenv("ECHO_VM_PASS_ENV", "OPENAI_API_KEY FOO_KEY")
+    monkeypatch.setenv("ECHOECHO_VM_PASS_ENV", "OPENAI_API_KEY FOO_KEY")
     assert config.vm_pass_env() == ["OPENAI_API_KEY", "FOO_KEY"]
-    vm = LumeVM(vm_name="echo-vm")
+    vm = LumeVM(vm_name="echoecho-vm")
     vm.ip = "10.0.0.2"
     argv, _ = vm.command(["claude", "-p", "x"], Path("/ws"))
-    monkeypatch.delenv("ECHO_VM_PASS_ENV", raising=False)
+    monkeypatch.delenv("ECHOECHO_VM_PASS_ENV", raising=False)
     argv2, _ = vm.command(["claude", "-p", "x"], Path("/ws"))
     assert not any("OPENAI_API_KEY" in a for a in argv2)  # default keeps it out
 
 
 def test_lume_vm_command_requires_prepared_ip():
-    vm = LumeVM(vm_name="echo-vm")
+    vm = LumeVM(vm_name="echoecho-vm")
     with pytest.raises(vm_mod.SandboxUnavailable):
         vm.command(["claude"], Path("/ws"))
 
@@ -203,7 +203,7 @@ LUME_GET_ARRAY = '''[
     "status" : "running",
     "os" : "macOS",
     "ipAddress" : "192.168.64.3",
-    "name" : "echo-vm",
+    "name" : "echoecho-vm",
     "sharedDirectories" : null
   }
 ]
@@ -213,7 +213,7 @@ LUME_GET_ARRAY = '''[
 def test_lume_get_parses_array_output(monkeypatch):
     """Regression (found live): lume 0.5.3 wraps the record in a JSON array;
     the old `json.loads(out[out.index('{'):])` choked on the trailing ']'."""
-    vm = LumeVM(vm_name="echo-vm")
+    vm = LumeVM(vm_name="echoecho-vm")
 
     async def fake_lume(*args):
         return 0, LUME_GET_ARRAY
@@ -241,7 +241,7 @@ def test_budget_kill_discards_the_vm_via_reset(tmp_path, monkeypatch):
     """On a budget breach the local ssh dies but can't reap guest children,
     so the worker must dispose the whole VM. Proven with a FakeVM whose
     reset() records it, driven through the real timeout+kill path."""
-    monkeypatch.setenv("ECHO_AGENT_TIMEOUT", "0.3")
+    monkeypatch.setenv("ECHOECHO_AGENT_TIMEOUT", "0.3")
 
     class RecordingVM(FakeVM):
         def __init__(self, root):
@@ -264,7 +264,7 @@ def test_budget_kill_discards_the_vm_via_reset(tmp_path, monkeypatch):
 
 
 def test_discard_clears_the_warm_singleton(monkeypatch):
-    monkeypatch.setenv("ECHO_SANDBOX", "vm")
+    monkeypatch.setenv("ECHOECHO_SANDBOX", "vm")
     vm_mod._shared_vm = None
     ctx = WorkerContext(workspace=Path("/tmp"))
     warm = for_task(Task(id="t1", request=TaskRequest(kind="agent.run")), ctx)

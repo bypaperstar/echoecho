@@ -7,12 +7,12 @@ import json
 import time
 from pathlib import Path
 
-from echo_app.bus import TaskRequest
-from echo_app.orchestrator.core import Orchestrator, WorkerContext
-from echo_app.services import agent_cli
-from echo_app.services.agent_cli import ClaudeCLI, CodexCLI, FakeAgentCLI
-from echo_app.workers.agent_run import _speakable, run_agent
-from echo_app.workers.base import load_all
+from echoecho_app.bus import TaskRequest
+from echoecho_app.orchestrator.core import Orchestrator, WorkerContext
+from echoecho_app.services import agent_cli
+from echoecho_app.services.agent_cli import ClaudeCLI, CodexCLI, FakeAgentCLI
+from echoecho_app.workers.agent_run import _speakable, run_agent
+from echoecho_app.workers.base import load_all
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -124,7 +124,7 @@ def test_nonzero_exit_is_an_error_result(tmp_path):
 
 
 def test_no_cli_installed_reports_instead_of_crashing(tmp_path, monkeypatch):
-    monkeypatch.delenv("ECHO_FAKE_AGENT_SCRIPT", raising=False)
+    monkeypatch.delenv("ECHOECHO_FAKE_AGENT_SCRIPT", raising=False)
     monkeypatch.setattr(agent_cli.shutil, "which", lambda name: None)
     task_req = TaskRequest(kind="agent.run", instructions="x")
     orch, injections, _ = run_orch([task_req], tmp_path, extra={})
@@ -155,7 +155,7 @@ def test_fake_dir_fixtures_consumed_in_order_then_exhausted(tmp_path):
 
 def test_env_var_selects_shared_fake_runtime(tmp_path, monkeypatch):
     script = write_script(tmp_path, RUN_OK)
-    monkeypatch.setenv("ECHO_FAKE_AGENT_SCRIPT", str(script))
+    monkeypatch.setenv("ECHOECHO_FAKE_AGENT_SCRIPT", str(script))
     agent_cli._fakes.clear()
     ctx = WorkerContext(workspace=tmp_path)
     runtime = agent_cli.for_ctx(ctx)

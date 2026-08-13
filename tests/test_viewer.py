@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from echo_app import config, events
-from echo_app.services import artifacts
-from echo_app.viewer.server import ViewerServer
+from echoecho_app import config, events
+from echoecho_app.services import artifacts
+from echoecho_app.viewer.server import ViewerServer
 
 
 @pytest.fixture
@@ -163,8 +163,8 @@ def test_transcript_empty_without_feed(server):
 
 def test_transcript_returns_emitted_events(server, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)  # emit -> server ws
-    events.emit("user_text", text="hello echo")
-    events.emit("task", task_id="t1", kind="sleep.echo", status="done",
+    events.emit("user_text", text="hello echoecho")
+    events.emit("task", task_id="t1", kind="sleep.echoecho", status="done",
                 say="done!", priority="interrupt")
     # malformed lines must be skipped, not break the endpoint
     with open(tmp_path / events.FEED_NAME, "a") as f:
@@ -174,7 +174,7 @@ def test_transcript_returns_emitted_events(server, tmp_path, monkeypatch):
     assert status == 200
     got = json.loads(body)
     assert [e["type"] for e in got] == ["user_text", "task", "injection"]
-    assert got[0]["text"] == "hello echo"
+    assert got[0]["text"] == "hello echoecho"
     assert got[1]["say"] == "done!"
 
 

@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from echo_app.bus import TaskRequest
-from echo_app.orchestrator.core import Orchestrator, WorkerContext
-from echo_app.services import artifacts
-from echo_app.services.llm import FakeLLM, LLMUnavailable, RealLLM, for_ctx
-from echo_app.workers.base import load_all
+from echoecho_app.bus import TaskRequest
+from echoecho_app.orchestrator.core import Orchestrator, WorkerContext
+from echoecho_app.services import artifacts
+from echoecho_app.services.llm import FakeLLM, LLMUnavailable, RealLLM, for_ctx
+from echoecho_app.workers.base import load_all
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -220,7 +220,7 @@ def test_write_atomic_full_content_at_rename(tmp_path, monkeypatch):
         seen["dst"] = dst
         real_rename(src, dst)
 
-    monkeypatch.setattr("echo_app.services.artifacts.os.rename", spying_rename)
+    monkeypatch.setattr("echoecho_app.services.artifacts.os.rename", spying_rename)
     content = "# Doc\n\n" + "line\n" * 100
     target = artifacts.write_atomic(tmp_path, "doc.md", content)
     # tmp file already held the FULL content when it was renamed into place
@@ -248,7 +248,7 @@ def test_artifacts_read_list_mtime(tmp_path):
 # -- web: wp_search resilience -------------------------------------------------
 
 def test_wp_search_skips_site_returning_json_error(monkeypatch):
-    from echo_app.services import web
+    from echoecho_app.services import web
 
     def fake_fetch(url, timeout=20):
         if "recipetineats" in url:  # WP outage: JSON error object, not a list
@@ -263,10 +263,10 @@ def test_wp_search_skips_site_returning_json_error(monkeypatch):
 # -- LLM selection -----------------------------------------------------------
 
 def test_fake_llm_selected_by_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("ECHO_FAKE_LLM", "1")
+    monkeypatch.setenv("ECHOECHO_FAKE_LLM", "1")
     ctx = WorkerContext(workspace=tmp_path)
     assert isinstance(for_ctx(ctx), FakeLLM)
-    monkeypatch.delenv("ECHO_FAKE_LLM")
+    monkeypatch.delenv("ECHOECHO_FAKE_LLM")
     assert isinstance(for_ctx(ctx), RealLLM)
     ctx.extra["llm"] = FakeLLM()
     assert for_ctx(ctx) is ctx.extra["llm"]

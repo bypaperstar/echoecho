@@ -21,7 +21,7 @@ const proxy = require(path.join(__dirname, '..', 'vnc-proxy.js'));
 // when back-to-back runs reuse it.
 app.setPath('userData', fs.mkdtempSync(path.join(require('os').tmpdir(), 'vnc-smoke-')));
 
-const TARGET = process.env.ECHO_VNC_URL;
+const TARGET = process.env.ECHOECHO_VNC_URL;
 const BEFORE = process.env.VNC_E2E_BEFORE || '/tmp/vnc-e2e-before.png';
 const AFTER = process.env.VNC_E2E_AFTER || '/tmp/vnc-e2e-after.png';
 // RFB framebuffer updates and canvas paints are async: settle before capture
@@ -29,7 +29,7 @@ const SETTLE_MS = 2500;
 const TIMEOUT_MS = 90000;
 
 if (!TARGET) {
-  console.error('[vnc-smoke] ECHO_VNC_URL is required');
+  console.error('[vnc-smoke] ECHOECHO_VNC_URL is required');
   process.exit(2);
 }
 

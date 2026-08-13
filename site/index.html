@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Echo — the always-on voice agent for your Mac</title>
-<meta name="description" content="Say “echo echo” and talk. Echo farms real work out to background agents — writing docs with you, building grocery lists, tutoring you — and weaves results back into the conversation.">
-<meta property="og:title" content="Echo — the always-on voice agent for your Mac">
-<meta property="og:description" content="Say “echo echo” and talk. Background agents do real work while you speak.">
+<title>echoecho — the always-on voice agent for your Mac</title>
+<meta name="description" content="Say “echoecho” and talk. echoecho farms real work out to background agents — writing docs with you, building grocery lists, tutoring you — and weaves results back into the conversation.">
+<meta property="og:title" content="echoecho — the always-on voice agent for your Mac">
+<meta property="og:description" content="Say “echoecho” and talk. Background agents do real work while you speak.">
 <meta property="og:type" content="website">
 <style>
   :root{
@@ -64,7 +64,7 @@
   .demo{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
     padding:26px 28px;font-family:var(--mono);font-size:14px;line-height:2}
   .demo .you{color:var(--text)} .demo .you::before{content:"you  ";color:var(--dim)}
-  .demo .echo{color:var(--accent2)} .demo .echo::before{content:"echo ";color:var(--dim)}
+  .demo .echoecho{color:var(--accent2)} .demo .echoecho::before{content:"echoecho ";color:var(--dim)}
   .demo .sys{color:var(--dim);font-style:italic}
 
   pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);
@@ -90,24 +90,24 @@
 
 <header>
   <div class="wrap">
-    <div class="brand"><span class="dot"></span>Echo</div>
+    <div class="brand"><span class="dot"></span>echoecho</div>
     <nav>
       <a href="#how">How it works</a>
       <a href="#install">Install</a>
-      <a href="https://github.com/bypaperstar/home-voice">GitHub</a>
+      <a href="https://github.com/bypaperstar/echoecho">GitHub</a>
     </nav>
   </div>
 </header>
 
 <div class="hero">
   <div class="wrap">
-    <h1>Say <span class="say">“echo&nbsp;echo.”</span><br>Then just talk.</h1>
-    <p class="lede">Echo is an always-on voice agent for your Mac. It listens for its wake word, holds a natural back-and-forth conversation, and farms real work out to background agents — weaving the results back in while you speak.</p>
+    <h1>Say <span class="say">“echoecho.”</span><br>Then just talk.</h1>
+    <p class="lede">echoecho is an always-on voice agent for your Mac. It listens for its wake word, holds a natural back-and-forth conversation, and farms real work out to background agents — weaving the results back in while you speak.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/bypaperstar/home-voice/archive/refs/tags/v0.1.0.zip">Download v0.1.0 (.zip)</a>
-      <a class="btn ghost" href="https://github.com/bypaperstar/home-voice">View source on GitHub</a>
+      <a class="btn primary" href="https://github.com/bypaperstar/echoecho/archive/refs/tags/v0.1.0.zip">Download v0.1.0 (.zip)</a>
+      <a class="btn ghost" href="https://github.com/bypaperstar/echoecho">View source on GitHub</a>
     </div>
-    <p class="cta-sub">or <code>git clone https://github.com/bypaperstar/home-voice.git</code> · free &amp; open source · macOS</p>
+    <p class="cta-sub">or <code>git clone https://github.com/bypaperstar/echoecho.git</code> · free &amp; open source · macOS</p>
   </div>
 </div>
 
@@ -116,12 +116,12 @@
     <h2>What a session feels like</h2>
     <p class="sub">Wake it, talk like you would to a person, say “that’s it” when you’re done. Meanwhile, workers write documents live into a browser workspace you can watch update in real time.</p>
     <div class="demo">
-      <div class="you">echo echo … help me plan dinners this week, I’m thinking pad thai one night.</div>
+      <div class="you">echoecho … help me plan dinners this week, I’m thinking pad thai one night.</div>
       <div class="sys">→ recipe.search dispatched · grocery.md created in the live workspace</div>
-      <div class="echo">Found three solid pad thai recipes — I started a grocery list with the one that skips tamarind paste. What else are we cooking?</div>
+      <div class="echoecho">Found three solid pad thai recipes — I started a grocery list with the one that skips tamarind paste. What else are we cooking?</div>
       <div class="you">something with halloumi. and drop the fish sauce, we’re out.</div>
       <div class="sys">→ grocery.merge updates the list while the conversation continues</div>
-      <div class="echo">Done — fish sauce is out, halloumi traybake is in for Thursday. The list is on your screen.</div>
+      <div class="echoecho">Done — fish sauce is out, halloumi traybake is in for Thursday. The list is on your screen.</div>
       <div class="you">that’s it.</div>
     </div>
   </div>
@@ -134,7 +134,7 @@
     <div class="grid">
       <div class="card">
         <h3><span class="n">01</span> Wake word</h3>
-        <p>Vosk keyword spotting for “echo echo” — fully offline, open source, no accounts, no training. Sessions only exist between the wake word and “that’s it.”</p>
+        <p>Vosk keyword spotting for “echoecho” — fully offline, open source, no accounts, no training. Sessions only exist between the wake word and “that’s it.”</p>
       </div>
       <div class="card">
         <h3><span class="n">02</span> Voice loop</h3>
@@ -169,12 +169,12 @@ bash scripts/fetch_models.sh
 <span class="c"># your OpenAI API key (gitignored, loaded at startup)</span>
 echo 'OPENAI_API_KEY=sk-...' &gt; .env.local
 
-python3 echo.py --mic-check   <span class="c"># RMS meter should move when you speak</span>
-python3 echo.py --voice       <span class="c"># put your headphones on first</span></pre>
-    <p style="color:var(--muted);font-size:14.5px">Then open <span style="font-family:var(--mono)">http://127.0.0.1:8765/</span> for the live workspace, say <b style="color:var(--text)">“echo echo”</b>, and talk. Full runbook, troubleshooting table, and AirPods notes are in the <a href="https://github.com/bypaperstar/home-voice#readme">README</a>.</p>
+python3 echoecho.py --mic-check   <span class="c"># RMS meter should move when you speak</span>
+python3 echoecho.py --voice       <span class="c"># put your headphones on first</span></pre>
+    <p style="color:var(--muted);font-size:14.5px">Then open <span style="font-family:var(--mono)">http://127.0.0.1:8765/</span> for the live workspace, say <b style="color:var(--text)">“echoecho”</b>, and talk. Full runbook, troubleshooting table, and AirPods notes are in the <a href="https://github.com/bypaperstar/echoecho#readme">README</a>.</p>
     <div class="note">
       <div>🎧</div>
-      <div><b>Headphones required.</b> There’s no echo cancellation over the raw WebSocket — on speakers, Echo hears itself and barge-in goes haywire. AirPods or any headphones work.</div>
+      <div><b>Headphones required.</b> There’s no echo cancellation over the raw WebSocket — on speakers, echoecho hears itself and barge-in goes haywire. AirPods or any headphones work.</div>
     </div>
   </div>
 </section>
@@ -182,7 +182,7 @@ python3 echo.py --voice       <span class="c"># put your headphones on first</sp
 <section>
   <div class="wrap">
     <h2>Built for tinkering</h2>
-    <p class="sub">Echo is a prototype you can read in an afternoon and bend to your own use cases.</p>
+    <p class="sub">echoecho is a prototype you can read in an afternoon and bend to your own use cases.</p>
     <div class="grid">
       <div class="card">
         <h3>Runs headless, keyless</h3>
@@ -190,7 +190,7 @@ python3 echo.py --voice       <span class="c"># put your headphones on first</sp
       </div>
       <div class="card">
         <h3>Records every session</h3>
-        <p>Each voice session saves a stereo review mix (you left, Echo right), transcripts, and an event timeline — so you can hear exactly what happened and turn gaps into fixes.</p>
+        <p>Each voice session saves a stereo review mix (you left, echoecho right), transcripts, and an event timeline — so you can hear exactly what happened and turn gaps into fixes.</p>
       </div>
       <div class="card">
         <h3>Add your own workers</h3>
@@ -202,8 +202,8 @@ python3 echo.py --voice       <span class="c"># put your headphones on first</sp
 
 <footer>
   <div class="wrap">
-    <div>Echo · an open-source prototype by <a href="https://github.com/bypaperstar">paper star</a></div>
-    <div><a href="https://github.com/bypaperstar/home-voice">Source</a> · <a href="https://github.com/bypaperstar/home-voice/releases">Releases</a> · <a href="https://github.com/bypaperstar/home-voice/issues">Issues</a></div>
+    <div>echoecho · an open-source prototype by <a href="https://github.com/bypaperstar">paper star</a></div>
+    <div><a href="https://github.com/bypaperstar/echoecho">Source</a> · <a href="https://github.com/bypaperstar/echoecho/releases">Releases</a> · <a href="https://github.com/bypaperstar/echoecho/issues">Issues</a></div>
   </div>
 </footer>
 

@@ -7,15 +7,15 @@ import asyncio
 import json
 from pathlib import Path
 
-from echo_app import config
-from echo_app.bus import Task, TaskRequest
-from echo_app.orchestrator.core import Orchestrator, WorkerContext
-from echo_app.services import artifacts
-from echo_app.services.vm import LumeVM
-from echo_app.workers import base
-from echo_app.workers.agent_run import _user_docs_convention
-from echo_app.workers.base import load_all
-from echo_app.workers.outbox import run_apply
+from echoecho_app import config
+from echoecho_app.bus import Task, TaskRequest
+from echoecho_app.orchestrator.core import Orchestrator, WorkerContext
+from echoecho_app.services import artifacts
+from echoecho_app.services.vm import LumeVM
+from echoecho_app.workers import base
+from echoecho_app.workers.agent_run import _user_docs_convention
+from echoecho_app.workers.base import load_all
+from echoecho_app.workers.outbox import run_apply
 
 
 def run_task(kind, tmp_path, args=None, workspace=None):
@@ -48,9 +48,9 @@ def stage(ws, task_id, entries, files, changes="# Changes\n"):
 def test_user_docs_parses_and_expands(monkeypatch, tmp_path):
     d1, d2 = tmp_path / "Documents", tmp_path / "Desktop"
     d1.mkdir(); d2.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", "%s%s%s" % (d1, __import__("os").pathsep, d2))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", "%s%s%s" % (d1, __import__("os").pathsep, d2))
     assert config.user_docs() == [d1, d2]
-    monkeypatch.delenv("ECHO_USER_DOCS")
+    monkeypatch.delenv("ECHOECHO_USER_DOCS")
     assert config.user_docs() == []
 
 
@@ -60,7 +60,7 @@ def test_apply_writes_over_original_with_backup(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     original = docs / "lease.md"
     original.write_text("# Lease\n\nold section 3\n")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
 
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1",
@@ -83,7 +83,7 @@ def test_apply_refuses_target_outside_shared_folders(tmp_path, monkeypatch):
     """The agent's manifest is NOT trusted: a target outside every shared
     folder is refused, and the file it points at is never written."""
     docs = tmp_path / "Documents"; docs.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     victim = tmp_path / "secret.txt"
     victim.write_text("untouched")
 
@@ -102,7 +102,7 @@ def test_apply_refuses_symlink_escape_from_shared_folder(tmp_path, monkeypatch):
     """A symlink inside a shared folder pointing outside must not become a
     write primitive (realpath containment)."""
     docs = tmp_path / "Documents"; docs.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     outside = tmp_path / "outside.txt"; outside.write_text("safe")
     (docs / "link.txt").symlink_to(outside)
 
@@ -117,7 +117,7 @@ def test_apply_refuses_symlink_escape_from_shared_folder(tmp_path, monkeypatch):
 def test_apply_mixed_batch_applies_valid_skips_invalid(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     good = docs / "notes.md"; good.write_text("v1")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1",
           [{"staged": "notes.md", "target": str(good)},
@@ -132,7 +132,7 @@ def test_apply_mixed_batch_applies_valid_skips_invalid(tmp_path, monkeypatch):
 
 def test_apply_new_file_needs_no_backup(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     target = docs / "fresh.md"  # does not exist yet
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1", [{"staged": "fresh.md", "target": str(target)}],
@@ -143,7 +143,7 @@ def test_apply_new_file_needs_no_backup(tmp_path, monkeypatch):
 
 
 def test_apply_without_user_docs_is_a_safe_noop(tmp_path, monkeypatch):
-    monkeypatch.delenv("ECHO_USER_DOCS", raising=False)
+    monkeypatch.delenv("ECHOECHO_USER_DOCS", raising=False)
     task = run_task("outbox.apply", tmp_path)
     assert task.result.data["error"] == "no user docs configured"
     assert "nothing" in task.result.say.lower()
@@ -152,7 +152,7 @@ def test_apply_without_user_docs_is_a_safe_noop(tmp_path, monkeypatch):
 def test_apply_picks_latest_batch_by_default(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     a = docs / "a.md"; a.write_text("old")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1", [{"staged": "a.md", "target": str(a)}], {"a.md": "from t1"})
     import time
@@ -165,7 +165,7 @@ def test_apply_picks_latest_batch_by_default(tmp_path, monkeypatch):
 def test_apply_bad_manifest_touches_nothing(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     keep = docs / "keep.md"; keep.write_text("safe")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     box = "%s/t1" % config.OUTBOX_DIR
     artifacts.write_atomic(ws, "%s/MANIFEST.json" % box, "{ not json")
@@ -183,7 +183,7 @@ def test_apply_is_all_or_report_never_half_crashes(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     good = docs / "good.md"; good.write_text("v1")
     (docs / "adir").mkdir()  # a directory target — copy2 would raise
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1",
           [{"staged": "bad", "target": str(docs / "adir")},
@@ -202,14 +202,14 @@ def test_apply_write_failure_is_reported_not_fatal(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     ok = docs / "ok.md"; ok.write_text("v1")
     boom = docs / "boom.md"; boom.write_text("orig")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1",
           [{"staged": "boom.md", "target": str(boom)},
            {"staged": "ok.md", "target": str(ok)}],
           {"boom.md": "new", "ok.md": "v2"})
 
-    import echo_app.workers.outbox as outbox_mod
+    import echoecho_app.workers.outbox as outbox_mod
     real_write = outbox_mod._write_over
 
     def flaky(target, staged_path):
@@ -230,7 +230,7 @@ def test_duplicate_target_preserves_true_original_backup(tmp_path, monkeypatch):
     the real original (dedup + non-clobbering backup)."""
     docs = tmp_path / "Documents"; docs.mkdir()
     lease = docs / "lease.md"; lease.write_text("TRUE ORIGINAL")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1",
           [{"staged": "a", "target": str(lease)},
@@ -249,7 +249,7 @@ def test_duplicate_target_preserves_true_original_backup(tmp_path, monkeypatch):
 def test_backup_never_clobbers_across_two_applies(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
     f = docs / "f.md"; f.write_text("orig")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     stage(ws, "t1", [{"staged": "f.md", "target": str(f)}], {"f.md": "v2"})
     # apply twice in the same second-granularity stamp window
@@ -264,7 +264,7 @@ def test_backup_never_clobbers_across_two_applies(tmp_path, monkeypatch):
 
 def test_malformed_only_manifest_is_honest(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     box = "%s/t1" % config.OUTBOX_DIR
     artifacts.write_atomic(ws, "%s/MANIFEST.json" % box,
@@ -278,13 +278,13 @@ def test_malformed_only_manifest_is_honest(tmp_path, monkeypatch):
 
 def test_user_docs_path_with_spaces_survives(monkeypatch, tmp_path):
     d = tmp_path / "My Documents"; d.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(d))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(d))
     assert config.user_docs() == [d]  # not shattered on the space
 
 
 def test_pick_task_dir_rejects_dotted_arg(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     (ws / config.OUTBOX_DIR).mkdir()
     task = run_task("outbox.apply", tmp_path, args={"task_id": ".."},
@@ -299,10 +299,10 @@ def test_agent_run_stages_changes_gets_apply_it_completion(tmp_path,
     """When an agent run leaves an outbox MANIFEST, the completion say names
     the file and tells the user to say 'apply it' — deterministically, not
     left to the agent's free text."""
-    from echo_app.services.agent_cli import FakeAgentCLI
+    from echoecho_app.services.agent_cli import FakeAgentCLI
     docs = tmp_path / "Documents"; docs.mkdir()
     (docs / "lease.md").write_text("orig")
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
     ws = tmp_path / "ws"; ws.mkdir()
     manifest = json.dumps([{"staged": "lease.md", "target": str(docs / "lease.md"),
                             "summary": "rewrote section 3"}])
@@ -336,20 +336,20 @@ def test_agent_run_stages_changes_gets_apply_it_completion(tmp_path,
 
 def test_outbox_apply_advertised_only_with_user_docs(tmp_path, monkeypatch):
     load_all()
-    monkeypatch.delenv("ECHO_USER_DOCS", raising=False)
-    monkeypatch.delenv("ECHO_PLUGINS", raising=False)
+    monkeypatch.delenv("ECHOECHO_USER_DOCS", raising=False)
+    monkeypatch.delenv("ECHOECHO_PLUGINS", raising=False)
     assert "outbox.apply" not in base.kinds_enum()  # hidden by default
     assert "outbox.apply" in base.REGISTRY          # but still dispatchable
-    monkeypatch.setenv("ECHO_USER_DOCS", str(tmp_path))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(tmp_path))
     assert "outbox.apply" in base.kinds_enum()      # appears once configured
     assert "apply it" in base.REGISTRY["outbox.apply"].description
 
 
 def test_approval_guidance_only_when_docs_configured(tmp_path, monkeypatch):
     load_all()
-    monkeypatch.delenv("ECHO_USER_DOCS", raising=False)
+    monkeypatch.delenv("ECHOECHO_USER_DOCS", raising=False)
     assert "apply it" not in config.system_prompt()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(tmp_path))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(tmp_path))
     p = config.system_prompt()
     assert "apply it" in p and "outbox.apply" in p
 
@@ -357,9 +357,9 @@ def test_approval_guidance_only_when_docs_configured(tmp_path, monkeypatch):
 def test_agent_prompt_teaches_outbox_convention_only_with_docs(tmp_path,
                                                                monkeypatch):
     task = Task(id="t7", request=TaskRequest(kind="agent.run"))
-    monkeypatch.delenv("ECHO_USER_DOCS", raising=False)
+    monkeypatch.delenv("ECHOECHO_USER_DOCS", raising=False)
     assert _user_docs_convention(task) == ""
-    monkeypatch.setenv("ECHO_USER_DOCS", str(tmp_path))
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(tmp_path))
     conv = _user_docs_convention(task)
     assert "READ-ONLY" in conv and "MANIFEST.json" in conv
     assert "outbox/t7" in conv  # keyed to this task's outbox dir
@@ -369,8 +369,8 @@ def test_agent_prompt_teaches_outbox_convention_only_with_docs(tmp_path,
 
 def test_vm_boot_argv_mounts_user_docs_read_only(tmp_path, monkeypatch):
     docs = tmp_path / "Documents"; docs.mkdir()
-    monkeypatch.setenv("ECHO_USER_DOCS", str(docs))
-    vm = LumeVM(vm_name="echo-vm", workspace=tmp_path / "ws")
+    monkeypatch.setenv("ECHOECHO_USER_DOCS", str(docs))
+    vm = LumeVM(vm_name="echoecho-vm", workspace=tmp_path / "ws")
     argv = vm._boot_argv("lume")
     assert "%s:rw" % (tmp_path / "ws") in argv       # workspace read-write
     assert "%s:ro" % docs in argv                    # user docs read-only

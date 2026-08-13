@@ -13,10 +13,10 @@ from array import array
 
 import pytest
 
-import echo
-from echo_app import config, events, recorder
-from echo_app.conversation.audio import AudioIO
-from echo_app.conversation.realtime import PlaybackTracker
+import echoecho
+from echoecho_app import config, events, recorder
+from echoecho_app.conversation.audio import AudioIO
+from echoecho_app.conversation.realtime import PlaybackTracker
 
 
 @pytest.fixture
@@ -24,8 +24,8 @@ def rec_env(tmp_path, monkeypatch):
     """Isolated workspace + recordings root; never leaks an active recorder."""
     monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path / "ws")
     monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path / "rec")
-    monkeypatch.delenv("ECHO_RECORDINGS_DIR", raising=False)
-    monkeypatch.delenv("ECHO_RECORD", raising=False)
+    monkeypatch.delenv("ECHOECHO_RECORDINGS_DIR", raising=False)
+    monkeypatch.delenv("ECHOECHO_RECORD", raising=False)
     yield tmp_path / "rec"
     recorder.stop()
 
@@ -44,24 +44,24 @@ def session_dirs(root):
 # -- config --------------------------------------------------------------------
 
 
-def test_echo_record_defaults_to_voice_only(monkeypatch):
-    monkeypatch.delenv("ECHO_RECORD", raising=False)
-    assert config.echo_record("voice") is True
-    assert config.echo_record("text") is False
-    assert config.echo_record("script") is False
-    monkeypatch.setenv("ECHO_RECORD", "0")
-    assert config.echo_record("voice") is False
-    monkeypatch.setenv("ECHO_RECORD", "false")
-    assert config.echo_record("voice") is False
-    monkeypatch.setenv("ECHO_RECORD", "1")
-    assert config.echo_record("text") is True
-    assert config.echo_record("script") is True
+def test_echoecho_record_defaults_to_voice_only(monkeypatch):
+    monkeypatch.delenv("ECHOECHO_RECORD", raising=False)
+    assert config.echoecho_record("voice") is True
+    assert config.echoecho_record("text") is False
+    assert config.echoecho_record("script") is False
+    monkeypatch.setenv("ECHOECHO_RECORD", "0")
+    assert config.echoecho_record("voice") is False
+    monkeypatch.setenv("ECHOECHO_RECORD", "false")
+    assert config.echoecho_record("voice") is False
+    monkeypatch.setenv("ECHOECHO_RECORD", "1")
+    assert config.echoecho_record("text") is True
+    assert config.echoecho_record("script") is True
 
 
 def test_recordings_dir_env_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("ECHO_RECORDINGS_DIR", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("ECHOECHO_RECORDINGS_DIR", str(tmp_path / "elsewhere"))
     assert config.recordings_dir() == tmp_path / "elsewhere"
-    monkeypatch.delenv("ECHO_RECORDINGS_DIR")
+    monkeypatch.delenv("ECHOECHO_RECORDINGS_DIR")
     assert config.recordings_dir() == config.RECORDINGS_DIR
 
 
@@ -100,7 +100,7 @@ def test_stop_writes_transcript_and_meta(rec_env):
     recorder.stop()  # no explicit reason: falls back to the state event's
     transcript = (rec.dir / "transcript.md").read_text()
     assert "you:** add milk" in transcript
-    assert "echo:** On it." in transcript
+    assert "echoecho:** On it." in transcript
     assert "⚙ dispatch_task" in transcript and "grocery.merge" in transcript
     assert "🎧 mic: MacBook Pro Microphone" in transcript
     meta = json.loads((rec.dir / "meta.json").read_text())
@@ -128,7 +128,7 @@ def test_render_transcript_offsets_and_lines():
     text = recorder.render_transcript(evs, started=1000.0)
     assert "[00:00] ⏰ wake (voice)" in text
     assert "**[00:02] you:** hi" in text
-    assert "**[01:05] echo:** hello" in text
+    assert "**[01:05] echoecho:** hello" in text
     assert "[1:01:01] ↪ injected (ambient): [task t1 done] ok" in text
     # unknown event types are never dropped from the review sheet
     assert "totally_new_event" in text and '"detail": 7' in text
@@ -140,21 +140,21 @@ def test_render_transcript_offsets_and_lines():
 def test_wavs_written_and_mixed_stereo(rec_env):
     rec = recorder.start("voice")
     rec.write_mic(b"\x01\x00" * 2400)   # 0.1 s of sample value 1
-    rec.write_echo(b"\x02\x00" * 4800)  # 0.2 s of sample value 2
+    rec.write_echoecho(b"\x02\x00" * 4800)  # 0.2 s of sample value 2
     recorder.stop()
     w, mic = read_wav(rec.dir / "mic.wav")
     assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1, 2, 24000)
     assert len(mic) == 2400 and mic[0] == 1
-    w, echo_track = read_wav(rec.dir / "echo.wav")
+    w, echo_track = read_wav(rec.dir / "echoecho.wav")
     assert len(echo_track) == 4800 and echo_track[0] == 2
     w, mix = read_wav(rec.dir / "session.wav")
     assert w.getnchannels() == 2
     assert len(mix) == 2 * 4800  # padded to the longer track
-    assert mix[0] == 1 and mix[1] == 2          # frame 0: L=mic, R=echo
+    assert mix[0] == 1 and mix[1] == 2          # frame 0: L=mic, R=echoecho
     assert mix[2 * 2400] == 0                   # past mic EOF: left is silence
-    assert mix[2 * 2400 + 1] == 2               # ...echo continues on the right
+    assert mix[2 * 2400 + 1] == 2               # ...echoecho continues on the right
     meta = json.loads((rec.dir / "meta.json").read_text())
-    assert meta["mic_s"] == 0.1 and meta["echo_s"] == 0.2
+    assert meta["mic_s"] == 0.1 and meta["echoecho_s"] == 0.2
 
 
 def test_events_only_session_has_no_wavs(rec_env):
@@ -191,7 +191,7 @@ def test_out_callback_records_exactly_what_played(rec_env):
     # 200 bytes played = 100 samples at 24 kHz ≈ 4.17 ms
     assert audio.tracker._played_ms == pytest.approx(200 / (24000 * 2.0) * 1000.0)
     recorder.stop()
-    _, echo_track = read_wav(rec.dir / "echo.wav")
+    _, echo_track = read_wav(rec.dir / "echoecho.wav")
     assert len(echo_track) == 2400  # zero-fill recorded: timeline == wall clock
     assert echo_track[0] == 5 and echo_track[100] == 0
 
@@ -267,22 +267,22 @@ def test_stop_swallows_close_failures(rec_env, monkeypatch, capsys):
 
 def test_echo_delay_pads_the_echo_track(rec_env):
     rec = recorder.start("voice")
-    rec.set_echo_delay(0.1)  # 100 ms in+out device latency
-    rec.write_echo(b"\x02\x00" * 240)
+    rec.set_echoecho_delay(0.1)  # 100 ms in+out device latency
+    rec.write_echoecho(b"\x02\x00" * 240)
     rec.write_mic(b"\x01\x00" * 240)
     recorder.stop()
-    _, echo_track = read_wav(rec.dir / "echo.wav")
+    _, echo_track = read_wav(rec.dir / "echoecho.wav")
     assert len(echo_track) == 2400 + 240  # latency shim + real audio
     assert set(echo_track[:2400]) == {0} and echo_track[2400] == 2
     _, mic = read_wav(rec.dir / "mic.wav")
     assert len(mic) == 240  # mic track unshifted
     meta = json.loads((rec.dir / "meta.json").read_text())
-    assert meta["echo_delay_s"] == 0.1
+    assert meta["echoecho_delay_s"] == 0.1
     rec2 = recorder.SessionRecorder("voice", root=rec_env)
-    rec2.set_echo_delay("not a number")  # never raises, never shifts
-    assert rec2._echo_pad_frames == 0 and rec2.errors == 1
-    rec2.set_echo_delay(99)  # absurd latency: capped at 2 s
-    assert rec2._echo_pad_frames == 2 * 24000
+    rec2.set_echoecho_delay("not a number")  # never raises, never shifts
+    assert rec2._echoecho_pad_frames == 0 and rec2.errors == 1
+    rec2.set_echoecho_delay(99)  # absurd latency: capped at 2 s
+    assert rec2._echoecho_pad_frames == 2 * 24000
     rec2.close()
 
 
@@ -301,7 +301,7 @@ def test_clean_session_meta_has_no_alarm_fields(rec_env):
     rec = recorder.start("voice")
     recorder.stop(end_reason="end_phrase")
     meta = json.loads((rec.dir / "meta.json").read_text())
-    for key in ("stream_status", "writer_stalled", "echo_delay_s"):
+    for key in ("stream_status", "writer_stalled", "echoecho_delay_s"):
         assert key not in meta
 
 
@@ -330,14 +330,14 @@ def test_stop_is_idempotent_and_start_replaces_stale(rec_env):
 def scripted_args(tmp_path, lines):
     script = tmp_path / "script.txt"
     script.write_text("\n".join(lines) + "\n")
-    return echo.parse_args(["--script", str(script)])
+    return echoecho.parse_args(["--script", str(script)])
 
 
 def test_scripted_run_records_when_opted_in(rec_env, tmp_path, monkeypatch):
-    monkeypatch.setenv("ECHO_RECORD", "1")
-    monkeypatch.setenv("ECHO_FAKE_LLM", "1")
-    args = scripted_args(tmp_path, ["echo echo", "hello there", "that's it"])
-    asyncio.run(echo.amain(args))
+    monkeypatch.setenv("ECHOECHO_RECORD", "1")
+    monkeypatch.setenv("ECHOECHO_FAKE_LLM", "1")
+    args = scripted_args(tmp_path, ["echoecho", "hello there", "that's it"])
+    asyncio.run(echoecho.amain(args))
     dirs = session_dirs(rec_env)
     assert len(dirs) == 1 and dirs[0].name.endswith("_script")
     meta = json.loads((dirs[0] / "meta.json").read_text())
@@ -349,24 +349,24 @@ def test_scripted_run_records_when_opted_in(rec_env, tmp_path, monkeypatch):
 
 
 def test_scripted_run_does_not_record_by_default(rec_env, tmp_path, monkeypatch):
-    monkeypatch.setenv("ECHO_FAKE_LLM", "1")
-    args = scripted_args(tmp_path, ["echo echo", "hi", "that's it"])
-    asyncio.run(echo.amain(args))
+    monkeypatch.setenv("ECHOECHO_FAKE_LLM", "1")
+    args = scripted_args(tmp_path, ["echoecho", "hi", "that's it"])
+    asyncio.run(echoecho.amain(args))
     assert session_dirs(rec_env) == []
 
 
 def test_amain_setup_failure_leaves_no_recording(rec_env, tmp_path, monkeypatch):
     """A crash during setup (before the try/finally) must not strand a
     forever-'(incomplete)' recording dir."""
-    import echo_app.workers.base as workers_base
-    monkeypatch.setenv("ECHO_RECORD", "1")
+    import echoecho_app.workers.base as workers_base
+    monkeypatch.setenv("ECHOECHO_RECORD", "1")
 
     def boom():
         raise RuntimeError("registry exploded")
     monkeypatch.setattr(workers_base, "load_all", boom)
-    args = scripted_args(tmp_path, ["echo echo", "hi", "that's it"])
+    args = scripted_args(tmp_path, ["echoecho", "hi", "that's it"])
     with pytest.raises(RuntimeError):
-        asyncio.run(echo.amain(args))
+        asyncio.run(echoecho.amain(args))
     assert session_dirs(rec_env) == []
     assert recorder.active() is None
 
@@ -375,7 +375,7 @@ def test_amain_setup_failure_leaves_no_recording(rec_env, tmp_path, monkeypatch)
 
 
 def test_list_recordings_empty_and_table(rec_env, capsys):
-    echo.list_recordings()
+    echoecho.list_recordings()
     assert "no recordings yet" in capsys.readouterr().out
     rec = recorder.start("voice")
     events.emit("user_text", text="hi")
@@ -383,7 +383,7 @@ def test_list_recordings_empty_and_table(rec_env, capsys):
     rec.write_mic(b"\x00\x00" * 24000)  # 1 s
     recorder.stop(end_reason="end_phrase")
     (rec_env / "2026-01-01_000000_voice").mkdir()  # crashed session: no meta
-    echo.list_recordings()
+    echoecho.list_recordings()
     out = capsys.readouterr().out
     assert rec.dir.name in out
     assert "0:01" in out and "1/1" in out and "end_phrase" in out
@@ -395,7 +395,7 @@ def test_no_record_flag_maps_to_env(rec_env, monkeypatch, capsys):
     # keep the repo's real .env.local out of os.environ (hidden test-order
     # dependency on the Mac, where it holds OPENAI_API_KEY etc.)
     monkeypatch.setattr(config, "load_env_local", lambda path=None: None)
-    monkeypatch.setenv("ECHO_RECORD", "sentinel")  # restored by monkeypatch
-    echo.main(["--no-record", "--recordings"])     # exits after the listing
-    assert os.environ["ECHO_RECORD"] == "0"
+    monkeypatch.setenv("ECHOECHO_RECORD", "sentinel")  # restored by monkeypatch
+    echoecho.main(["--no-record", "--recordings"])     # exits after the listing
+    assert os.environ["ECHOECHO_RECORD"] == "0"
     assert "no recordings yet" in capsys.readouterr().out

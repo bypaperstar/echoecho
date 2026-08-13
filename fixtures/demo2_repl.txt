@@ -1,8 +1,8 @@
-# Demo 2 transcript for the text REPL (pipe me in under ECHO_FAKE_LLM=1):
-#   ECHO_FAKE_LLM=1 python3 echo.py --text < fixtures/demo2_repl.txt
+# Demo 2 transcript for the text REPL (pipe me in under ECHOECHO_FAKE_LLM=1):
+#   ECHOECHO_FAKE_LLM=1 python3 echoecho.py --text < fixtures/demo2_repl.txt
 # recipe.search hits the live WP whitelist, chains grocery.merge, and the
 # ~wait gives the workers real seconds to land before the injections print.
-echo echo
+echoecho
 help me plan dinners this week — I'm thinking pad thai one night
 ~wait 12
 read me the grocery list

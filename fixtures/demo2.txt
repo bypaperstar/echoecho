@@ -1,7 +1,7 @@
 # Demo 2 — grocery list + recipe search (scripted headless run; the
 # recipe.search worker hits the LIVE keyless WP whitelist, then chains
 # grocery.merge via generic follow_ups).
-echo echo
+echoecho
 help me plan dinners this week — I'm thinking pad thai one night
 !dispatch_task {"kind": "recipe.search", "instructions": "pad thai"}
 ~wait 25

@@ -1,10 +1,10 @@
-// Echo Orb scene — genie reveal/dismiss, items emerging out of the blob
-// (doc cards, transcript wisps, Echo's Mac), expansion to ~92% of the scene,
+// echoecho Orb scene — genie reveal/dismiss, items emerging out of the blob
+// (doc cards, transcript wisps, echoecho's Mac), expansion to ~92% of the scene,
 // and the live viewer wiring. Lifecycle contract with main.js:
 //   orb:reveal -> ease reveal to 1; orb:dismiss -> ease to 0 then orb.hidden();
 //   blur dismisses only when nothing is expanded and the VNC is disconnected.
-// Demo mode (?demo=1, passed by main from ECHO_ORB_DEMO=1) runs a scripted,
-// deterministic timeline with no server: wisps, a fake doc, Echo's Mac
+// Demo mode (?demo=1, passed by main from ECHOECHO_ORB_DEMO=1) runs a scripted,
+// deterministic timeline with no server: wisps, a fake doc, echoecho's Mac
 // (asleep), expand/restore, absorb.
 'use strict';
 
@@ -12,7 +12,7 @@
 
 const qs = new URLSearchParams(location.search);
 const DEMO = qs.get('demo') === '1';
-const blob = window.echoBlob;
+const blob = window.echoechoBlob;
 const itemsEl = document.getElementById('items');
 const canvas = document.getElementById('blob');
 
@@ -175,7 +175,7 @@ function spawnDoc(title, body, opts = {}) {
   return emergeItem(el, 'doc', 250, 170, opts);
 }
 
-// -------------------------------------------------------------- Echo's Mac
+// -------------------------------------------------------------- echoecho's Mac
 const MAC_TITLE_H = 22, MAC_PAD = 9;
 function macSize(w) {
   const sw = w - MAC_PAD * 2;
@@ -188,7 +188,7 @@ function spawnMac(opts = {}) {
   const head = document.createElement('div');
   head.className = 'mac-title';
   const label = document.createElement('span');
-  label.textContent = "Echo's Mac";
+  label.textContent = "echoecho's Mac";
   const btn = document.createElement('button');
   btn.className = 'mac-viewonly';
   btn.textContent = 'view-only: off';
@@ -206,7 +206,7 @@ function spawnMac(opts = {}) {
   el.append(head, screen);
   const size = macSize(380);
   macItem = emergeItem(el, 'mac', size.w, size.h, opts);
-  // echoVnc renders its own status ("Echo's Mac is asleep") into the screen
+  // echoVnc renders its own status ("echoecho's Mac is asleep") into the screen
   window.echoVnc.open(screen, {}).catch(() => {});
   return macItem;
 }
@@ -368,7 +368,7 @@ addEventListener('keydown', (e) => {
   else window.orb.dismissRequest();
 });
 
-// clicking the companion blob restores; double-click summons Echo's Mac
+// clicking the companion blob restores; double-click summons echoecho's Mac
 canvas.addEventListener('click', (e) => {
   if (!expanded) return;
   if (Math.hypot(e.clientX - pose.x, e.clientY - pose.y) < pose.r * 1.8) restore();
@@ -410,7 +410,7 @@ function startDemo() {
   demoT0 = now();
   if (window.orb.demoStarted) window.orb.demoStarted();
   demoScript = [
-    [2.6, () => wisp('user', 'echo echo — anything new on the housing search?')],
+    [2.6, () => wisp('user', 'echoecho — anything new on the housing search?')],
     [3.5, () => wisp('assistant', 'Two new listings this morning. I wrote up notes.')],
     [4.4, () => blob.setActivity(0.7)],
     [5.0, () => { demoDoc = spawnDoc(DEMO_DOC_TITLE, DEMO_DOC_BODY, { holdNeck: true }); }],

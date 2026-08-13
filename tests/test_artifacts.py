@@ -3,7 +3,7 @@ workspace consumer shares), subdirectories, any file type, binary atomic
 writes, recursive listing."""
 import pytest
 
-from echo_app.services import artifacts
+from echoecho_app.services import artifacts
 
 
 # -- resolve: the safety guard -------------------------------------------------

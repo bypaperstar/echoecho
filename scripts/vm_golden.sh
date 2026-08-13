@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Build Echo's golden macOS VM (sandbox tier 2, PLAN-GENERIC.md). Run ON THE
+# Build echoecho's golden macOS VM (sandbox tier 2, PLAN-GENERIC.md). Run ON THE
 # MAC, once; idempotent, safe to re-run after a partial failure.
 #
-#   golden image = base macOS + Echo's SSH key + AcceptEnv for model keys
+#   golden image = base macOS + echoecho's SSH key + AcceptEnv for model keys
 #                  (+ node & the claude CLI inside the guest with AGENT=1)
-#   scratch VMs are APFS-cloned from it at task time (echo_app/services/vm.py)
+#   scratch VMs are APFS-cloned from it at task time (echoecho_app/services/vm.py)
 #
-# Knobs: ECHO_VM_GOLDEN, ECHO_VM_IMAGE, ECHO_VM_SSH_KEY, ECHO_VM_USER,
-# ECHO_VM_PASSWORD (vanilla images ship lume/lume), AGENT=1.
+# Knobs: ECHOECHO_VM_GOLDEN, ECHOECHO_VM_IMAGE, ECHOECHO_VM_SSH_KEY, ECHOECHO_VM_USER,
+# ECHOECHO_VM_PASSWORD (vanilla images ship lume/lume), AGENT=1.
 set -euo pipefail
 
-GOLDEN=${ECHO_VM_GOLDEN:-echo-golden}
-IMAGE=${ECHO_VM_IMAGE:-macos-sequoia-vanilla:latest}
-KEY=${ECHO_VM_SSH_KEY:-$HOME/.ssh/echo_vm_ed25519}
+GOLDEN=${ECHOECHO_VM_GOLDEN:-echoecho-golden}
+IMAGE=${ECHOECHO_VM_IMAGE:-macos-sequoia-vanilla:latest}
+KEY=${ECHOECHO_VM_SSH_KEY:-$HOME/.ssh/echoecho_vm_ed25519}
 KEY="${KEY/#\~/$HOME}"
-GUEST_USER=${ECHO_VM_USER:-lume}
-GUEST_PASS=${ECHO_VM_PASSWORD:-lume}
+GUEST_USER=${ECHOECHO_VM_USER:-lume}
+GUEST_PASS=${ECHOECHO_VM_PASSWORD:-lume}
 AGENT=${AGENT:-0}
 NODE_VERSION=${NODE_VERSION:-v22.11.0}
 
@@ -53,10 +53,10 @@ else
   say "$GOLDEN already exists — skipping pull"
 fi
 
-# -- 2. Echo's SSH key -----------------------------------------------------------
+# -- 2. echoecho's SSH key -----------------------------------------------------------
 if [ ! -f "$KEY" ]; then
   say "generating $KEY"
-  ssh-keygen -t ed25519 -N "" -f "$KEY" -C echo-vm >/dev/null
+  ssh-keygen -t ed25519 -N "" -f "$KEY" -C echoecho-vm >/dev/null
 fi
 PUBKEY=$(cat "$KEY.pub")
 
@@ -102,7 +102,7 @@ EXP
 # -- 4. key auth + AcceptEnv (model API keys reach the in-guest agent) -----------
 if ! ssh -i "$KEY" $SSH_OPTS -o BatchMode=yes -o ConnectTimeout=5 \
      "$GUEST_USER@$IP" true 2>/dev/null; then
-  say "installing Echo's key in the guest (ssh-copy-id, default creds)"
+  say "installing echoecho's key in the guest (ssh-copy-id, default creds)"
   # ssh-copy-id appends the key in the correct format and fixes perms itself
   # (a hand-rolled echo/base64 append silently corrupted the key when tested
   # live); -f skips its own key-auth precheck.
@@ -160,7 +160,7 @@ lume stop "$GOLDEN" || true
 cat <<DONE
 
 golden VM '$GOLDEN' is ready.
-  try the tier:   ECHO_SANDBOX=vm python3 echo.py --text
-  scratch VM:     managed automatically (clone '$GOLDEN' -> '\${ECHO_VM_NAME:-echo-vm}')
-  undo/rollback:  lume delete \${ECHO_VM_NAME:-echo-vm} --force   (re-clones next task)
+  try the tier:   ECHOECHO_SANDBOX=vm python3 echoecho.py --text
+  scratch VM:     managed automatically (clone '$GOLDEN' -> '\${ECHOECHO_VM_NAME:-echoecho-vm}')
+  undo/rollback:  lume delete \${ECHOECHO_VM_NAME:-echoecho-vm} --force   (re-clones next task)
 DONE

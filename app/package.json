@@ -1,16 +1,16 @@
 {
-  "name": "echo-orb",
-  "productName": "Echo",
+  "name": "echoecho-orb",
+  "productName": "echoecho",
   "version": "0.1.0",
   "private": true,
-  "description": "Echo's menu-bar portal: the blob, the workspace, and Echo's Mac",
+  "description": "echoecho's menu-bar portal: the blob, the workspace, and echoecho's Mac",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "demo": "ECHO_ORB_DEMO=1 electron .",
-    "smoke": "ECHO_ORB_SMOKE=1 xvfb-run -a electron --no-sandbox .",
-    "smoke:demo": "ECHO_ORB_SMOKE=1 ECHO_ORB_DEMO=1 xvfb-run -a electron --no-sandbox .",
-    "smoke:control": "ECHO_ORB_SMOKE_CONTROL=1 xvfb-run -a electron --no-sandbox .",
+    "demo": "ECHOECHO_ORB_DEMO=1 electron .",
+    "smoke": "ECHOECHO_ORB_SMOKE=1 xvfb-run -a electron --no-sandbox .",
+    "smoke:demo": "ECHOECHO_ORB_SMOKE=1 ECHOECHO_ORB_DEMO=1 xvfb-run -a electron --no-sandbox .",
+    "smoke:control": "ECHOECHO_ORB_SMOKE_CONTROL=1 xvfb-run -a electron --no-sandbox .",
     "icon": "node tools/make-iconset.js",
     "test:vnc-e2e": "bash test/vnc-e2e.sh"
   },

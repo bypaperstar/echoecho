@@ -1,9 +1,9 @@
-// Echo Orb — menu-bar shell.
+// echoecho Orb — menu-bar shell.
 //
 // Owns: the tray, the transparent frameless scene window, the reveal/dismiss
 // lifecycle, and all HTTP to the Python viewer server (see lib/backend.js for
 // why HTTP lives here and not in the renderer). The VNC bridge is lazy-loaded
-// from vnc-proxy.js only when the renderer asks for Echo's Mac.
+// from vnc-proxy.js only when the renderer asks for echoecho's Mac.
 'use strict';
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, globalShortcut, nativeImage } = require('electron');
@@ -14,14 +14,14 @@ const { trayIcon } = require('./lib/trayicon');
 const { ViewerClient } = require('./lib/backend');
 const { iconPng } = require('./lib/icon');
 
-const SMOKE = process.env.ECHO_ORB_SMOKE === '1';
-const SMOKE_CONTROL = process.env.ECHO_ORB_SMOKE_CONTROL === '1';
-const DEMO = process.env.ECHO_ORB_DEMO === '1';
-const VIEWER_PORT = process.env.ECHO_VIEWER_PORT || '8765';
+const SMOKE = process.env.ECHOECHO_ORB_SMOKE === '1';
+const SMOKE_CONTROL = process.env.ECHOECHO_ORB_SMOKE_CONTROL === '1';
+const DEMO = process.env.ECHOECHO_ORB_DEMO === '1';
+const VIEWER_PORT = process.env.ECHOECHO_VIEWER_PORT || '8765';
 const VIEWER_BASE = `http://127.0.0.1:${VIEWER_PORT}`;
 
 // Packaged builds carry runtime-config.json (repo location + version, baked
-// by echoctl build-app); a dev checkout derives the repo from its own path.
+// by echoechoctl build-app); a dev checkout derives the repo from its own path.
 function loadRuntimeConfig() {
   try {
     return JSON.parse(fs.readFileSync(path.join(__dirname, 'runtime-config.json'), 'utf8'));
@@ -30,7 +30,7 @@ function loadRuntimeConfig() {
   }
 }
 const RUNTIME = loadRuntimeConfig();
-const ECHOCTL = path.join(RUNTIME.repoRoot, 'scripts', 'echoctl.sh');
+const ECHOECHOCTL = path.join(RUNTIME.repoRoot, 'scripts', 'echoechoctl.sh');
 
 let tray = null;
 let win = null;
@@ -91,7 +91,7 @@ function createWindow() {
   });
   win.on('blur', () => {
     // Clicking away dismisses, like a menu-bar popover — unless the user is
-    // driving Echo's Mac, where focus loss is routine (drag, cmd-tab test).
+    // driving echoecho's Mac, where focus loss is routine (drag, cmd-tab test).
     if (visible && !SMOKE) sendToScene('orb:blur');
   });
   win.on('closed', () => {
@@ -147,7 +147,7 @@ function toggle() {
 }
 
 // ---- control panel --------------------------------------------------------
-// The window you get when you open Echo.app: status of the daemon / VM / orb
+// The window you get when you open echoecho.app: status of the daemon / VM / orb
 // and the open/close/reset/update buttons. A normal framed window, so the
 // dock shows the app is running and Cmd-W behaves as expected.
 function openControl() {
@@ -161,7 +161,7 @@ function openControl() {
     height: 560,
     resizable: false,
     fullscreenable: false,
-    title: 'Echo',
+    title: 'echoecho',
     backgroundColor: '#101116',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -182,14 +182,14 @@ app.whenReady().then(() => {
   }
   app.on('second-instance', () => openControl());
   if (process.platform === 'darwin' && app.dock) {
-    // Visible in the Dock on purpose: "is Echo running?" should be answerable
+    // Visible in the Dock on purpose: "is echoecho running?" should be answerable
     // at a glance. The packaged bundle carries its icns; a dev checkout gets
     // the same icon rendered at runtime.
     if (!app.isPackaged) {
       app.dock.setIcon(nativeImage.createFromBuffer(iconPng(512)));
     }
     app.dock.setMenu(Menu.buildFromTemplate([
-      { label: 'Summon Echo', click: () => summon('dock') },
+      { label: 'Summon echoecho', click: () => summon('dock') },
       { label: 'Control Panel', click: () => openControl() },
     ]));
   }
@@ -198,13 +198,13 @@ app.whenReady().then(() => {
 
   try {
     tray = new Tray(trayIcon());
-    tray.setToolTip('Echo');
+    tray.setToolTip('echoecho');
     tray.on('click', toggle);
     const menu = Menu.buildFromTemplate([
-      { label: 'Summon Echo', click: () => summon('menu') },
+      { label: 'Summon echoecho', click: () => summon('menu') },
       { label: 'Control Panel…', click: () => openControl() },
       { type: 'separator' },
-      { label: 'Quit Echo Orb', click: () => app.quit() },
+      { label: 'Quit echoecho Orb', click: () => app.quit() },
     ]);
     if (process.platform === 'darwin') {
       // setContextMenu on macOS opens the menu on LEFT click too, killing toggle.
@@ -280,7 +280,7 @@ app.whenReady().then(() => {
       app.quit();
     }, 4000);
   } else {
-    // Opened like a normal app (double-click Echo.app): show the panel.
+    // Opened like a normal app (double-click echoecho.app): show the panel.
     openControl();
   }
 });
@@ -307,7 +307,7 @@ ipcMain.on('orb:hidden', () => {
 });
 ipcMain.on('orb:dismiss-request', () => dismiss());
 
-// Renderer asks for Echo's Mac: resolve the VNC endpoint (env override first,
+// Renderer asks for echoecho's Mac: resolve the VNC endpoint (env override first,
 // then the viewer's /vnc-info), start the WS<->TCP bridge, hand back a local
 // WebSocket URL + password for noVNC. Failure ("asleep") is marshalled as a
 // value — an IPC rejection would console.error in main, and an unreachable
@@ -315,7 +315,7 @@ ipcMain.on('orb:dismiss-request', () => dismiss());
 // renderer still sees a rejected promise.
 ipcMain.handle('vnc:connect', async () => {
   try {
-    let target = process.env.ECHO_VNC_URL || null;
+    let target = process.env.ECHOECHO_VNC_URL || null;
     if (!target) {
       const info = await viewer.vncInfo(); // throws -> renderer shows "asleep"
       target = info.url;
@@ -333,9 +333,9 @@ ipcMain.handle('vnc:disconnect', () => {
 
 // ---- control panel IPC ----------------------------------------------------
 
-function runEchoctl(cmd, detached) {
+function runEchoechoctl(cmd, detached) {
   return new Promise((resolve) => {
-    const child = spawn('bash', [ECHOCTL, cmd], {
+    const child = spawn('bash', [ECHOECHOCTL, cmd], {
       cwd: RUNTIME.repoRoot,
       detached: !!detached,
       stdio: detached ? 'ignore' : ['ignore', 'pipe', 'pipe'],
@@ -381,16 +381,16 @@ const CTL_ACTIONS = {
   'summon': () => { summon('control'); return { ok: true }; },
   'dismiss': () => { dismiss(); return { ok: true }; },
   'quit-app': () => { setTimeout(() => app.quit(), 150); return { ok: true }; },
-  // echoctl-backed (long ones run detached; the panel re-polls status)
-  'daemon-start': () => runEchoctl('start-daemon'),
-  'daemon-stop': () => runEchoctl('stop-daemon'),
-  'daemon-restart': () => runEchoctl('restart-daemon'),
-  'vm-boot': () => runEchoctl('boot-vm', true),
-  'vm-reset': () => runEchoctl('reset-vm', true),
+  // echoechoctl-backed (long ones run detached; the panel re-polls status)
+  'daemon-start': () => runEchoechoctl('start-daemon'),
+  'daemon-stop': () => runEchoechoctl('stop-daemon'),
+  'daemon-restart': () => runEchoechoctl('restart-daemon'),
+  'vm-boot': () => runEchoechoctl('boot-vm', true),
+  'vm-reset': () => runEchoechoctl('reset-vm', true),
   'update': () => {
     // the script waits ~2s for us to exit, then pulls, rebuilds, reinstalls
     // the bundle and reopens it
-    runEchoctl('update', true);
+    runEchoechoctl('update', true);
     setTimeout(() => app.quit(), 500);
     return { ok: true, detached: true };
   },
