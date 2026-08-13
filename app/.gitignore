@@ -1,3 +1,5 @@
 node_modules/
 dist/
+build/
+runtime-config.json
 *.log
