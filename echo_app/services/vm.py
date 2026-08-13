@@ -26,6 +26,7 @@ import asyncio
 import json
 import shlex
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -233,6 +234,61 @@ class FakeVM:
         script = 'echo exec >> "$0/exec.log" && cd "$1" && shift && exec "$@"'
         return (["sh", "-c", script, str(self.root), str(workspace)]
                 + list(argv), Path(workspace))
+
+
+# -- VNC endpoint discovery (viewer /vnc-info, PR 15) -------------------------
+
+def parse_lume_record(out):
+    """Parsed record from `lume ... -f json` combined output, or None — the
+    same tolerance as LumeVM._get: lume 0.5.x wraps the record in a JSON
+    array ([{...}]) and may prefix log lines like '[2026-..] INFO: ...',
+    whose '[' is NOT the JSON, so try each '['/'{' start until one parses,
+    then unwrap a one-element list."""
+    starts = sorted(i for i, c in enumerate(out) if c in "[{")
+    for i in starts:
+        try:
+            data = json.loads(out[i:])
+        except ValueError:
+            continue
+        if isinstance(data, list):
+            data = data[0] if data else None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _lume_get_sync(vm_name):
+    """(rc, combined output) of `lume get <vm> -f json` — a blocking twin of
+    LumeVM._lume for callers with no event loop (the viewer's HTTP threads).
+    Tests monkeypatch this to feed fake lume output."""
+    exe = shutil.which("lume")
+    if exe is None:
+        raise SandboxUnavailable(
+            "lume is not installed — run scripts/vm_golden.sh first")
+    proc = subprocess.run(
+        [exe, "get", vm_name, "-f", "json"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+    return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+
+def vnc_url(vm_name=None):
+    """The running VM's vncUrl (vnc://[:pass@]ip:port), read fresh from lume
+    on every call — a re-cloned VM gets a new address/password, so caching
+    would hand the portal a dead endpoint. Raises SandboxUnavailable with a
+    human-readable reason on any failure."""
+    name = vm_name or config.vm_name()
+    rc, out = _lume_get_sync(name)
+    info = parse_lume_record(out) if rc == 0 else None
+    if info is None:
+        raise SandboxUnavailable(
+            "no VM %r (lume get: %s)" % (name, out.strip()[-200:] or "rc=%s" % rc))
+    if str(info.get("status", "")).lower() != "running":
+        raise SandboxUnavailable(
+            "VM %r is not running (status: %s)"
+            % (name, info.get("status") or "unknown"))
+    url = info.get("vncUrl")
+    if not url:
+        raise SandboxUnavailable("VM %r reports no vncUrl" % name)
+    return str(url)
 
 
 _shared_vm = None  # warm policy: one VM per Echo process, kept booted

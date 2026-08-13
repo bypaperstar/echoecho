@@ -14,17 +14,22 @@ GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
                     and whenever a 250ms poll sees any visible file change
                     OR an append to the .events.jsonl feed
+GET /vnc-info    -> {"url": "vnc://[:pass@]host:port"} for Echo's Mac, or 503
+                    {"error": ...}; source: ECHO_VNC_URL env override, else
+                    lume (vm tier only), read fresh on every call
 
 Workspace writes are atomic (tmp + os.rename), so /doc never serves a
 half-written file.
 """
 import json
+import os
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from echo_app.services import artifacts
+from echo_app import config
+from echo_app.services import artifacts, vm
 
 POLL_INTERVAL = 0.25
 INDEX = Path(__file__).with_name("index.html")
@@ -107,8 +112,35 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(200, "application/json; charset=utf-8", body)
         elif parsed.path == "/events":
             self._events()
+        elif parsed.path == "/vnc-info":
+            self._vnc_info()
         else:
             self._respond(404, "text/plain", b"not found")
+
+    def _vnc_info(self):
+        """Where Echo's Mac's VNC lives: ECHO_VNC_URL override (tests/CI, or
+        "I already know my VM") -> else ask lume on the vm tier -> else 503.
+        Never cached: a re-cloned VM changes address, and a stale URL would
+        strand the portal on a dead endpoint."""
+        override = os.environ.get("ECHO_VNC_URL", "").strip()
+        if override:
+            self._json(200, {"url": override})
+            return
+        if config.sandbox_tier() != "vm":
+            self._json(503, {"error": (
+                "no VM configured: set ECHO_SANDBOX=vm, or point "
+                "ECHO_VNC_URL at any VNC server")})
+            return
+        try:
+            url = vm.vnc_url()
+        except Exception as exc:  # lume missing/failed: human-readable 503
+            self._json(503, {"error": str(exc) or type(exc).__name__})
+            return
+        self._json(200, {"url": url})
+
+    def _json(self, status, obj):
+        self._respond(status, "application/json; charset=utf-8",
+                      json.dumps(obj).encode("utf-8"))
 
     def _respond(self, status, ctype, body, csp=None):
         self.send_response(status)
