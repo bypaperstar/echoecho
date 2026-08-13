@@ -6,12 +6,12 @@ import json
 import time
 from pathlib import Path
 
-from echo_app import config
-from echo_app.bus import TaskRequest, TaskResult
-from echo_app.orchestrator import log as tasklog
-from echo_app.orchestrator.core import Orchestrator, _elapsed, _title
-from echo_app.services.agent_cli import ClaudeCLI, FakeAgentCLI
-from echo_app.workers.base import load_all
+from echoecho_app import config
+from echoecho_app.bus import TaskRequest, TaskResult
+from echoecho_app.orchestrator import log as tasklog
+from echoecho_app.orchestrator.core import Orchestrator, _elapsed, _title
+from echoecho_app.services.agent_cli import ClaudeCLI, FakeAgentCLI
+from echoecho_app.workers.base import load_all
 
 
 def write_script(path, events):
@@ -46,7 +46,7 @@ def run_orch(requests, tmp_path, extra=None, timeout=5.0, seed_log=None):
 # -- progress streaming -> throttled ambient injections -----------------------
 
 def test_progress_streams_first_line_then_throttles(tmp_path, monkeypatch):
-    monkeypatch.setenv("ECHO_PROGRESS_INTERVAL", "999")  # only the first fires
+    monkeypatch.setenv("ECHOECHO_PROGRESS_INTERVAL", "999")  # only the first fires
     script = write_script(tmp_path / "s.jsonl", [
         {"type": "system", "subtype": "init", "session_id": "s1"},
         {"type": "assistant", "message": {"content": [
@@ -128,7 +128,7 @@ def test_agent_question_becomes_needs_input_interrupt(tmp_path):
     assert "table or prose" in result.say
     assert injections[0].priority == "interrupt"  # a question interrupts
     # the prompt taught the agent the convention
-    from echo_app.workers import agent_run
+    from echoecho_app.workers import agent_run
     assert agent_run.QUESTION_PREFIX in agent_run.PROMPT_SUFFIX
 
 
@@ -255,7 +255,7 @@ def test_resume_after_restart_uses_persisted_session(tmp_path):
 # -- announcement watermark: announce once, even across a restart -------------
 
 def test_collect_missed_announces_once_and_survives_restart(tmp_path):
-    """A task that finished while Echo was away announces on the next wake,
+    """A task that finished while echoecho was away announces on the next wake,
     and having a restart between the finish and the wake must not lose it —
     nor announce it twice."""
     log = "\n".join(json.dumps(e) for e in [
@@ -340,7 +340,7 @@ def test_summaries_without_id_is_bounded_to_active_plus_recent(tmp_path):
 # -- wall-clock budget --------------------------------------------------------
 
 def test_budget_breach_kills_and_reports_resumable(tmp_path, monkeypatch):
-    monkeypatch.setenv("ECHO_AGENT_TIMEOUT", "0.3")
+    monkeypatch.setenv("ECHOECHO_AGENT_TIMEOUT", "0.3")
 
     class HangCLI(ClaudeCLI):
         name = "hang"
@@ -366,7 +366,7 @@ def test_budget_breach_kills_and_reports_resumable(tmp_path, monkeypatch):
 def test_budget_kill_takes_the_whole_process_tree(tmp_path, monkeypatch):
     """A real agent spawns children (builds, dev servers); the budget kill
     must take the process GROUP, not just the CLI, or orphans outlive it."""
-    monkeypatch.setenv("ECHO_AGENT_TIMEOUT", "0.3")
+    monkeypatch.setenv("ECHOECHO_AGENT_TIMEOUT", "0.3")
     marker = tmp_path / "grandchild_alive"
 
     class ForkingCLI(ClaudeCLI):

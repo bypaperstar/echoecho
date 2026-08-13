@@ -8,14 +8,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from echo_app import config
-from echo_app.bus import Injection
-from echo_app.conversation.port import TOOL_NAMES
-from echo_app.conversation.realtime import (FakeTransport, PlaybackTracker,
+from echoecho_app import config
+from echoecho_app.bus import Injection
+from echoecho_app.conversation.port import TOOL_NAMES
+from echoecho_app.conversation.realtime import (FakeTransport, PlaybackTracker,
                                             RealtimeClient, build_session_update,
                                             pcm16_ms)
-from echo_app.conversation.session import Session
-from echo_app.conversation.textmode import build_tools
+from echoecho_app.conversation.session import Session
+from echoecho_app.conversation.textmode import build_tools
 
 FIX = config.FIXTURES_DIR / "realtime"
 
@@ -79,8 +79,8 @@ def test_session_update_is_first_send_with_full_config():
 
 
 def test_four_tool_schema_matches_contract_a(monkeypatch):
-    monkeypatch.delenv("ECHO_PLUGINS", raising=False)
-    from echo_app.workers.base import load_all
+    monkeypatch.delenv("ECHOECHO_PLUGINS", raising=False)
+    from echoecho_app.workers.base import load_all
     load_all()
     tools = build_session_update()["session"]["tools"]
     assert [t["name"] for t in tools] == list(TOOL_NAMES)
@@ -371,9 +371,9 @@ def test_full_session_dispatch_then_result_then_end():
         {"type": "response.done", "response": {"id": "r1", "output": [
             {"type": "function_call", "name": "dispatch_task",
              "call_id": "c1",
-             "arguments": "{\"kind\": \"sleep.echo\", \"instructions\": \"hi\"}"}]}},
+             "arguments": "{\"kind\": \"sleep.echoecho\", \"instructions\": \"hi\"}"}]}},
         {"type": "response.created", "response": {"id": "r2"}},  # the spoken ack
-        {"type": "_inject", "text": "[task t1 done] Echoing back: hi",
+        {"type": "_inject", "text": "[task t1 done] echoechoing back: hi",
          "priority": "interrupt"},  # result lands while ack is being spoken
         {"type": "_probe", "label": "mid_ack"},
         {"type": "response.done", "response": {"id": "r2",
@@ -402,14 +402,14 @@ def test_full_session_dispatch_then_result_then_end():
     assert transport.closed
 
 
-# -- echo.py --voice wiring -----------------------------------------------------------
+# -- echoecho.py --voice wiring -----------------------------------------------------------
 
 
 def test_echo_voice_fails_politely_without_audio_deps():
     # PR 5 note: --voice is fully wired now, but on Linux CI (no sounddevice)
     # it must still fail politely and point at a working fallback.
     proc = subprocess.run(
-        [sys.executable, str(config.REPO_ROOT / "echo.py"), "--voice"],
+        [sys.executable, str(config.REPO_ROOT / "echoecho.py"), "--voice"],
         capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0
     err = proc.stderr + proc.stdout

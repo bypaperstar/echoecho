@@ -5,8 +5,8 @@ real one is not installed on the Linux sandbox and there is no audio
 hardware). The fake tracks open streams and counts PortAudio re-inits, so we
 can assert the CRITICAL invariant: refresh_devices() (sounddevice._terminate
 + _initialize) never runs while any stream is open, across the exact
-voice_main session-boundary sequence (echo.start_session_audio /
-echo.end_session_audio).
+voice_main session-boundary sequence (echoecho.start_session_audio /
+echoecho.end_session_audio).
 """
 import json
 import os
@@ -16,11 +16,11 @@ import types
 
 import pytest
 
-import echo
-from echo_app import config, events
-from echo_app.conversation.audio import (AudioIO, device_label,
+import echoecho
+from echoecho_app import config, events
+from echoecho_app.conversation.audio import (AudioIO, device_label,
                                          refresh_devices, resolve_device)
-from echo_app.wake.mic import WakeMic
+from echoecho_app.wake.mic import WakeMic
 
 DEVICES = [
     {"name": "MacBook Pro Microphone",
@@ -181,12 +181,12 @@ def test_session_sequence_never_refreshes_with_open_streams(fake_sd, feed_dir):
     audio = AudioIO(output_device="pods")
     assert len(fake_sd.open_streams) == 1  # wake mic only
 
-    # AirPods connect while Echo is IDLE (after PortAudio init)...
+    # AirPods connect while echoecho is IDLE (after PortAudio init)...
     fake_sd.devices.append(dict(AIRPODS))
 
     # wake: mic fully closes BEFORE the refresh; session streams open after,
     # resolving fresh -> the hot-plugged AirPods are found
-    echo.start_session_audio(mic, audio, loop=None, send_event=None)
+    echoecho.start_session_audio(mic, audio, loop=None, send_event=None)
     assert fake_sd.refreshes == 1
     assert fake_sd.refresh_violations == 0
     assert len(fake_sd.open_streams) == 2  # session in+out; wake mic closed
@@ -194,7 +194,7 @@ def test_session_sequence_never_refreshes_with_open_streams(fake_sd, feed_dir):
 
     # session end: streams close BEFORE the refresh; wake mic reopens fresh;
     # detector re-armed last
-    echo.end_session_audio(mic, audio, detector)
+    echoecho.end_session_audio(mic, audio, detector)
     assert fake_sd.refreshes == 2
     assert fake_sd.refresh_violations == 0
     assert len(fake_sd.open_streams) == 1  # wake mic back, session gone
@@ -221,13 +221,13 @@ def test_crashed_audio_start_leaves_no_stream_open_across_refresh(fake_sd):
     audio = AudioIO()
     fake_sd.RawOutputStream = failing_out
     with pytest.raises(Boom):
-        echo.start_session_audio(mic, audio, loop=None, send_event=None)
+        echoecho.start_session_audio(mic, audio, loop=None, send_event=None)
     assert len(fake_sd.open_streams) == 1  # orphaned session input stream
     # voice_main's finally path:
     audio.muted_capture = True
     audio.play_chime("end")
     fake_sd.RawOutputStream = good_stream
-    echo.end_session_audio(mic, audio, detector)
+    echoecho.end_session_audio(mic, audio, detector)
     assert fake_sd.refresh_violations == 0  # orphan closed before re-init
     assert len(fake_sd.open_streams) == 1   # wake mic back, nothing leaked
     assert detector.resumed == 1
@@ -238,7 +238,7 @@ def test_end_session_audio_survives_mic_reopen_failure(fake_sd):
     detector = StubDetector()
     mic.stop()  # as during ACTIVE: start_session_audio closed the wake mic
     del fake_sd.devices[2]  # USB mic unplugged mid-session
-    echo.end_session_audio(mic, AudioIO(), detector)  # must not raise
+    echoecho.end_session_audio(mic, AudioIO(), detector)  # must not raise
     assert detector.resumed == 1  # daemon re-armed despite the dead mic
     assert fake_sd.refresh_violations == 0
 
@@ -288,44 +288,44 @@ def test_device_label_without_sounddevice_stays_polite():
 
 
 def test_viewer_renders_audio_event_as_activity_line():
-    html = (config.REPO_ROOT / "echo_app" / "viewer"
+    html = (config.REPO_ROOT / "echoecho_app" / "viewer"
             / "index.html").read_text(encoding="utf-8")
     assert "'audio'" in html
     assert "🎧 mic: " in html and "speaker: " in html
 
 
-# -- echo.py flags / env --------------------------------------------------------
+# -- echoecho.py flags / env --------------------------------------------------------
 
 
 def test_config_device_env_getters(monkeypatch):
-    monkeypatch.delenv("ECHO_INPUT_DEVICE", raising=False)
-    monkeypatch.delenv("ECHO_OUTPUT_DEVICE", raising=False)
+    monkeypatch.delenv("ECHOECHO_INPUT_DEVICE", raising=False)
+    monkeypatch.delenv("ECHOECHO_OUTPUT_DEVICE", raising=False)
     assert config.input_device() == ""   # "" = follow system default
     assert config.output_device() == ""
-    monkeypatch.setenv("ECHO_INPUT_DEVICE", " AirPods ")
-    monkeypatch.setenv("ECHO_OUTPUT_DEVICE", "3")
+    monkeypatch.setenv("ECHOECHO_INPUT_DEVICE", " AirPods ")
+    monkeypatch.setenv("ECHOECHO_OUTPUT_DEVICE", "3")
     assert config.input_device() == "AirPods"
     assert config.output_device() == "3"
 
 
 def test_device_flags_override_env(monkeypatch):
-    monkeypatch.setenv("ECHO_INPUT_DEVICE", "from-env-in")
-    monkeypatch.setenv("ECHO_OUTPUT_DEVICE", "from-env-out")
-    args = echo.parse_args(["--voice", "--input-device", "macbook pro microphone",
+    monkeypatch.setenv("ECHOECHO_INPUT_DEVICE", "from-env-in")
+    monkeypatch.setenv("ECHOECHO_OUTPUT_DEVICE", "from-env-out")
+    args = echoecho.parse_args(["--voice", "--input-device", "macbook pro microphone",
                             "--output-device", "pods"])
-    echo.apply_device_args(args)
-    assert os.environ["ECHO_INPUT_DEVICE"] == "macbook pro microphone"
-    assert os.environ["ECHO_OUTPUT_DEVICE"] == "pods"
+    echoecho.apply_device_args(args)
+    assert os.environ["ECHOECHO_INPUT_DEVICE"] == "macbook pro microphone"
+    assert os.environ["ECHOECHO_OUTPUT_DEVICE"] == "pods"
     # no flags -> env untouched
-    monkeypatch.setenv("ECHO_INPUT_DEVICE", "from-env-in")
-    echo.apply_device_args(echo.parse_args(["--voice"]))
-    assert os.environ["ECHO_INPUT_DEVICE"] == "from-env-in"
+    monkeypatch.setenv("ECHOECHO_INPUT_DEVICE", "from-env-in")
+    echoecho.apply_device_args(echoecho.parse_args(["--voice"]))
+    assert os.environ["ECHOECHO_INPUT_DEVICE"] == "from-env-in"
 
 
 def test_list_devices_exits_politely_without_sounddevice():
     # Linux sandbox: no sounddevice installed -> nonzero + a helpful pointer
     proc = subprocess.run(
-        [sys.executable, str(config.REPO_ROOT / "echo.py"), "--list-devices"],
+        [sys.executable, str(config.REPO_ROOT / "echoecho.py"), "--list-devices"],
         capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0
     err = proc.stderr + proc.stdout
@@ -334,7 +334,7 @@ def test_list_devices_exits_politely_without_sounddevice():
 
 
 def test_list_devices_table_marks_capabilities_and_defaults(fake_sd, capsys):
-    echo.list_devices()
+    echoecho.list_devices()
     out = capsys.readouterr().out
     for dev in DEVICES:
         assert dev["name"] in out

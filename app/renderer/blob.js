@@ -1,4 +1,4 @@
-// Echo's blob — production metaball organism (ported from
+// echoecho's blob — production metaball organism (ported from
 // prototypes/blob-metaball2d.html; reveal choreography from blob-glslfield).
 //
 // Field:  core/ring metaballs + pseudopod chains + emission necks, splatted
@@ -450,7 +450,7 @@ requestAnimationFrame(function frame(nowMs) {
 });
 
 // ---------------------------------------------------------- public contract
-window.echoBlob = {
+window.echoechoBlob = {
   // reveal 0..1 (scene eases it); anchor in CSS px
   setReveal(t, a) {
     reveal = clamp(+t || 0, 0, 1);

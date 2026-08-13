@@ -12,7 +12,7 @@ always-on mic supplies for free but a WAV that ends flush with the speech
 does not.
 
 Empirical decoy behavior (vosk-model-small-en-us-0.15, grammar
-'["echo","[unk]"]', 3200-byte chunks): decoy_single_echo -> '[unk] echo
+'["echo","[unk]"]', 3200-byte chunks): decoy_single_wake_word -> '[unk] echo
 [unk]', decoy_speech -> '[unk]', decoy_gecko -> '[unk] echo [unk] echo' —
 none contain the contiguous doubled phrase, so none fire. ("gecko" does
 decode its 'echo' tail, but never doubled; no README false-fire note needed
@@ -26,7 +26,7 @@ import wave
 
 import pytest
 
-from echo_app import config
+from echoecho_app import config
 
 pytestmark = pytest.mark.skipif(
     not config.VOSK_MODEL_DIR.is_dir(),
@@ -54,17 +54,17 @@ def feed(detector, pcm):
 
 @pytest.fixture(scope="module")
 def detector():
-    from echo_app.wake.detector import WakeDetector
+    from echoecho_app.wake.detector import WakeDetector
     return WakeDetector()
 
 
-@pytest.mark.parametrize("name", ["wake_echo_echo.wav",
-                                  "wake_echo_echo_context.wav"])
+@pytest.mark.parametrize("name", ["wake_echoecho.wav",
+                                  "wake_echoecho_context.wav"])
 def test_wake_phrases_fire(detector, name):
     assert feed(detector, load_pcm16k(name))
 
 
-@pytest.mark.parametrize("name", ["decoy_single_echo.wav",
+@pytest.mark.parametrize("name", ["decoy_single_wake_word.wav",
                                   "decoy_speech.wav",
                                   "decoy_gecko.wav"])
 def test_decoys_do_not_fire(detector, name):
@@ -72,13 +72,13 @@ def test_decoys_do_not_fire(detector, name):
 
 
 def test_reset_after_trigger_allows_refire(detector):
-    pcm = load_pcm16k("wake_echo_echo.wav")
+    pcm = load_pcm16k("wake_echoecho.wav")
     assert feed(detector, pcm)
     assert feed(detector, pcm)  # recognizer was reset, fires again
 
 
 def test_suspend_blocks_and_resume_rearms(detector):
-    pcm = load_pcm16k("wake_echo_echo.wav")
+    pcm = load_pcm16k("wake_echoecho.wav")
     detector.suspend()
     assert not feed(detector, pcm)  # ACTIVE session: feed paused
     detector.resume()
@@ -90,21 +90,21 @@ def test_suspend_blocks_and_resume_rearms(detector):
 def test_audio_modules_import_without_sounddevice():
     """Importing the Mac-only modules must not import sounddevice (lazy)."""
     before = "sounddevice" in sys.modules
-    import echo_app.conversation.audio  # noqa: F401
-    import echo_app.wake.mic  # noqa: F401
+    import echoecho_app.conversation.audio  # noqa: F401
+    import echoecho_app.wake.mic  # noqa: F401
     assert ("sounddevice" in sys.modules) == before
 
 
 def test_chimes_are_nonsilent_pcm16():
-    from echo_app.conversation.audio import end_chime, wake_chime
+    from echoecho_app.conversation.audio import end_chime, wake_chime
     for chime in (wake_chime(), end_chime()):
         assert len(chime) == 2 * int(24000 * 0.09) * 2  # two 90ms notes, int16
         assert max(abs(s) for s in memoryview(chime).cast("h")) > 5000
 
 
 def test_playback_buffer_advances_tracker_and_flushes():
-    from echo_app.conversation.audio import AudioIO
-    from echo_app.conversation.realtime import PlaybackTracker
+    from echoecho_app.conversation.audio import AudioIO
+    from echoecho_app.conversation.realtime import PlaybackTracker
     tracker = PlaybackTracker()
     io = AudioIO(tracker=tracker)
     tracker.append("item_1", 100.0)
@@ -125,7 +125,7 @@ def test_capture_callback_sends_base64_append():
     """The PortAudio-thread capture callback must schedule a well-shaped
     input_audio_buffer.append onto the loop, and be a safe no-op after stop()
     nulls send_event (teardown race)."""
-    from echo_app.conversation.audio import AudioIO
+    from echoecho_app.conversation.audio import AudioIO
     io = AudioIO()
     sent = []
 
@@ -157,7 +157,7 @@ def _has_sounddevice():
 @pytest.mark.skipif(not _has_sounddevice(),
                     reason="sounddevice not installed (Mac-only device paths)")
 def test_device_open_paths_mac_only():
-    from echo_app.wake.mic import WakeMic
+    from echoecho_app.wake.mic import WakeMic
     mic = WakeMic().start()
     assert mic.read(timeout=1.0) is not None
     mic.stop()

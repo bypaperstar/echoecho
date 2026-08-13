@@ -1,10 +1,10 @@
-# Echo Orb — the menu-bar portal app
+# echoecho Orb — the menu-bar portal app
 
-The viewer grows a second face: a menu-bar (tray) Electron app. Echo lives in the
-menu bar as a small orb; summoning it (tray click, or the "echo echo" wake event
+The viewer grows a second face: a menu-bar (tray) Electron app. echoecho lives in the
+menu bar as a small orb; summoning it (tray click, or the "echoecho" wake event
 arriving over the existing SSE feed) pours a black amorphous blob out of the menu
 bar — a genie-style reveal — which coalesces mid-screen and becomes the stage.
-Items (documents, the live screen of Echo's Mac, transcript wisps) emerge *out of
+Items (documents, the live screen of echoecho's Mac, transcript wisps) emerge *out of
 the blob*, and any item can grow to take over the whole scene while the blob
 shrinks to a companion in the corner.
 
@@ -22,7 +22,7 @@ data plane, not a replacement for it.
   `lume get`, env override for tests). Everything Node lives under `app/`.
 - **Keyless/Linux testable.** The app must launch under Xvfb on Linux; the VNC
   chain must be exercisable against any RFB server (x11vnc in CI/sandbox), not
-  just a Mac VM. `ECHO_VNC_URL` overrides discovery end-to-end.
+  just a Mac VM. `ECHOECHO_VNC_URL` overrides discovery end-to-end.
 
 ## Architecture
 
@@ -35,10 +35,10 @@ menu bar tray ──click──▶ main.js ──IPC──▶ renderer (transpar
                              │                 └── SSE client  http://127.0.0.1:8765/events + /transcript
                              │                        └── wake event ──IPC──▶ summon window
                              └── vnc-proxy.js  WebSocket ⇄ raw TCP bridge to the VM's VNC
-                                                    (target from /vnc-info or ECHO_VNC_URL)
+                                                    (target from /vnc-info or ECHOECHO_VNC_URL)
 
 python viewer server (:8765)  ──  GET /vnc-info → {"url": "vnc://:pass@ip:port"} | 503
-                                   source: ECHO_VNC_URL else `lume get <ECHO_VM_NAME> -f json` .vncUrl
+                                   source: ECHOECHO_VNC_URL else `lume get <ECHOECHO_VM_NAME> -f json` .vncUrl
 ```
 
 - **Window**: frameless, transparent, always-on-top, resizable "scene" anchored
@@ -59,8 +59,8 @@ python viewer server (:8765)  ──  GET /vnc-info → {"url": "vnc://:pass@ip:
 - **Blob**: black, amorphous, never still — breathing/flowing at rest. Items are
   DOM elements composited over the blob canvas; emergence is coordinated (the
   blob bulges toward the item's spawn point, the item scales/unfurls from it).
-- **Echo's Mac item**: a live, *interactive* VNC view (noVNC RFB) of the Lume VM.
-  Input forwarded by default — it's Echo's Mac, blast radius is the sandbox; the
+- **echoecho's Mac item**: a live, *interactive* VNC view (noVNC RFB) of the Lume VM.
+  Input forwarded by default — it's echoecho's Mac, blast radius is the sandbox; the
   read-only user-doc mounts still protect real files. A view-only toggle exists.
   Note: user input over VNC is injected by Lume at the virtual-HID level
   (`_VZVNCServer`), so it works even where the agent's `osascript` keystrokes
@@ -73,7 +73,7 @@ python viewer server (:8765)  ──  GET /vnc-info → {"url": "vnc://:pass@ip:
 - `app/renderer/index.html`, `app/renderer/scene.js`, `app/renderer/blob.js`,
   `app/renderer/style.css` — scene
 - `app/prototypes/*.html` — standalone blob explorations (kept, they're the lab)
-- `echo_app/viewer/server.py` + `tests/test_viewer.py` — `/vnc-info` only
+- `echoecho_app/viewer/server.py` + `tests/test_viewer.py` — `/vnc-info` only
 
 ## Out of scope (noted for later)
 

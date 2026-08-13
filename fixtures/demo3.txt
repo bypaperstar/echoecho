@@ -1,6 +1,6 @@
 # Demo 3 — learning a topic (scripted headless run; learn.* workers hit the
 # LIVE keyless Wikipedia Action API, LLM steps come from fixtures).
-echo echo
+echoecho
 teach me about fermentation in food
 !dispatch_task {"kind": "learn.outline", "instructions": "fermentation in food"}
 ~wait 15

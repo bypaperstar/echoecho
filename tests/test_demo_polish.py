@@ -9,12 +9,12 @@ Sync tests calling asyncio.run internally (no pytest-asyncio).
 import asyncio
 from pathlib import Path
 
-from echo_app import config
-from echo_app.bus import Task, TaskRequest, TaskResult
-from echo_app.conversation.realtime import (FakeTransport, RealtimeClient,
+from echoecho_app import config
+from echoecho_app.bus import Task, TaskRequest, TaskResult
+from echoecho_app.conversation.realtime import (FakeTransport, RealtimeClient,
                                             voice_prompt)
-from echo_app.conversation.session import Session
-from echo_app.orchestrator.core import Orchestrator
+from echoecho_app.conversation.session import Session
+from echoecho_app.orchestrator.core import Orchestrator
 
 
 class FakeClock:
@@ -142,7 +142,7 @@ def test_ws_transport_wraps_connection_closed_on_send_and_recv():
     import pytest
     import websockets.exceptions
 
-    from echo_app.conversation.realtime import (TransportClosed,
+    from echoecho_app.conversation.realtime import (TransportClosed,
                                                 WebSocketTransport)
 
     class DeadWS:
@@ -164,7 +164,7 @@ def test_ws_transport_wraps_connection_closed_on_send_and_recv():
 
 
 def test_since_last_session_item_sent_right_after_session_update():
-    text = ("[since last session] Background tasks finished while Echo was "
+    text = ("[since last session] Background tasks finished while echoecho was "
             "asleep: t1 (recipe.search): Found a pad thai.")
     transport = FakeTransport(list(END_TAIL))
     client = RealtimeClient(transport, session=Session(clock=FakeClock()),
@@ -202,7 +202,7 @@ def test_orchestrator_results_since():
 
 
 def test_system_prompt_tuned_for_voice():
-    from echo_app.workers.base import load_all
+    from echoecho_app.workers.base import load_all
     load_all()
     p = config.system_prompt()
     assert "short" in p                       # short utterances
@@ -216,7 +216,7 @@ def test_system_prompt_tuned_for_voice():
 
 
 def test_viewer_index_has_section_flash():
-    html = (Path(config.REPO_ROOT) / "echo_app" / "viewer"
+    html = (Path(config.REPO_ROOT) / "echoecho_app" / "viewer"
             / "index.html").read_text(encoding="utf-8")
     assert "@keyframes flash" in html   # CSS flash highlight
     assert "sectionMap" in html         # h2 section diffing

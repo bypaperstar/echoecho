@@ -1,4 +1,4 @@
-// Client for Echo's Python viewer server (127.0.0.1:8765 by default).
+// Client for echoecho's Python viewer server (127.0.0.1:8765 by default).
 //
 // All HTTP happens here in the main process on purpose: the viewer server
 // deliberately sends no CORS headers (so a random website in the user's
@@ -45,12 +45,12 @@ class ViewerClient extends EventEmitter {
   }
 
   // /vnc-info serves credentials, so it alone requires the viewer token the
-  // server writes at startup (env ECHO_VIEWER_TOKEN_FILE or ~/.echo/viewer.token,
+  // server writes at startup (env ECHOECHO_VIEWER_TOKEN_FILE or ~/.echoecho/viewer.token,
   // regenerated per run). Read fresh per call; missing file means the viewer
   // server isn't running.
   async vncInfo() {
-    const file = process.env.ECHO_VIEWER_TOKEN_FILE ||
-      path.join(os.homedir(), '.echo', 'viewer.token');
+    const file = process.env.ECHOECHO_VIEWER_TOKEN_FILE ||
+      path.join(os.homedir(), '.echoecho', 'viewer.token');
     let token;
     try {
       token = fs.readFileSync(file, 'utf8').trim();

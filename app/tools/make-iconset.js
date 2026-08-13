@@ -1,4 +1,4 @@
-// Writes build/Echo.iconset/ (the macOS iconset layout). The build script
+// Writes build/echoecho.iconset/ (the macOS iconset layout). The build script
 // then runs `iconutil -c icns` on it — that tool is macOS-only, which is why
 // this generator only emits PNGs.
 'use strict';
@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { iconPng } = require('../lib/icon');
 
-const out = path.join(__dirname, '..', 'build', 'Echo.iconset');
+const out = path.join(__dirname, '..', 'build', 'echoecho.iconset');
 fs.mkdirSync(out, { recursive: true });
 
 // name -> pixel size, per Apple's iconset convention

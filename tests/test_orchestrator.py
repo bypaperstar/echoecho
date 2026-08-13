@@ -1,12 +1,12 @@
 import asyncio
 import json
 
-from echo_app import config, events
-from echo_app.bus import TaskRequest, TaskResult
-from echo_app.orchestrator import log as tasklog
-from echo_app.orchestrator.core import Orchestrator
-from echo_app.orchestrator.ranker import rank
-from echo_app.workers.base import load_all
+from echoecho_app import config, events
+from echoecho_app.bus import TaskRequest, TaskResult
+from echoecho_app.orchestrator import log as tasklog
+from echoecho_app.orchestrator.core import Orchestrator
+from echoecho_app.orchestrator.ranker import rank
+from echoecho_app.workers.base import load_all
 
 
 def run_orch(registry, requests, tmp_path, timeout=3.0):
@@ -28,14 +28,14 @@ def run_orch(registry, requests, tmp_path, timeout=3.0):
 def test_dispatch_to_result_roundtrip(tmp_path):
     orch, injections = run_orch(
         load_all(),
-        [TaskRequest(kind="sleep.echo", instructions="hi", args={"sleep": 0.01})],
+        [TaskRequest(kind="sleep.echoecho", instructions="hi", args={"sleep": 0.01})],
         tmp_path)
     task = orch.tasks["t1"]
     assert task.status == "done"
-    assert task.result.say == "Echoing back: hi"
+    assert task.result.say == "echoechoing back: hi"
     assert task.finished_at >= task.created_at
     assert len(injections) == 1
-    assert injections[0].text == "[task t1 done] Echoing back: hi"
+    assert injections[0].text == "[task t1 done] echoechoing back: hi"
     assert injections[0].priority == "interrupt"
 
 
@@ -97,7 +97,7 @@ def test_silent_results_only_hit_task_table(tmp_path):
 def test_workspace_snapshot_fanout_is_capped(tmp_path):
     """An agent touching a whole tree must not flood the conversation with
     one ambient injection per file: cap + one summary line."""
-    from echo_app.services import artifacts
+    from echoecho_app.services import artifacts
 
     names = ["f%02d.md" % i for i in range(8)]
     for n in names:
@@ -135,10 +135,10 @@ def test_task_feed_event_carries_artifacts_touched(tmp_path, monkeypatch):
 
 def test_summaries_single_task(tmp_path):
     orch, _ = run_orch(load_all(),
-                       [TaskRequest(kind="sleep.echo", instructions="x",
+                       [TaskRequest(kind="sleep.echoecho", instructions="x",
                                     args={"sleep": 0.01})], tmp_path)
     # a finished task shows its spoken handle + say-line (PR 11)
-    assert orch.summaries("t1") == ["t1 sleep.echo 'x': done — Echoing back: x"]
+    assert orch.summaries("t1") == ["t1 sleep.echoecho 'x': done — echoechoing back: x"]
 
 
 def test_ranker_heuristics():

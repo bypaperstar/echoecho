@@ -1,8 +1,8 @@
 # Generic demo — ALL THREE v0 demo asks through ONE kind: agent.run
 # (doc co-writing, recipe+grocery, learning). Keyless: run with
-# ECHO_FAKE_AGENT_SCRIPT=fixtures/agent/demo_generic so FakeAgentCLI replays
+# ECHOECHO_FAKE_AGENT_SCRIPT=fixtures/agent/demo_generic so FakeAgentCLI replays
 # the five recorded agent runs in order.
-echo echo
+echoecho
 let's write a one-page proposal for a team offsite in lisbon
 !dispatch_task {"kind": "agent.run", "instructions": "write a one-page proposal for a team offsite in Lisbon at offsite/proposal.md"}
 ~wait 0.5

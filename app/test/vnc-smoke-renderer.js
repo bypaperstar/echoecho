@@ -13,7 +13,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   await window.smoke.phase('connected'); // main settles + captures "before"
 
-  const marker = 'ECHO VNC E2E MARKER';
+  const marker = 'ECHOECHO VNC E2E MARKER';
   for (const ch of marker) {
     window.echoVnc.sendKey(ch.charCodeAt(0)); // ASCII keysyms == char codes
     await sleep(40);

@@ -1,4 +1,4 @@
-// Echo's Mac item: a live, interactive noVNC canvas over the main process's
+// echoecho's Mac item: a live, interactive noVNC canvas over the main process's
 // WS<->TCP bridge (vnc-proxy.js, reached via window.orb.vncConnect).
 //
 // Contract: window.echoVnc = { open(container, opts) -> Promise, close(),
@@ -92,14 +92,14 @@
       buildDom(container);
       const gen = openGen; // superseded once a later teardown() bumps past us
       viewOnly = !!opts.viewOnly;
-      setStatus("Waking Echo's Mac…");
+      setStatus("Waking echoecho's Mac…");
 
       let info;
       try {
         info = await window.orb.vncConnect();
       } catch (err) {
         if (gen !== openGen) throw new Error('superseded');
-        setStatus("Echo's Mac is asleep");
+        setStatus("echoecho's Mac is asleep");
         throw err;
       }
       if (gen !== openGen) throw new Error('superseded');
@@ -108,7 +108,7 @@
         RFB = await loadRFB();
       } catch (err) {
         if (gen !== openGen) throw new Error('superseded');
-        setStatus("Echo's Mac view failed to load");
+        setStatus("echoecho's Mac view failed to load");
         throw err;
       }
       if (gen !== openGen) throw new Error('superseded');
@@ -126,7 +126,7 @@
         // the scale fresh as the scene resizes the container.
         rfb.scaleViewport = true;
         rfb.clipViewport = false;
-        // Interactive by default: it's Echo's Mac, blast radius is the VM.
+        // Interactive by default: it's echoecho's Mac, blast radius is the VM.
         rfb.viewOnly = viewOnly;
 
         rfb.addEventListener('connect', () => {
@@ -146,7 +146,7 @@
           }
           connected = false;
           const clean = !!(e.detail && e.detail.clean);
-          setStatus(clean ? "Echo's Mac closed the session" : "Echo's Mac is asleep");
+          setStatus(clean ? "echoecho's Mac closed the session" : "echoecho's Mac is asleep");
           if (!settled) {
             settled = true;
             reject(new Error('VNC disconnected before the session came up'));
@@ -155,12 +155,12 @@
         rfb.addEventListener('credentialsrequired', () => {
           if (gen !== openGen) return;
           if (info.password) rfb.sendCredentials({ password: info.password });
-          else setStatus("Echo's Mac wants a password Echo doesn't have");
+          else setStatus("echoecho's Mac wants a password echoecho doesn't have");
         });
         rfb.addEventListener('securityfailure', (e) => {
           if (gen !== openGen) return;
           const reason = e.detail && e.detail.reason;
-          setStatus("Echo's Mac refused the connection" + (reason ? `: ${reason}` : ''));
+          setStatus("echoecho's Mac refused the connection" + (reason ? `: ${reason}` : ''));
         });
       });
     },

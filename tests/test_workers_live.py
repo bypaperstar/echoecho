@@ -2,7 +2,7 @@
 via pytest.ini addopts; run with: python3 -m pytest -m network tests/test_workers_live.py"""
 import pytest
 
-from echo_app.services import web
+from echoecho_app.services import web
 
 pytestmark = pytest.mark.network
 

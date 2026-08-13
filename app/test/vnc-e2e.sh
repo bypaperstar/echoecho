@@ -7,7 +7,7 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PASS='echo-e2e'          # VncAuth only uses the first 8 chars: keep it 8
+PASS='echoecho'          # VncAuth only uses the first 8 chars: keep it 8
 RFB_DISPLAY=':7'
 RFB_PORT=5907
 PASSFILE="$(mktemp /tmp/vnc-e2e-pass.XXXXXX)"
@@ -47,13 +47,13 @@ done
 
 # focused xterm on the VNC desktop; tty echo will render the typed marker
 DISPLAY="$RFB_DISPLAY" xterm -geometry 120x30+50+50 \
-  -e bash -c 'echo ECHO PORTAL E2E; exec sleep 3600' &
+  -e bash -c 'echo ECHOECHO PORTAL E2E; exec sleep 3600' &
 pids+=($!)
 sleep 1
 
 # electron headless (xvfb-run picks a free X display for the app window)
 smoke_once() {
-  ECHO_VNC_URL="vnc://:${PASS}@127.0.0.1:${RFB_PORT}" \
+  ECHOECHO_VNC_URL="vnc://:${PASS}@127.0.0.1:${RFB_PORT}" \
     xvfb-run -a "$APP_DIR/node_modules/.bin/electron" --no-sandbox \
     "$APP_DIR/test/vnc-smoke-main.js"
 }

@@ -1,6 +1,6 @@
 // Control panel logic: poll ctl:status, render the three status rows, and
 // map the buttons onto ctl:action names. Deliberately dumb — all real work
-// happens in main / echoctl.sh.
+// happens in main / echoechoctl.sh.
 'use strict';
 
 (() => {
@@ -73,7 +73,7 @@
     setDot('d-orb', true);
     $('v-orb').textContent = st.orbVisible ? 'revealed' : 'in the menu bar';
     $('b-daemon').textContent = daemonUp ? 'Stop daemon' : 'Start daemon';
-    $('b-vm').textContent = vmUp ? "Echo's Mac is awake" : "Wake Echo's Mac";
+    $('b-vm').textContent = vmUp ? "echoecho's Mac is awake" : "Wake echoecho's Mac";
     $('b-vm').disabled = vmUp;
     $('login').checked = !!st.loginItem;
   }
@@ -95,15 +95,15 @@
   $('b-summon').addEventListener('click', () => act('summon'));
   $('b-daemon').addEventListener('click', () =>
     act(daemonUp ? 'daemon-stop' : 'daemon-start', daemonUp ? 'stopping daemon…' : 'starting daemon…'));
-  $('b-vm').addEventListener('click', () => act('vm-boot', "waking Echo's Mac (clone + boot takes ~a minute)…"));
+  $('b-vm').addEventListener('click', () => act('vm-boot', "waking echoecho's Mac (clone + boot takes ~a minute)…"));
   $('b-reset').addEventListener('click', () => {
-    if (confirm("Reset Echo's Mac? The VM is deleted and re-cloned fresh from the golden image. Workspace files on your Mac are untouched.")) {
+    if (confirm("Reset echoecho's Mac? The VM is deleted and re-cloned fresh from the golden image. Workspace files on your Mac are untouched.")) {
       act('vm-reset', 'resetting: delete + fresh clone + boot…');
     }
   });
   $('b-update').addEventListener('click', () => {
-    if (confirm('Update Echo? Pulls the latest main, reinstalls, rebuilds the app, restarts the daemon, and relaunches. Echo will quit now and reopen when done.')) {
-      $('note').textContent = 'updating — Echo will reopen itself…';
+    if (confirm('Update echoecho? Pulls the latest main, reinstalls, rebuilds the app, restarts the daemon, and relaunches. echoecho will quit now and reopen when done.')) {
+      $('note').textContent = 'updating — echoecho will reopen itself…';
       window.ctl.action('update');
     }
   });

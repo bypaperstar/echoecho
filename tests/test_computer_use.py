@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from echo_app import config
-from echo_app.bus import Task, TaskRequest
-from echo_app.orchestrator.core import Orchestrator, WorkerContext
-from echo_app.services import gui as gui_mod
-from echo_app.services.gui import FakeGuiDriver, SshGuiDriver, _keystroke_script
-from echo_app.workers.base import kinds_enum, load_all
+from echoecho_app import config
+from echoecho_app.bus import Task, TaskRequest
+from echoecho_app.orchestrator.core import Orchestrator, WorkerContext
+from echoecho_app.services import gui as gui_mod
+from echoecho_app.services.gui import FakeGuiDriver, SshGuiDriver, _keystroke_script
+from echoecho_app.workers.base import kinds_enum, load_all
 
 
 def run_task(args, tmp_path, extra):
@@ -52,7 +52,7 @@ def test_keystroke_script_variants():
 
 def test_type_text_applescript_escaping():
     # SshGuiDriver builds an osascript literal; quotes/backslashes must escape
-    from echo_app.services.gui import _as_str
+    from echoecho_app.services.gui import _as_str
     assert _as_str('say "hi"\\') == '"say \\"hi\\"\\\\"'
 
 
@@ -60,7 +60,7 @@ def test_type_text_applescript_escaping():
 
 STEPS = [
     {"action": "launch", "app": "TextEdit"},
-    {"action": "type", "text": "Notes from Echo"},
+    {"action": "type", "text": "Notes from echoecho"},
     {"action": "key", "combo": "cmd+s"},
     {"action": "key", "combo": "return"},
     {"action": "screenshot", "name": "saved"},
@@ -76,7 +76,7 @@ def test_computer_use_runs_steps_and_captures_shots(tmp_path):
     kinds = [a[0] for a in fake.actions if a[0] != "screenshot"]
     assert kinds == ["launch", "type", "key", "key"]
     assert ("launch", "TextEdit") in fake.actions
-    assert ("type", "Notes from Echo") in fake.actions
+    assert ("type", "Notes from echoecho") in fake.actions
     # a screenshot after every step -> 5 shots, all real PNG files in workspace
     shots = task.result.data["screens"]
     assert len(shots) == 5
@@ -103,7 +103,7 @@ def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
 
 
 def test_computer_use_no_driver_is_clean_error(tmp_path, monkeypatch):
-    monkeypatch.delenv("ECHO_SANDBOX", raising=False)  # no vm -> no driver
+    monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)  # no vm -> no driver
     task, _ = run_task({"steps": STEPS}, tmp_path, extra={})
     assert task.result.data["error"] == "no gui driver"
     assert "VM" in task.result.say
@@ -122,35 +122,35 @@ def test_computer_use_rejects_empty_and_oversized(tmp_path):
 
 def test_for_ctx_uses_injected_then_vm(tmp_path, monkeypatch):
     ctx = WorkerContext(workspace=tmp_path)
-    monkeypatch.delenv("ECHO_SANDBOX", raising=False)
+    monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)
     assert gui_mod.for_ctx(ctx) is None            # no vm, no driver
     fake = FakeGuiDriver(tmp_path)
     ctx.extra["gui_driver"] = fake
     assert gui_mod.for_ctx(ctx) is fake            # injected wins
 
-    from echo_app.services.vm import LumeVM
+    from echoecho_app.services.vm import LumeVM
     ctx2 = WorkerContext(workspace=tmp_path)
-    ctx2.extra["sandbox"] = LumeVM(vm_name="echo-vm")
+    ctx2.extra["sandbox"] = LumeVM(vm_name="echoecho-vm")
     drv = gui_mod.for_ctx(ctx2)
     assert isinstance(drv, SshGuiDriver)           # a LumeVM -> ssh driver
 
 
 def test_computer_use_advertised_only_with_vm(monkeypatch):
     load_all()
-    monkeypatch.delenv("ECHO_SANDBOX", raising=False)
-    monkeypatch.delenv("ECHO_PLUGINS", raising=False)
+    monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)
+    monkeypatch.delenv("ECHOECHO_PLUGINS", raising=False)
     assert "computer.use" not in kinds_enum()      # hidden by default
     assert "computer.use" in load_all()            # but dispatchable
-    monkeypatch.setenv("ECHO_SANDBOX", "vm")
+    monkeypatch.setenv("ECHOECHO_SANDBOX", "vm")
     assert "computer.use" in kinds_enum()          # advertised with the vm tier
 
 
 # -- SshGuiDriver builds the right guest commands (no VM needed) ---------------
 
 def test_ssh_gui_driver_builds_guest_commands(monkeypatch, tmp_path):
-    from echo_app.services.vm import LumeVM
-    monkeypatch.setenv("ECHO_VM_GUEST_WORKSPACE", "/Volumes/Shared/ws")
-    vm = LumeVM(vm_name="echo-vm")
+    from echoecho_app.services.vm import LumeVM
+    monkeypatch.setenv("ECHOECHO_VM_GUEST_WORKSPACE", "/Volumes/Shared/ws")
+    vm = LumeVM(vm_name="echoecho-vm")
     vm.ip = "10.0.0.9"
     driver = SshGuiDriver(vm, tmp_path)
     sent = {}
@@ -175,10 +175,10 @@ def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
     """A keystroke blocked on an Accessibility TCC prompt never returns; the
     driver must bound it and raise, not hang the whole task. Simulated with a
     real sleeping subprocess in place of ssh."""
-    from echo_app.services import gui as gm
-    from echo_app.services.vm import LumeVM
+    from echoecho_app.services import gui as gm
+    from echoecho_app.services.vm import LumeVM
     monkeypatch.setattr(gm, "GUI_TIMEOUT", 0.3)
-    vm = LumeVM(vm_name="echo-vm")
+    vm = LumeVM(vm_name="echoecho-vm")
     vm.ip = "10.0.0.9"
     vm.ssh_argv = lambda remote: ["sh", "-c", "sleep 30"]  # "hung" guest cmd
     driver = SshGuiDriver(vm, tmp_path)

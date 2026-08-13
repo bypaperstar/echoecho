@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld('orb', {
   onEvents: (cb) => ipcRenderer.on('viewer:events', (_e, evts) => cb(evts)),
   onViewerStatus: (cb) => ipcRenderer.on('viewer:status', (_e, s) => cb(s)),
 
-  // Echo's Mac (main marshals failure as { error } to keep its console
+  // echoecho's Mac (main marshals failure as { error } to keep its console
   // clean; the renderer contract stays a rejected promise)
   vncConnect: () => ipcRenderer.invoke('vnc:connect').then((info) => {
     if (info && info.error) throw new Error(info.error);

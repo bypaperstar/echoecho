@@ -1,6 +1,6 @@
 # Demo 1 — live document co-writing (scripted headless run; see
 # scripts/demo_cheatsheet.md for the spoken version).
-echo echo
+echoecho
 let's write a one-page proposal for a team offsite in lisbon
 !dispatch_task {"kind": "doc.edit", "instructions": "start a one-page proposal for a team offsite in Lisbon", "args": {"file": "doc.md"}}
 ~wait 0.5

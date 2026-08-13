@@ -1,4 +1,4 @@
-// WebSocket <-> raw TCP bridge for Echo's Mac (main process only).
+// WebSocket <-> raw TCP bridge for echoecho's Mac (main process only).
 //
 // The renderer can't open raw TCP and the VM's VNC server speaks plain RFB,
 // so main runs a tiny ws server on 127.0.0.1 (ephemeral port) and pipes each
@@ -49,7 +49,7 @@ function parseVncUrl(raw) {
 }
 
 // Fail fast while the VM is off, so vnc:connect rejects and the renderer can
-// say "Echo's Mac is asleep" instead of a WS that opens then dies.
+// say "echoecho's Mac is asleep" instead of a WS that opens then dies.
 function probe(target) {
   return new Promise((resolve, reject) => {
     const sock = net.connect({ host: target.host, port: target.port });

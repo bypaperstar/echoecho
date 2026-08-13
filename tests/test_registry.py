@@ -1,15 +1,15 @@
 """PR 10 registry: workers declare themselves once (kind, description, arg
 schema); the dispatch_task enum + system-prompt kinds line are generated from
 REGISTRY; discovery is a package scan (core strict, plugins lenient); plugin
-kinds stay dispatchable but are advertised only with ECHO_PLUGINS=1."""
+kinds stay dispatchable but are advertised only with ECHOECHO_PLUGINS=1."""
 import sys
 import textwrap
 
 import pytest
 
-from echo_app import config
-from echo_app.conversation.textmode import build_tools
-from echo_app.workers import base
+from echoecho_app import config
+from echoecho_app.conversation.textmode import build_tools
+from echoecho_app.workers import base
 
 PLUGIN_KINDS = {"doc.edit", "recipe.search", "grocery.merge",
                 "learn.outline", "learn.deep_dive"}
@@ -17,10 +17,10 @@ PLUGIN_KINDS = {"doc.edit", "recipe.search", "grocery.merge",
 
 @pytest.fixture(autouse=True)
 def clean_registry(monkeypatch):
-    """Restore the fully-loaded REGISTRY and hide ECHO_PLUGINS. Snapshot
+    """Restore the fully-loaded REGISTRY and hide ECHOECHO_PLUGINS. Snapshot
     AFTER load_all(): module imports are cached, so a bare restore of a
     partial registry would leave later tests' load_all() a no-op."""
-    monkeypatch.delenv("ECHO_PLUGINS", raising=False)
+    monkeypatch.delenv("ECHOECHO_PLUGINS", raising=False)
     base.load_all()
     before = dict(base.REGISTRY)
     yield
@@ -31,7 +31,7 @@ def clean_registry(monkeypatch):
 def test_load_all_discovers_workers_and_plugins():
     registry = base.load_all()
     assert "agent.run" in registry            # core generic worker
-    assert "sleep.echo" in registry           # core smoke worker
+    assert "sleep.echoecho" in registry           # core smoke worker
     assert PLUGIN_KINDS <= set(registry)      # demo kinds live on as plugins
     assert "code" not in registry             # code_stub superseded by agent.run
 
@@ -50,12 +50,12 @@ def test_worker_metadata_attached_by_register():
 
 def test_advertised_hides_plugins_and_unadvertised_kinds(monkeypatch):
     base.load_all()
-    assert base.kinds_enum() == ["agent.run"]  # sleep.echo + plugins hidden
-    monkeypatch.setenv("ECHO_PLUGINS", "1")
+    assert base.kinds_enum() == ["agent.run"]  # sleep.echoecho + plugins hidden
+    monkeypatch.setenv("ECHOECHO_PLUGINS", "1")
     kinds = base.kinds_enum()
     assert "agent.run" in kinds and PLUGIN_KINDS <= set(kinds)
     assert kinds == sorted(kinds)
-    assert "sleep.echo" not in kinds           # advertise=False is absolute
+    assert "sleep.echoecho" not in kinds           # advertise=False is absolute
 
 
 def test_prompt_and_tools_are_generated_from_registry(monkeypatch):
@@ -68,7 +68,7 @@ def test_prompt_and_tools_are_generated_from_registry(monkeypatch):
     assert fragment in dispatch["description"]
     assert dispatch["parameters"]["properties"]["kind"]["enum"] == ["agent.run"]
     # flipping the plugin flag changes every generated surface at once
-    monkeypatch.setenv("ECHO_PLUGINS", "1")
+    monkeypatch.setenv("ECHOECHO_PLUGINS", "1")
     assert "recipe.search" in config.system_prompt()
     enum = build_tools()[0]["parameters"]["properties"]["kind"]["enum"]
     assert "grocery.merge" in enum
@@ -96,7 +96,7 @@ def test_broken_plugin_is_skipped_not_fatal(tmp_path, monkeypatch, capsys):
     (pkg / "__init__.py").write_text("")
     (pkg / "broken.py").write_text("raise RuntimeError('bad plugin')\n")
     (pkg / "good.py").write_text(textwrap.dedent("""
-        from echo_app.workers.base import register
+        from echoecho_app.workers.base import register
 
         @register("t.good", description="works")
         async def run(task, ctx):
@@ -112,6 +112,6 @@ def test_broken_plugin_is_skipped_not_fatal(tmp_path, monkeypatch, capsys):
 
 
 def test_missing_plugins_package_is_fine():
-    base._scan("echo_app.no_such_package", required=False)  # no raise
+    base._scan("echoecho_app.no_such_package", required=False)  # no raise
     with pytest.raises(ImportError):
-        base._scan("echo_app.no_such_package", required=True)
+        base._scan("echoecho_app.no_such_package", required=True)

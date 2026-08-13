@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from echo_app.bus import Injection
-from echo_app.conversation.session import ACTIVE, ENDING, IDLE, Session
+from echoecho_app.bus import Injection
+from echoecho_app.conversation.session import ACTIVE, ENDING, IDLE, Session
 
 
 class FakeClock:
@@ -160,24 +160,24 @@ def test_injection_gate_closed_outside_active():
 
 
 def test_silence_timeout_env_default(monkeypatch):
-    monkeypatch.setenv("ECHO_SILENCE_TIMEOUT", "5")
+    monkeypatch.setenv("ECHOECHO_SILENCE_TIMEOUT", "5")
     s = Session()
     assert s.silence_timeout == 5.0
-    monkeypatch.delenv("ECHO_SILENCE_TIMEOUT")
+    monkeypatch.delenv("ECHOECHO_SILENCE_TIMEOUT")
     assert Session().silence_timeout == 600.0
 
 
 def test_scripted_smoke_session(tmp_path):
     """Full 3-layer round trip: scripted agent -> orchestrator -> demo worker."""
-    import echo
-    from echo_app.conversation.scripted import ScriptedAgent
-    from echo_app.orchestrator.core import Orchestrator
-    from echo_app.workers.base import load_all
+    import echoecho
+    from echoecho_app.conversation.scripted import ScriptedAgent
+    from echoecho_app.orchestrator.core import Orchestrator
+    from echoecho_app.workers.base import load_all
 
     script = tmp_path / "script.txt"
     script.write_text(
-        "echo echo\n"
-        '!dispatch_task {"kind": "sleep.echo", "instructions": "ping", '
+        "echoecho\n"
+        '!dispatch_task {"kind": "sleep.echoecho", "instructions": "ping", '
         '"args": {"sleep": 0.05}}\n'
         "~wait 0.15\n"
         "that's it\n")
@@ -185,7 +185,7 @@ def test_scripted_smoke_session(tmp_path):
     agent = ScriptedAgent(str(script), out=lines.append)
     orch = Orchestrator(registry=load_all(), on_injection=agent.inject,
                         log_path=tmp_path / "tasks.jsonl", workspace=tmp_path)
-    agent.on_tool(echo.make_tool_handler(orch, agent))
+    agent.on_tool(echoecho.make_tool_handler(orch, agent))
 
     async def go():
         loop_task = asyncio.ensure_future(orch.run())
@@ -196,7 +196,7 @@ def test_scripted_smoke_session(tmp_path):
     text = "\n".join(lines)
     assert "[state] IDLE -> ACTIVE (wake)" in text
     assert '"task_id": "t1", "status": "queued"' in text.replace("'", '"')
-    assert "[task t1 done] Echoing back: ping" in text
+    assert "[task t1 done] echoechoing back: ping" in text
     assert "[state] ACTIVE -> ENDING (end_phrase)" in text
     assert "[state] ENDING -> IDLE (end_phrase)" in text
     # ack printed before the result injection (voice loop never blocks)
@@ -204,10 +204,10 @@ def test_scripted_smoke_session(tmp_path):
 
 
 def test_env_flags_case_insensitive(monkeypatch):
-    from echo_app import config
-    monkeypatch.setenv("ECHO_TEXT", "False")
-    assert config.echo_text() is False
-    monkeypatch.setenv("ECHO_TEXT", "NO")
-    assert config.echo_text() is False
-    monkeypatch.setenv("ECHO_TEXT", "1")
-    assert config.echo_text() is True
+    from echoecho_app import config
+    monkeypatch.setenv("ECHOECHO_TEXT", "False")
+    assert config.echoecho_text() is False
+    monkeypatch.setenv("ECHOECHO_TEXT", "NO")
+    assert config.echoecho_text() is False
+    monkeypatch.setenv("ECHOECHO_TEXT", "1")
+    assert config.echoecho_text() is True
