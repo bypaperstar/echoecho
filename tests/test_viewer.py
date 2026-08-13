@@ -60,12 +60,77 @@ def test_doc_returns_file_content(server, tmp_path):
 def test_doc_refuses_non_workspace_paths(server, tmp_path):
     (tmp_path / "doc.md").write_text("safe")
     for bad in ("../../etc/passwd", "..%2F..%2Fetc%2Fpasswd", ".tasks.jsonl",
-                ".hidden.md", "absent.md", "", "doc.txt"):
+                ".hidden.md", "absent.md", "", "sub%2F.hidden.md",
+                "nested%2F..%2F..%2Fdoc.md", "%2Fetc%2Fpasswd"):
         status, _ = get(server, "/doc?f=" + bad)
         assert status == 404, bad
-    # basename'd traversal that lands on a real file is still fine to serve
-    status, body = get(server, "/doc?f=nested%2Fdoc.md")
-    assert (status, body) == (200, b"safe")
+
+
+def test_doc_serves_nested_files_and_types(server, tmp_path):
+    """v2: any visible workspace file, at any depth, typed for the browser —
+    but never as text/html (workspace files must not run as pages)."""
+    artifacts.write_atomic(tmp_path, "offsite/proposal.md", "# P\n")
+    artifacts.write_atomic(tmp_path, "offsite/budget.csv", "item,eur\n")
+    artifacts.write_atomic(tmp_path, "img/logo.png", b"\x89PNG\r\n\x1a\n\x00")
+    artifacts.write_atomic(tmp_path, "page.html", "<script>x</script>")
+    host, port = server.httpd.server_address[:2]
+
+    def get_with_type(path):
+        conn = http.client.HTTPConnection(host, port, timeout=2)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, resp.getheader("Content-Type"), resp.read()
+        finally:
+            conn.close()
+
+    status, ctype, body = get_with_type("/doc?f=offsite%2Fproposal.md")
+    assert (status, body) == (200, b"# P\n")
+    assert ctype.startswith("text/markdown")
+    status, ctype, _ = get_with_type("/doc?f=offsite%2Fbudget.csv")
+    assert status == 200 and ctype.startswith("text/plain")
+    status, ctype, body = get_with_type("/doc?f=img%2Flogo.png")
+    assert status == 200 and ctype == "image/png" and body.startswith(b"\x89PNG")
+    # undecodable bytes fall back to a download, decodable html stays inert
+    status, ctype, _ = get_with_type("/doc?f=page.html")
+    assert status == 200 and ctype.startswith("text/plain")
+
+
+def test_doc_responses_carry_script_free_csp(server, tmp_path):
+    """SVG is a script-capable document type the viewer serves natively:
+    the CSP must keep agent-written SVGs inert when opened directly."""
+    artifacts.write_atomic(tmp_path, "evil.svg",
+                           '<svg xmlns="http://www.w3.org/2000/svg">'
+                           '<script>fetch("/pwn")</script></svg>')
+    host, port = server.httpd.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    try:
+        conn.request("GET", "/doc?f=evil.svg")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert resp.getheader("Content-Type") == "image/svg+xml"
+        csp = resp.getheader("Content-Security-Policy")
+        assert csp and "default-src 'none'" in csp
+        assert resp.getheader("X-Content-Type-Options") == "nosniff"
+        resp.read()
+    finally:
+        conn.close()
+
+
+def test_doc_refuses_workspace_escaping_symlink(server, tmp_path):
+    outside = tmp_path.parent / ("secret-%s.txt" % tmp_path.name)
+    outside.write_text("secret")
+    (tmp_path / "innocent.md").symlink_to(outside)
+    status, _ = get(server, "/doc?f=innocent.md")
+    assert status == 404
+
+
+def test_index_sanitizes_markdown_before_innerhtml(server):
+    status, body = get(server, "/")
+    assert status == 200
+    html = body.decode("utf-8")
+    assert "DOMPurify.sanitize" in html  # agent markdown never hits innerHTML raw
+    assert "purify.min.js" in html
 
 
 def test_sse_reload_within_500ms_of_touch(server, tmp_path):
@@ -142,11 +207,12 @@ def test_sse_fires_within_500ms_of_an_emit(server, tmp_path, monkeypatch):
         conn.close()
 
 
-def test_reload_files_list_stays_md_only(server, tmp_path, monkeypatch):
-    """The events feed drives SSE but must never leak into 'files' — the
-    tabs JS (and this contract) depend on it holding only *.md docs."""
+def test_reload_files_list_is_visible_files_only(server, tmp_path, monkeypatch):
+    """The files list now holds EVERY visible workspace file (any type, any
+    depth) — but the events feed and dotfiles must never leak into it."""
     monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)
     artifacts.write_atomic(tmp_path, "doc.md", "# hi")
+    artifacts.write_atomic(tmp_path, "offsite/budget.csv", "item,eur\n")
     events.emit("user_text", text="not a doc")
     host, port = server.httpd.server_address[:2]
     conn = http.client.HTTPConnection(host, port, timeout=2)
@@ -155,7 +221,25 @@ def test_reload_files_list_stays_md_only(server, tmp_path, monkeypatch):
     try:
         ev = read_sse_event(resp, time.monotonic() + 1.0)
         data = json.loads(ev.split("data: ", 1)[1])
-        assert [f["name"] for f in data["files"]] == ["doc.md"]
+        assert [f["name"] for f in data["files"]] == ["doc.md",
+                                                      "offsite/budget.csv"]
+    finally:
+        conn.close()
+
+
+def test_sse_fires_on_subdir_and_non_md_changes(server, tmp_path):
+    artifacts.write_atomic(tmp_path, "doc.md", "v1")
+    host, port = server.httpd.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    conn.request("GET", "/events")
+    resp = conn.getresponse()
+    try:
+        read_sse_event(resp, time.monotonic() + 1.0)  # initial snapshot
+        artifacts.write_atomic(tmp_path, "offsite/budget.csv", "item,eur\n")
+        t0 = time.monotonic()
+        ev = read_sse_event(resp, t0 + 0.5)
+        assert time.monotonic() - t0 < 0.5
+        assert "offsite/budget.csv" in ev
     finally:
         conn.close()
 

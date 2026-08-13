@@ -143,6 +143,7 @@ def make_tool_handler(orch, port):
     """Contract A: the 4 tools, backed by the orchestrator + workspace."""
     from echo_app import config
     from echo_app.bus import TaskRequest
+    from echo_app.services import artifacts
 
     def handle(name, args):
         if name == "dispatch_task":
@@ -153,10 +154,17 @@ def make_tool_handler(orch, port):
         if name == "check_tasks":
             return {"tasks": orch.summaries(args.get("task_id"))}
         if name == "read_artifact":
-            path = config.WORKSPACE_DIR / os.path.basename(args.get("name", ""))
+            raw = args.get("name", "")
+            try:
+                path = artifacts.resolve(config.WORKSPACE_DIR, raw)
+            except ValueError as exc:
+                return {"name": raw, "error": str(exc)}
             if not path.is_file():
-                return {"name": args.get("name"), "error": "no such artifact"}
-            return {"name": path.name, "content": path.read_text()}
+                return {"name": raw, "error": "no such artifact"}
+            try:
+                return {"name": raw, "content": path.read_text(encoding="utf-8")}
+            except (UnicodeDecodeError, OSError):
+                return {"name": raw, "error": "not a text file"}
         if name == "end_session":
             port.session.begin_ending("end_session_tool")
             return {"status": "ending"}
@@ -182,6 +190,7 @@ async def amain(args):
 
     orch = Orchestrator(registry=load_all(), on_injection=port.inject,
                         fake_llm=config.echo_fake_llm())
+    orch.rehydrate()  # v2: the task table survives restarts
     port.on_tool(make_tool_handler(orch, port))
 
     viewer = None
@@ -270,6 +279,10 @@ async def voice_main(args):
                       wake_resume=lambda: None)
     from echo_app.workers.base import load_all
     orch = Orchestrator(registry=load_all(), fake_llm=config.echo_fake_llm())
+    # v2: rehydrate the task table; tasks the last run left mid-flight are
+    # marked interrupted and announced on the first wake (collect_missed)
+    # like any other result finished while Echo was away
+    orch.rehydrate()
 
     viewer = None
     if not args.no_viewer:
@@ -284,7 +297,9 @@ async def voice_main(args):
     orch_loop = asyncio.ensure_future(orch.run())
 
     model = config.realtime_model()
-    idle_since = None  # set on session end: tasks finishing after it are "missed"
+    # collect_missed() draws from a persisted announcement watermark, so tasks
+    # that finished while Echo was asleep — including across a restart — are
+    # each announced on the next wake exactly once
     print("[wake] listening for '%s' (or press enter to wake)"
           % config.WAKE_PHRASE)
     try:
@@ -306,7 +321,7 @@ async def voice_main(args):
             events.emit("wake", via=wake_via)
             # -- WAKE -> ACTIVE session --------------------------------------
             since = None  # "[since last session]" for tasks done while IDLE
-            missed = orch.results_since(idle_since) if idle_since else []
+            missed = orch.collect_missed()  # marks them announced (persisted)
             if missed:
                 since = ("[since last session] Background tasks finished "
                          "while Echo was asleep: " + " | ".join(missed) +
@@ -320,6 +335,7 @@ async def voice_main(args):
                 since_last_session=since)
             audio.tracker = client.tracker
             orch.on_injection = client.inject
+            orch.live = True  # results injected now reach the live session
             client.on_tool(make_tool_handler(orch, client))
             # wake() resets this too, but only once the transport is up: a
             # crash before that must not stamp LAST session's reason into
@@ -341,7 +357,7 @@ async def voice_main(args):
                 if session.state == "ENDING":
                     session.finish()
             finally:
-                idle_since = time.time()
+                orch.live = False  # back to IDLE: results wait for next wake
                 orch.on_injection = lambda inj: None  # results wait in table
                 audio.muted_capture = True  # transport is closing: stop sends
                 audio.play_chime("end")

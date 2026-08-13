@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Assertions for scripts/demo_check.sh (the merge gate).
 
-Usage: python3 scripts/check_demo.py <1|2|3>
-Checks the final workspace/*.md contents and the .tasks.jsonl event sequence
-left behind by the corresponding fixtures/demoN.txt scripted run.
+Usage: python3 scripts/check_demo.py <1|2|3|generic>
+Checks the final workspace contents and the .tasks.jsonl event sequence left
+behind by the corresponding fixtures/demoN.txt scripted run ("generic" =
+fixtures/demo_generic.txt, the same asks through one agent.run kind).
 """
 import json
 import sys
@@ -23,7 +24,10 @@ def events():
 
 
 def seq(evs):
-    return [(e["event"], e["kind"]) for e in evs]
+    # lifecycle only: the log also carries 'session' checkpoint rows (PR 11)
+    # that have no kind
+    return [(e["event"], e["kind"]) for e in evs
+            if e["event"] in ("queued", "done", "error")]
 
 
 def check(cond, msg):
@@ -89,9 +93,45 @@ def check_demo3():
     check(evs[3]["artifacts_touched"] == ["notes.md"], "deep dive touched notes.md")
 
 
+def check_demo_generic():
+    """PLAN-GENERIC gate: all three v0 demo asks pass headless as agent.run
+    fixtures — subdirectories, a non-markdown artifact, one generic kind."""
+    doc = read("offsite/proposal.md")
+    check("# Team Offsite in Lisbon" in doc, "offsite/proposal.md has the title")
+    check("## Goals" in doc and "- Team bonding" in doc
+          and "- Planning next year" in doc and "- Shipping the demo" in doc,
+          "proposal Goals section has the three goals")
+    check("## Agenda" in doc and "Day 1" in doc and "Day 2" in doc,
+          "proposal has a two-day Agenda section")
+    check(read("offsite/budget.csv").startswith("item,"),
+          "agent produced a non-markdown artifact (offsite/budget.csv)")
+    g = read("grocery.md")
+    check("## Meals" in g and "Pad Thai" in g and "- fish sauce" in g,
+          "grocery.md merged by the generic agent, Meals section kept")
+    check("recipetineats.com" in g, "grocery.md links the found recipe")
+    n = read("notes.md")
+    check(n.startswith("# Notes: fermentation in food"), "notes.md has the title")
+    check("## Sourdough" in n and "**Analogy:**" in n
+          and "**Check yourself:**" in n,
+          "deep dive filled Sourdough with an analogy + quiz question")
+    check("## Sources" in n and "wikipedia.org" in n,
+          "notes.md ends with linked sources")
+    evs = events()
+    check(seq(evs) == [("queued", "agent.run"), ("done", "agent.run")] * 5,
+          ".tasks.jsonl: five queued->done agent.run round trips, in order")
+    done = [e for e in evs if e["event"] == "done"]
+    check(done[1]["artifacts_touched"] == ["offsite/budget.csv",
+                                           "offsite/proposal.md"],
+          "touched-file detection saw both second-run artifacts")
+    for e in done:
+        check(e["priority"] == "interrupt",
+              "%s spoke up (interrupt)" % e["task_id"])
+
+
 def main():
     n = sys.argv[1]
-    {"1": check_demo1, "2": check_demo2, "3": check_demo3}[n]()
+    {"1": check_demo1, "2": check_demo2, "3": check_demo3,
+     "generic": check_demo_generic}[n]()
     print("demo %s assertions all passed" % n)
 
 

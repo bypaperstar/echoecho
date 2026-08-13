@@ -41,6 +41,102 @@ def echo_fake_llm():
     return _flag("ECHO_FAKE_LLM")
 
 
+def echo_plugins():
+    """ECHO_PLUGINS=1 advertises the demo-era plugin kinds (echo_app.plugins)
+    to the voice model; they stay dispatchable either way."""
+    return _flag("ECHO_PLUGINS")
+
+
+def fake_agent_script():
+    """ECHO_FAKE_AGENT_SCRIPT: JSONL fixture (or directory of them, consumed
+    in sorted order) replayed by FakeAgentCLI so agent.run runs keyless."""
+    return os.environ.get("ECHO_FAKE_AGENT_SCRIPT", "").strip()
+
+
+def progress_interval():
+    """Min seconds between ambient progress injections per task — long agent
+    runs stay felt without Echo narrating every step."""
+    return float(os.environ.get("ECHO_PROGRESS_INTERVAL", "30"))
+
+
+def agent_timeout():
+    """Wall-clock budget (seconds) for one agent.run task; on breach the
+    subprocess is killed and the task errors (resumable by task_id)."""
+    return float(os.environ.get("ECHO_AGENT_TIMEOUT", "900"))
+
+
+# -- sandbox ladder tier 2: Echo's own macOS VM (services/vm.py, PR 12) -------
+
+def sandbox_tier():
+    """ECHO_SANDBOX: default tier for agent.run — "shell" (host subprocess,
+    cwd=workspace) or "vm" (Echo's own macOS guest via lume). Per-task
+    override: dispatch args {"sandbox": "vm"}."""
+    return os.environ.get("ECHO_SANDBOX", "shell").strip() or "shell"
+
+
+def vm_name():
+    return os.environ.get("ECHO_VM_NAME", "echo-vm").strip()
+
+
+def vm_golden():
+    """The golden image VM (agent CLI + ssh key preinstalled) that scratch
+    VMs are APFS-cloned from; built once by scripts/vm_golden.sh."""
+    return os.environ.get("ECHO_VM_GOLDEN", "echo-golden").strip()
+
+
+def vm_guest_user():
+    return os.environ.get("ECHO_VM_USER", "lume").strip()
+
+
+def vm_ssh_key():
+    return os.environ.get("ECHO_VM_SSH_KEY", "~/.ssh/echo_vm_ed25519").strip()
+
+
+def vm_guest_workspace():
+    """Where the shared workspace appears inside the guest (virtiofs mount;
+    macOS guests surface shared dirs under /Volumes/My Shared Files)."""
+    return os.environ.get("ECHO_VM_GUEST_WORKSPACE",
+                          "/Volumes/My Shared Files/workspace").strip()
+
+
+def vm_boot_timeout():
+    return float(os.environ.get("ECHO_VM_BOOT_TIMEOUT", "180"))
+
+
+def user_docs():
+    """ECHO_USER_DOCS: host folders the user shares with Echo, separated by
+    the OS path separator (':' on macOS) — e.g. ~/Documents:~/Desktop. They
+    mount READ-ONLY into the VM; the ONLY path back to them is the outbox +
+    spoken approval (workers/outbox.py). Returns absolute, user-expanded
+    paths — split ONLY on os.pathsep so a folder name with a space ("My
+    Documents", iCloud "Mobile Documents/…") survives intact."""
+    raw = os.environ.get("ECHO_USER_DOCS", "")
+    out = []
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(os.path.abspath(Path(part).expanduser()))
+        if p not in out:
+            out.append(p)
+    return out
+
+
+OUTBOX_DIR = "outbox"  # workspace/outbox/<task>/ : staged user-doc changes
+OUTBOX_BACKUP_SUFFIX = ".echo-bak"  # <original>.echo-bak-<ts> on apply
+
+
+def vm_pass_env():
+    """Env var NAMES forwarded into the guest over SSH (SendEnv; the golden
+    image's sshd AcceptEnv-lists them) so the in-guest agent can reach its
+    model API. Least privilege: default to ANTHROPIC_API_KEY only — the
+    golden image ships the `claude` CLI, which needs nothing else, and the
+    vm tier runs untrusted code, so Echo's other keys (the OpenAI voice key)
+    stay out of the guest. A codex guest sets ECHO_VM_PASS_ENV explicitly."""
+    raw = os.environ.get("ECHO_VM_PASS_ENV", "ANTHROPIC_API_KEY")
+    return [n for n in raw.replace(",", " ").split() if n]
+
+
 def realtime_model():
     return os.environ.get("ECHO_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 
@@ -83,21 +179,43 @@ def echo_record(mode="voice"):
 WAKE_PHRASE = "echo echo"
 
 # Tuned for voice (PR 6): short utterances, verbal acks before dispatch, weave
-# results in naturally, never read URLs aloud.
-SYSTEM_PROMPT = (
+# results in naturally, never read URLs aloud. The kinds line is generated
+# from the worker registry (PR 10) — workers declare themselves once.
+SYSTEM_PROMPT_TEMPLATE = (
     "You are Echo, a hands-free voice assistant. Keep every reply short and "
     "speakable — one or two sentences; never lecture. "
-    "Use dispatch_task for anything slow; kinds: doc.edit, recipe.search, "
-    "grocery.merge, learn.outline, learn.deep_dive. dispatch_task returns "
-    "instantly: give a brief verbal ack BEFORE dispatching (\"On it — "
-    "searching now\") and keep the conversation going; never wait for a task. "
+    "Use dispatch_task for anything slow; kinds: %(kinds)s. dispatch_task "
+    "returns instantly: give a brief verbal ack BEFORE dispatching (\"On it — "
+    "starting now\") and keep the conversation going; never wait for a task. "
     "System lines like '[task tN done] ...' report finished background work: "
     "weave them into the conversation naturally, as if you just remembered — "
     "don't read them verbatim. Never read URLs, file paths, or raw markdown "
     "syntax aloud; say where a thing came from instead (\"a 30-minute pad "
     "thai on RecipeTin Eats\"). Use read_artifact to quote workspace files, "
-    "summarizing just the part the user asked for. Call end_session when the "
-    "user says something like \"that's it\".")
+    "summarizing just the part the user asked for. Long tasks report "
+    "progress as '[task tN progress]' lines and check_tasks shows elapsed "
+    "time — refer to tasks by what they are (\"the lease review\"), never by "
+    "raw ids. To steer, extend, or answer a question from an earlier agent "
+    "task, dispatch the same kind again with args.task_id set to that "
+    "task's id.%(approval)s Call end_session when the user says something "
+    "like \"that's it\".")
+
+# Appended only when the user has shared folders (workers/outbox.py): agents
+# can't touch real documents directly, so surface the approval step.
+APPROVAL_GUIDANCE = (
+    " Your documents are never changed directly: an agent stages proposed "
+    "edits and you approve them out loud. When a task reports staged changes, "
+    "tell the user what changed and that they can say \"apply it\" to save "
+    "over the originals; on \"apply it\", dispatch outbox.apply.")
+
+
+def system_prompt():
+    """The tuned prompt with the kinds line generated from the registry —
+    call after load_all() so every advertised worker has registered."""
+    from echo_app.workers import base  # lazy: workers import config
+    approval = APPROVAL_GUIDANCE if user_docs() else ""
+    return SYSTEM_PROMPT_TEMPLATE % {
+        "kinds": base.kinds_fragment() or "(none)", "approval": approval}
 
 # Matches "that's it", "thats it", "that's all", "that is all", "that is it".
 END_PHRASE_RE = re.compile(r"\bthat(?:'s|s| is) (?:it|all)\b", re.IGNORECASE)

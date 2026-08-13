@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "session_id": "fake-offsite-2"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Adding goals and a two-day agenda, then roughing out the budget."}]}}
+{"type": "_write", "file": "offsite/proposal.md", "content": "# Team Offsite in Lisbon\n\nA one-page proposal for a 3-day team offsite in Lisbon this fall.\n\n## Goals\n- Team bonding\n- Planning next year\n- Shipping the demo\n\n## Agenda\n- Day 1: arrivals, walking tour, welcome dinner in Alfama\n- Day 2: planning workshops, demo hack, sunset sail\n\n## Why Lisbon\n- Direct flights for everyone\n- Great food, walkable, sunny in October\n"}
+{"type": "_write", "file": "offsite/budget.csv", "content": "item,per_person_eur\nflights,220\nhotel_2_nights,240\nvenue_day_rate,45\nmeals,120\nsunset_sail,60\n"}
+{"type": "result", "subtype": "success", "is_error": false, "session_id": "fake-offsite-2", "result": "Added three goals and a two-day agenda to the proposal, and roughed a per-person budget in offsite/budget.csv."}

@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Echo blob — technique 1: 2D canvas metaballs</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%;
+               background:transparent; overflow:hidden; }
+  canvas { display:block; position:fixed; inset:0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+/*
+ * Echo's blob — standalone prototype, TECHNIQUE 1 (pure 2D canvas metaballs).
+ *
+ * Field:   ~13 core/ring metaballs + 3 pseudopod chains + emission neck balls,
+ *          splatted with a finite-support Wyvill falloff (1 - d^2/R^2)^2 into a
+ *          1/3-resolution Float32 field buffer (400x267 at 1200x800).
+ * Shade:   one pass over the field: finite-difference gradient -> approx signed
+ *          distance -> screen-uniform antialiased silhouette; fake hemisphere
+ *          normal -> fresnel rim, cool inner glow, tight key specular, and a
+ *          slow-orbiting secondary sheen (the "ferrofluid" glint). Deep black
+ *          body, faint cool aura outside the silhouette so it reads on black.
+ * Upscale: putImageData -> drawImage x3 with smoothing = the final blob layer.
+ * Card:    white 180x120 rounded rect drawn UNDER the blob layer, so the liquid
+ *          neck/bulge genuinely grips and swallows it (no draw-order pops).
+ *
+ * Reveal:  t in [0,1] over the first 2.5 s. Balls ride a cubic bezier from the
+ *          menu-bar anchor (top-right) to center with per-ball stagger, radii
+ *          growing en route, plus a clinging drip tail at the anchor -> a
+ *          poured, genie-ish stream.
+ * Emit:    every 6 s starting at t=5.4 s: bulge -> card unfurls out on a liquid
+ *          neck -> neck snaps back -> card floats -> blob reaches out and
+ *          swallows it back.
+ *
+ * Determinism: all randomness from mulberry32(seed 0x5EED) at init; motion is
+ * pure functions of the animation clock. ?t=SECONDS advances the clock on load.
+ * ?hud=1 overlays the clock (debug only).
+ */
+(() => {
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: true });
+
+// ---------------------------------------------------------------- utilities
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const sstep = (a, b, x) => { x = clamp((x - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); };
+const lerp  = (a, b, p) => a + (b - a) * p;
+const easeOutCubic = p => 1 - (1 - p) * (1 - p) * (1 - p);
+const easeInCubic  = p => p * p * p;
+const easeOutBack  = p => { const k = 1.35; const q = p - 1; return 1 + q * q * ((k + 1) * q + k); };
+
+// seeded PRNG -> reproducible screenshots
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(0x5EED);
+
+// 3-octave seeded sine mix; incommensurate freqs => no visible loop
+function makeWobble(amp, fLo, fHi) {
+  const o = [];
+  for (let k = 0; k < 3; k++) {
+    o.push({ a: amp * (0.62 - 0.16 * k) * (0.7 + 0.6 * rng()),
+             w: (fLo + (fHi - fLo) * rng()) * (1 + 0.6180339 * k),
+             p: rng() * Math.PI * 2 });
+  }
+  return t => o[0].a * Math.sin(o[0].w * t + o[0].p)
+            + o[1].a * Math.sin(o[1].w * t + o[1].p)
+            + o[2].a * Math.sin(o[2].w * t + o[2].p);
+}
+
+// ------------------------------------------------------------------- layout
+const FSCALE = 3;                       // field buffer is 1/3 resolution
+let W, H, R, CX, CY, AX, AY;            // viewport, blob radius, center, anchor
+let FW, FH, field, img, fcan, fctx;
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W; canvas.height = H;
+  R  = Math.min(W, H) * 0.155;          // blob scale unit (~124px at 1200x800)
+  CX = W * 0.5; CY = H * 0.52;          // resting center
+  AX = W - 36;  AY = 26;                // menu-bar anchor (top-right)
+  FW = Math.ceil(W / FSCALE); FH = Math.ceil(H / FSCALE);
+  field = new Float32Array(FW * FH);
+  fcan = document.createElement('canvas'); fcan.width = FW; fcan.height = FH;
+  fctx = fcan.getContext('2d');
+  img = fctx.createImageData(FW, FH);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ------------------------------------------------------------ ball ensemble
+// offsets/radii in units of R; converted to px each frame
+const coreBalls = [
+  { ox: 0,     oy: 0,    r: 0.62 },
+  { ox: 0.16,  oy: 0.10, r: 0.52 },
+];
+const ringBalls = [];
+const N_RING = 8;
+for (let i = 0; i < N_RING; i++) {
+  ringBalls.push({
+    ang0: i / N_RING * Math.PI * 2 + (rng() - 0.5) * 0.5,
+    spin: (rng() < 0.5 ? -1 : 1) * (0.035 + 0.05 * rng()),
+    dist: 0.46 + 0.14 * rng(),
+    r:    0.34 + 0.12 * rng(),
+    wAng:  makeWobble(0.16, 0.10, 0.35),
+    wDist: makeWobble(0.07, 0.12, 0.40),
+    wR:    makeWobble(0.05, 0.15, 0.45),
+  });
+}
+// pseudopods: occasional tendrils reaching out and retracting
+const pods = [];
+for (let i = 0; i < 3; i++) {
+  pods.push({
+    ang0:   rng() * Math.PI * 2,
+    wAng:   makeWobble(0.45, 0.04, 0.12),
+    period: 6.5 + 4.5 * rng(),
+    phase:  rng() * Math.PI * 2,
+    len:    0.45 + 0.3 * rng(),
+  });
+}
+// per-ball reveal stagger (core+ring+pods share indexed staggers)
+const staggers = [];
+for (let i = 0; i < 24; i++) staggers.push(rng() * 0.45);
+const breatheA = makeWobble(0.033, 1.1, 1.7);
+const breatheB = makeWobble(0.018, 2.4, 3.4);
+const wanderX = [], wanderY = [];
+for (let i = 0; i < 16; i++) { wanderX.push(makeWobble(0.08, 0.15, 0.5)); wanderY.push(makeWobble(0.08, 0.15, 0.5)); }
+
+// --------------------------------------------------------------- the reveal
+const REVEAL_DUR = 2.5;
+// cubic bezier: anchor -> falls -> sweeps into center
+function bez(u) {
+  const p1x = AX - 50,          p1y = AY + H * 0.24;
+  const p2x = CX + R * 1.7,     p2y = CY - R * 2.0;
+  const v = 1 - u;
+  const a = v * v * v, b = 3 * v * v * u, c = 3 * v * u * u, d = u * u * u;
+  return [a * AX + b * p1x + c * p2x + d * CX,
+          a * AY + b * p1y + c * p2y + d * CY];
+}
+// map a resting ball (abs px) through the reveal; g = global reveal progress
+function revealXform(px, py, pr, st, g) {
+  if (g >= 1) return [px, py, pr];
+  const u  = clamp((g * 1.5 - st) / 1.05, 0, 1);
+  const ue = easeOutCubic(u);
+  const [bx, by] = bez(ue);
+  const grow = 0.3 + 0.7 * ue;
+  const gs   = 0.35 + 0.65 * sstep(0, 0.75, g);
+  return [bx + (px - CX) * ue, by + (py - CY) * ue, pr * grow * gs];
+}
+
+// ---------------------------------------------------------------- emit loop
+const EMIT_START = 5.4, EMIT_PERIOD = 6.0;
+const CARD_W = 180, CARD_H = 120;
+const EDIR = [Math.cos(-0.44), Math.sin(-0.44)];       // up-right
+const EPERP = [-EDIR[1], EDIR[0]];
+// returns { balls:[{x,y,r}], card:{x,y,scX,scY,rot,alpha} | null }
+function emission(t) {
+  if (t < EMIT_START) return { balls: [], card: null };
+  const ct = (t - EMIT_START) % EMIT_PERIOD;
+  const balls = [];
+  let card = null;
+  const ex = CX + EDIR[0] * R * 0.9, ey = CY + EDIR[1] * R * 0.9;  // surface pt
+  const travel = R * 2.3;
+  const cardAt = p => [CX + EDIR[0] * (R * 0.55 + p * travel),
+                       CY + EDIR[1] * (R * 0.55 + p * travel)];
+
+  if (ct < 0.9) {                                       // bulge toward spawn
+    const p = sstep(0, 1, ct / 0.9);
+    balls.push({ x: CX + EDIR[0] * R * (0.5 + 0.35 * p),
+                 y: CY + EDIR[1] * R * (0.5 + 0.35 * p),
+                 r: R * 0.42 * p });
+  } else if (ct < 2.1) {                                // card unfurls on neck
+    const p = easeOutCubic((ct - 0.9) / 1.2);
+    const [cx, cy] = cardAt(p);
+    card = { x: cx, y: cy,
+             scX: 0.12 + 0.88 * easeOutBack(p),
+             scY: 0.12 + 0.88 * easeOutBack(clamp(p * 1.3 - 0.3, 0, 1)),
+             rot: (1 - p) * -0.16, alpha: sstep(0.02, 0.22, p) };
+    balls.push({ x: ex, y: ey, r: R * (0.42 - 0.12 * p) });
+    const nk = 6;
+    for (let j = 1; j <= nk; j++) {
+      const s = j / nk;
+      const sag = Math.sin(s * Math.PI) * 7 * Math.sin(t * 2.6 + s * 7);
+      balls.push({
+        x: lerp(ex, cx - EDIR[0] * 30, s) + EPERP[0] * sag,
+        y: lerp(ey, cy - EDIR[1] * 30, s) + EPERP[1] * sag,
+        r: lerp(R * 0.26, R * 0.07, s) * sstep(0, 0.15, p) });
+    }
+  } else if (ct < 2.7) {                                // neck snaps back
+    const sp = easeOutBack((ct - 2.1) / 0.6);
+    const [cx, cy] = cardAt(1);
+    card = { x: cx, y: cy, scX: 1, scY: 1, rot: 0, alpha: 1 };
+    const die = 1 - (ct - 2.1) / 0.6;
+    balls.push({ x: ex, y: ey, r: R * 0.30 * (0.6 + 0.4 * die) });
+    const nk = 5;
+    for (let j = 1; j <= nk; j++) {
+      const s = (j / nk) * (1 - sp);                    // retracting endpoints
+      balls.push({ x: lerp(ex, cx - EDIR[0] * 30, s),
+                   y: lerp(ey, cy - EDIR[1] * 30, s),
+                   r: lerp(R * 0.22, R * 0.05, j / nk) * die * die });
+    }
+  } else if (ct < 4.2) {                                // card floats free
+    const [cx, cy] = cardAt(1);
+    card = { x: cx + Math.sin(t * 1.31) * 5, y: cy + Math.sin(t * 1.73 + 1) * 5,
+             scX: 1, scY: 1, rot: Math.sin(t * 0.9) * 0.012, alpha: 1 };
+  } else if (ct < 5.4) {                                // blob swallows it back
+    const q = easeInCubic((ct - 4.2) / 1.2);
+    const p = 1 - q;
+    const [cx, cy] = cardAt(p);
+    const sc = 1 - 0.75 * q;
+    card = { x: cx + Math.sin(t * 1.31) * 5 * p, y: cy + Math.sin(t * 1.73 + 1) * 5 * p,
+             scX: sc, scY: sc, rot: 0, alpha: 1 };
+    const tongue = Math.sin(Math.PI * clamp(q * 1.25, 0, 1));
+    balls.push({ x: CX + EDIR[0] * R * (0.55 + 0.4 * tongue),
+                 y: CY + EDIR[1] * R * (0.55 + 0.4 * tongue),
+                 r: R * 0.38 * tongue });
+  }                                                     // else: rest
+  return { balls, card };
+}
+
+// --------------------------------------------------- assemble balls (px, t)
+function collectBalls(t) {
+  const g = clamp(t / REVEAL_DUR, 0, 1);
+  const breathe = 1 + breatheA(t) + breatheB(t);
+  const podGate = sstep(2.5, 3.6, t);
+  const out = [];
+  let bi = 0;
+
+  for (const b of coreBalls) {
+    const px = CX + (b.ox + wanderX[bi](t)) * R;
+    const py = CY + (b.oy + wanderY[bi](t)) * R;
+    out.push(revealXform(px, py, b.r * R * breathe, staggers[bi], g));
+    bi++;
+  }
+  for (const b of ringBalls) {
+    const ang = b.ang0 + b.spin * t + b.wAng(t);
+    const d = (b.dist + b.wDist(t)) * R * breathe;
+    const px = CX + Math.cos(ang) * d, py = CY + Math.sin(ang) * d;
+    out.push(revealXform(px, py, (b.r + b.wR(t)) * R * breathe, staggers[bi], g));
+    bi++;
+  }
+  for (const p of pods) {
+    const s = Math.sin(Math.PI * 2 * t / p.period + p.phase);
+    const e = sstep(0.55, 0.95, s) * podGate;
+    const ang = p.ang0 + p.wAng(t);
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    const segN = 7, gate = sstep(0.04, 0.25, e);
+    for (let k = 0; k < segN; k++) {
+      const fr = k / (segN - 1);
+      const d = 0.55 + e * p.len * fr;
+      const r = lerp(0.24, 0.10, fr) * (k === 0 ? 1 : gate) * (1 - 0.2 * e * fr);
+      if (r < 0.01) continue;
+      out.push(revealXform(CX + ca * d * R, CY + sa * d * R, r * R, staggers[bi], g));
+    }
+    bi++;
+  }
+  // pouring stream: connect the trailing drip to the head mass along the bezier
+  if (g < 1) {
+    const uTail = easeOutCubic(clamp((g * 1.5 - 0.45) / 1.05, 0, 1));
+    const uHead = easeOutCubic(clamp((g * 1.5) / 1.05, 0, 1)) * 0.92;
+    const thin = 1 - sstep(0.72, 0.98, g);
+    if (thin > 0.02 && uHead > uTail) {
+      const nSt = 8;
+      for (let k = 0; k < nSt; k++) {
+        const fr = k / (nSt - 1);
+        const [bx, by] = bez(lerp(uTail, uHead, fr));
+        out.push([bx, by, R * (0.075 + 0.105 * fr) * thin]);
+      }
+    }
+    // clinging drip at the anchor that detaches late
+    const fade = 1 - sstep(0.5, 0.88, g);
+    if (fade > 0.01) {
+      const ss = [0.0, 0.05, 0.12];
+      for (let j = 0; j < 3; j++) {
+        const [bx, by] = bez(ss[j] * (1 + g));
+        out.push([bx, by, R * 0.16 * (1 - j * 0.28) * fade]);
+      }
+    }
+  }
+  const em = emission(t);
+  for (const b of em.balls) out.push([b.x, b.y, b.r]);
+  return { balls: out, card: em.card };
+}
+
+// ----------------------------------------------------- field splat + shade
+// lights (precomputed, normalized)
+const LX = -0.4657, LY = -0.6985, LZ = 0.5433;          // key from top-left
+const HX = -0.2651, HY = -0.3976, HZ = 0.8784;          // its half-vector
+function renderBlob(t, balls) {
+  field.fill(0);
+  let x0 = FW, y0 = FH, x1 = 0, y1 = 0;
+  const K = 2.2;                                        // influence = K * r
+  for (const [bx, by, br] of balls) {
+    if (br <= 0.5) continue;
+    const cx = bx / FSCALE, cy = by / FSCALE, Ri = K * br / FSCALE;
+    const invR2 = 1 / (Ri * Ri);
+    const ax = Math.max(1, Math.floor(cx - Ri)), bxx = Math.min(FW - 2, Math.ceil(cx + Ri));
+    const ay = Math.max(1, Math.floor(cy - Ri)), byy = Math.min(FH - 2, Math.ceil(cy + Ri));
+    if (ax > bxx || ay > byy) continue;
+    if (ax < x0) x0 = ax; if (bxx > x1) x1 = bxx;
+    if (ay < y0) y0 = ay; if (byy > y1) y1 = byy;
+    for (let y = ay; y <= byy; y++) {
+      const dy = y - cy, dy2 = dy * dy;
+      let i = y * FW + ax;
+      for (let x = ax; x <= bxx; x++, i++) {
+        const dx = x - cx;
+        const q = (dx * dx + dy2) * invR2;
+        if (q < 1) { const u = 1 - q; field[i] += u * u * 1.5; }
+      }
+    }
+  }
+  const data = img.data;
+  data.fill(0);
+  if (x1 < x0) { fctx.putImageData(img, 0, 0); return; }
+  x0 = Math.max(1, x0 - 3); y0 = Math.max(1, y0 - 3);
+  x1 = Math.min(FW - 2, x1 + 3); y1 = Math.min(FH - 2, y1 + 3);
+
+  const HDEPTH = 0.55 * R / FSCALE;                     // hemisphere depth, px
+  // slow-orbiting secondary sheen light (half-vector, view = +z)
+  const a2 = t * 0.21;
+  let l2x = Math.cos(a2) * 0.52, l2y = Math.sin(a2) * 0.52, l2z = 0.75;
+  let h2x = l2x, h2y = l2y, h2z = l2z + 1;
+  const h2l = Math.sqrt(h2x * h2x + h2y * h2y + h2z * h2z);
+  h2x /= h2l; h2y /= h2l; h2z /= h2l;
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0, i = y * FW + x0; x <= x1; x++, i++) {
+      const f = field[i];
+      if (f < 0.22) continue;
+      const gx = (field[i + 1] - field[i - 1]) * 0.5;
+      const gy = (field[i + FW] - field[i - FW]) * 0.5;
+      const gl = Math.sqrt(gx * gx + gy * gy) + 1e-6;
+      const sd = (f - 1) / gl;                          // approx signed dist, px
+      if (sd < -3.2) continue;
+      const j = i * 4;
+      if (sd < -0.75) {                                 // outside: cool aura only
+        const aura = 1 + sd / 3.2;
+        const A = aura * aura * 0.10;
+        if (A < 0.006) continue;
+        data[j] = 10; data[j + 1] = 16; data[j + 2] = 30;
+        data[j + 3] = A * 255;
+        continue;
+      }
+      const edgeA = clamp(sd / 1.5 + 0.5, 0, 1);
+      const h  = clamp(sd / HDEPTH, 0, 1);
+      const nz = Math.sqrt(h * (2 - h));
+      const nxy = 1 - h;
+      const nx = -gx / gl * nxy, ny = -gy / gl * nxy;
+      let ndl = nx * LX + ny * LY + nz * LZ; if (ndl < 0) ndl = 0;
+      let ndh = nx * HX + ny * HY + nz * HZ; if (ndh < 0) ndh = 0;
+      let s2 = ndh * ndh, s4 = s2 * s2, s8 = s4 * s4, s16 = s8 * s8;
+      const spec = s16 * s16 * s16;                     // ndh^48
+      let n2 = nx * h2x + ny * h2y + nz * h2z; if (n2 < 0) n2 = 0;
+      let t2 = n2 * n2; t2 *= t2; t2 *= t2; t2 *= t2;   // n2^16
+      const sheen = t2 * 0.12;
+      const fres = 1 - nz, f2 = fres * fres;
+      const rim = f2 * (0.35 + 0.65 * fres);
+      const ig = nxy * nxy;
+      let r = 5 + ndl * 10 + ig * 12 + rim * 118 + spec * 215 + sheen * 90;
+      let g = 7 + ndl * 12 + ig * 20 + rim * 165 + spec * 232 + sheen * 105;
+      let b = 11 + ndl * 16 + ig * 38 + rim * 235 + spec * 255 + sheen * 130;
+      const A = edgeA + (1 - edgeA) * 0.06;             // blends into the aura
+      const w = edgeA / A, iw = (1 - w);
+      data[j]     = clamp(r * w + 10 * iw, 0, 255);
+      data[j + 1] = clamp(g * w + 16 * iw, 0, 255);
+      data[j + 2] = clamp(b * w + 30 * iw, 0, 255);
+      data[j + 3] = A * 255;
+    }
+  }
+  fctx.putImageData(img, 0, 0);
+}
+
+// ------------------------------------------------------------- card drawing
+function drawCard(c) {
+  ctx.save();
+  ctx.globalAlpha = c.alpha;
+  ctx.translate(c.x, c.y);
+  ctx.rotate(c.rot);
+  ctx.scale(Math.max(c.scX, 0.01), Math.max(c.scY, 0.01));
+  ctx.shadowColor = 'rgba(4, 10, 26, 0.35)';
+  ctx.shadowBlur = 22; ctx.shadowOffsetY = 7;
+  ctx.fillStyle = '#fcfdfe';
+  ctx.beginPath(); ctx.roundRect(-CARD_W / 2, -CARD_H / 2, CARD_W, CARD_H, 14); ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = 'rgba(20, 28, 44, 0.10)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(-CARD_W / 2 + 0.5, -CARD_H / 2 + 0.5, CARD_W - 1, CARD_H - 1, 13.5); ctx.stroke();
+  ctx.fillStyle = '#b6bdc9';
+  ctx.beginPath(); ctx.roundRect(-70, -44, 82, 11, 5.5); ctx.fill();
+  ctx.fillStyle = '#8fb0e6';
+  ctx.beginPath(); ctx.roundRect(22, -44, 48, 11, 5.5); ctx.fill();
+  ctx.fillStyle = '#e2e6ec';
+  for (const [ly, lw] of [[-20, 140], [-6, 140], [8, 122], [22, 86]]) {
+    ctx.beginPath(); ctx.roundRect(-70, ly, lw, 7, 3.5); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// -------------------------------------------------------------------- frame
+const qs = new URLSearchParams(location.search);
+const timeOffset = parseFloat(qs.get('t') || '0') || 0;
+const hud = qs.get('hud') === '1';
+let t0 = null;
+
+function draw(t) {
+  const { balls, card } = collectBalls(t);
+  renderBlob(t, balls);
+  ctx.clearRect(0, 0, W, H);
+  if (card) drawCard(card);                 // under the blob: liquid grips it
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(fcan, 0, 0, FW, FH, 0, 0, FW * FSCALE, FH * FSCALE);
+  if (hud) {
+    ctx.fillStyle = 'rgba(255,80,80,0.9)'; ctx.font = '16px monospace';
+    ctx.fillText('t = ' + t.toFixed(2) + 's', 12, 24);
+  }
+}
+
+if (qs.get('bench') === '1') {
+  // synchronous CPU benchmark: real per-frame draw cost across the timeline
+  for (let i = 0; i < 20; i++) draw(i * 0.13);              // warm-up
+  const n = 240, b0 = performance.now();
+  for (let i = 0; i < n; i++) draw(timeOffset + i / 60);
+  const ms = (performance.now() - b0) / n;
+  const el = document.createElement('pre');
+  el.textContent = 'bench: ' + ms.toFixed(3) + ' ms/frame (' + n + ' frames)';
+  document.body.appendChild(el);
+} else {
+  requestAnimationFrame(function frame(nowMs) {
+    if (t0 === null) t0 = nowMs;
+    draw((nowMs - t0) / 1000 + timeOffset);
+    requestAnimationFrame(frame);
+  });
+}
+
+})();
+</script>
+</body>
+</html>

@@ -13,7 +13,7 @@ fail=0
 run_demo() {
   local n="$1" script="$2" log="$LOGDIR/echo_demo$1.log"
   echo "== demo $n: $script =="
-  rm -f workspace/*.md workspace/.tasks.jsonl
+  rm -rf workspace/*.md workspace/*/ workspace/.tasks.jsonl
   if ECHO_FAKE_LLM=1 "$PY" echo.py --script "$script" >"$log" 2>&1 \
      && "$PY" scripts/check_demo.py "$n" >>"$log" 2>&1; then
     results+=("demo $n: PASS")
@@ -28,6 +28,9 @@ run_demo() {
 run_demo 1 fixtures/demo1.txt
 run_demo 2 fixtures/demo2.txt
 run_demo 3 fixtures/demo3.txt
+# the generic gate: same asks, ONE kind (agent.run), keyless agent replay
+ECHO_FAKE_AGENT_SCRIPT=fixtures/agent/demo_generic \
+  run_demo generic fixtures/demo_generic.txt
 
 echo "== full pytest suite =="
 if "$PY" -m pytest tests/ -q; then

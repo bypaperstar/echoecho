@@ -14,7 +14,10 @@ Current document (may be empty):
 Return ONLY the complete updated markdown document, no commentary, no code fences."""
 
 
-@register("doc.edit")
+@register("doc.edit",
+          description="LLM full-file rewrite of one workspace markdown doc",
+          arg_schema={"file": {"type": "string",
+                               "description": "workspace file, e.g. doc.md"}})
 async def run(task, ctx):
     name = task.request.args.get("file", "doc.md")
     instruction = task.request.instructions or "start a draft"

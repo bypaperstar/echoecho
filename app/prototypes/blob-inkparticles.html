@@ -1,0 +1,506 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Echo blob — ink particle ferrofluid</title>
+<!--
+  Echo blob prototype — TECHNIQUE: ferrofluid/ink particle system.
+
+  ~1100 particles advected by seeded curl noise around a central attractor.
+  Each frame the particles are splatted as soft quadratic kernels into a
+  low-resolution Float32 metaball field (0.4x the viewport). A second pass
+  thresholds that field into one gooey body and shades it per pixel:
+  deep-black interior, fresnel-style cool rim glow at the silhouette,
+  moving specular sheen from the field gradient (bump-map style).
+  The result is upscaled with bilinear smoothing onto the display canvas.
+  The white document card is drawn UNDER the blob layer so it visually
+  slides out of / back into the black body; a stream of dedicated particles
+  forms the liquid neck that carries it out and snaps back.
+
+  Query params:
+    ?t=SECONDS  advance the internal animation clock by SECONDS before the
+                first render (pre-simulated with the same fixed 1/60 steps,
+                so it exactly matches continuous playback)
+    &freeze=1   render exactly that instant and stop (screenshot mode)
+    &perf=1     overlay per-frame timing breakdown
+
+  Deterministic: seeded mulberry32 RNG + seeded value-noise permutation,
+  fixed-step physics (1/60 s), all animation driven off the internal clock.
+-->
+<style>
+  html,body{margin:0;padding:0;background:transparent;overflow:hidden;width:100%;height:100%}
+  #c{display:block;position:fixed;left:0;top:0}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+/* ============ deterministic RNG + value noise ============ */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const SEED=0xEC40;
+const rand=mulberry32(SEED);
+const PERM=new Uint8Array(512);
+{ const p=new Uint8Array(256);
+  for(let i=0;i<256;i++)p[i]=i;
+  for(let i=255;i>0;i--){const j=(rand()*(i+1))|0;const t=p[i];p[i]=p[j];p[j]=t;}
+  for(let i=0;i<512;i++)PERM[i]=p[i&255];
+}
+function fade(t){return t*t*(3-2*t);}
+function vnoise(x,y,z){ // seeded 3D value noise, ~[-1,1]
+  const xi=Math.floor(x),yi=Math.floor(y),zi=Math.floor(z);
+  const xf=x-xi,yf=y-yi,zf=z-zi;
+  const u=fade(xf),v=fade(yf),w=fade(zf);
+  const X=xi&255,Y=yi&255,Z=zi&255;
+  const pa=PERM[X]+Y,pb=PERM[X+1]+Y;
+  const paa=PERM[pa&255]+Z,pab=PERM[(pa+1)&255]+Z,pba=PERM[pb&255]+Z,pbb=PERM[(pb+1)&255]+Z;
+  const c000=PERM[paa&255],c001=PERM[(paa+1)&255],
+        c010=PERM[pab&255],c011=PERM[(pab+1)&255],
+        c100=PERM[pba&255],c101=PERM[(pba+1)&255],
+        c110=PERM[pbb&255],c111=PERM[(pbb+1)&255];
+  const x00=c000+(c100-c000)*u, x10=c010+(c110-c010)*u,
+        x01=c001+(c101-c001)*u, x11=c011+(c111-c011)*u;
+  const y0=x00+(x10-x00)*v, y1=x01+(x11-x01)*v;
+  return ((y0+(y1-y0)*w)/255)*2-1;
+}
+function hashI(i,k){let n=(i*374761393+k*668265263)|0;n=Math.imul(n^(n>>>13),1274126177);n=(n^(n>>>16))>>>0;return n/4294967296;}
+function clamp01(x){return x<0?0:(x>1?1:x);}
+function smooth(x){x=clamp01(x);return x*x*(3-2*x);}
+function easeOutCubic(x){x=clamp01(x);return 1-Math.pow(1-x,3);}
+function easeInCubic(x){x=clamp01(x);return x*x*x;}
+function easeInOut(x){x=clamp01(x);return x<0.5?2*x*x:1-Math.pow(-2*x+2,2)/2;}
+function backOut(x){x=clamp01(x);const c1=1.25,c3=c1+1;const t=x-1;return 1+c3*t*t*t+c1*t*t;}
+
+/* ============ layout / constants ============ */
+// Design floor 1200x800: headless Chrome's "new" mode steals ~143px of window
+// height for UI, which would shrink and shift the stage; the composition sits
+// well inside 1200x800, so render at least that and let the window clip.
+const VW=Math.max(1200,window.innerWidth||1200);
+const VH=Math.max(800,window.innerHeight||800);
+const S=Math.min(VW,VH)/800;              // global scale (1.0 at 1200x800)
+const CXc=VW*0.5, CYc=VH*0.53;            // blob rest center
+const R0=150*S;                           // blob nominal radius
+const ANCHOR={x:VW-64*S,y:30*S};          // menu-bar anchor (top-right)
+// reveal pour path (quadratic bezier anchor -> center, bowed down the right side)
+const RBx=CXc+(ANCHOR.x-CXc)*0.92, RBy=CYc-(CYc-ANCHOR.y)*0.28;
+// document card
+const CARDW=180*S, CARDH=120*S;
+const CARD_RX=CXc+305*S, CARD_RY=CYc-142*S;
+const spawnAng=Math.atan2(CARD_RY-CYc,CARD_RX-CXc);
+const spCos=Math.cos(spawnAng), spSin=Math.sin(spawnAng);
+const REVEAL_T=2.5;
+const EMIT_START=5.0, EMIT_PERIOD=6.0;
+
+/* ============ particles ============ */
+const N=1100;
+const px=new Float32Array(N),py=new Float32Array(N);
+const vx=new Float32Array(N),vy=new Float32Array(N);
+const homeX=new Float32Array(N),homeY=new Float32Array(N); // rest offsets (pre-distorted disc)
+const hrf=new Float32Array(N); // home radius as fraction of R0
+const stag=new Float32Array(N);          // reveal stagger
+const krad=new Float32Array(N),kw=new Float32Array(N); // splat kernel radius (field px) + weight
+const arrived=new Uint8Array(N);
+const isStream=new Uint8Array(N);
+const streamIdx=[];
+const FS=0.4;                            // field scale (field px per css px)
+for(let i=0;i<N;i++){
+  const st=(i%7)===3;
+  isStream[i]=st?1:0; if(st)streamIdx.push(i);
+  const a=rand()*Math.PI*2;
+  let r=Math.sqrt(rand());
+  // pre-distort home disc so arrival isn't a perfect circle
+  r*=1+0.13*vnoise(Math.cos(a)*1.7+9.2,Math.sin(a)*1.7+4.4,3.1);
+  homeX[i]=Math.cos(a)*r*R0*0.92;
+  homeY[i]=Math.sin(a)*r*R0*0.92;
+  hrf[i]=Math.min(0.97,Math.sqrt(homeX[i]*homeX[i]+homeY[i]*homeY[i])/R0);
+  stag[i]=rand();
+  krad[i]=(st?(16+5*rand()):(23+10*rand()))*S*FS;
+  kw[i]=st?(0.72+0.18*rand()):(0.34+0.20*rand());
+  px[i]=ANCHOR.x+(rand()*2-1)*6*S;
+  py[i]=ANCHOR.y+(rand()*2-1)*6*S;
+  vx[i]=0;vy[i]=0;
+}
+const streamQ=new Float32Array(streamIdx.length);
+const streamJ=new Float32Array(streamIdx.length);
+for(let j=0;j<streamIdx.length;j++){
+  streamQ[j]=(j+0.5)/streamIdx.length;
+  streamJ[j]=rand()*2-1;
+}
+
+/* ============ boundary radius: breathing + waves + pseudopods ============ */
+let bulgeAmp=0; // emit-cycle bulge toward the card, set per step
+function podEnv(fr){const u=(fr-0.10)/0.65;if(u<=0||u>=1)return 0;const s=Math.sin(Math.PI*u);return s*s;}
+// returns boundary radius at angle a, plus pod/bulge excess (for outward drive)
+const _bd={r:0,bump:0};
+function boundary(a,tc){
+  let R=R0*(1+0.045*Math.sin(tc*0.9+0.6)+0.028*Math.sin(tc*0.537+2.1));
+  R+=S*(6.5*Math.sin(3*a+tc*0.8+1.3)+4.6*Math.sin(5*a-tc*1.13+4.1)+3.1*Math.sin(7*a+tc*1.71+0.4));
+  let bump=0;
+  for(let k=0;k<2;k++){
+    const per=k?9.1:7.3, off=k?0.75:0.12;
+    const ph=tc/per+off, idx=Math.floor(ph), fr=ph-idx;
+    const env=podEnv(fr);
+    if(env>0){
+      const pa=hashI(idx,k)*Math.PI*2;
+      const amp=S*(24+44*hashI(idx,k+7));
+      const sig=0.42+0.25*hashI(idx,k+13);
+      let d=a-pa; d=Math.atan2(Math.sin(d),Math.cos(d));
+      bump+=amp*env*Math.exp(-d*d/(2*sig*sig));
+    }
+  }
+  if(bulgeAmp>0){
+    let d=a-spawnAng; d=Math.atan2(Math.sin(d),Math.cos(d));
+    bump+=bulgeAmp*Math.exp(-d*d/(2*0.55*0.55));
+  }
+  _bd.r=R+bump; _bd.bump=bump;
+  return _bd;
+}
+
+/* ============ curl noise ============ */
+const _cv={x:0,y:0};
+function curlAt(x,y,t){
+  const s1=1/110,s2=1/48,e=3;
+  function psi(X,Y){return vnoise(X*s1,Y*s1,t)+0.5*vnoise(X*s2+31.7,Y*s2+11.3,t*1.7+13.0);}
+  const n1=psi(x,y+e),n2=psi(x,y-e),n3=psi(x+e,y),n4=psi(x-e,y);
+  _cv.x=(n1-n2)/(2*e); _cv.y=-(n3-n4)/(2*e);
+  return _cv;
+}
+
+/* ============ card + neck state (pure functions of clock) ============ */
+function emitPhase(tc){ if(tc<EMIT_START)return -1; return ((tc-EMIT_START)%EMIT_PERIOD)/EMIT_PERIOD; }
+const PINx=CXc+spCos*R0*0.30, PINy=CYc+spSin*R0*0.30; // card spawn point (inside blob)
+function cardState(tc){
+  const p=emitPhase(tc);
+  if(p<0.10||p>=0.88)return null;
+  let x,y,s,rot,alpha=1,content;
+  if(p<0.42){ // emerging (front-loaded so it clears the bulge early)
+    const u=(p-0.10)/0.32;
+    const ue=easeOutCubic(u);
+    x=PINx+(CARD_RX-PINx)*ue; y=PINy+(CARD_RY-PINy)*ue;
+    s=0.22+0.78*easeInOut(u)+0.05*Math.sin(Math.PI*clamp01((u-0.55)/0.45)); // settle pop
+    rot=-0.16*(1-ue)+0.02*Math.sin(tc*2.1);
+    content=clamp01((u-0.15)*2.2);
+  }else if(p<0.62){ // at rest, floating
+    x=CARD_RX; y=CARD_RY+3*S*Math.sin(tc*1.6);
+    s=1; rot=0.015*Math.sin(tc*1.1); content=1;
+  }else{ // absorbed
+    const w=easeInCubic((p-0.62)/0.26);
+    x=CARD_RX+(PINx-CARD_RX)*w; y=CARD_RY+(PINy-CARD_RY)*w;
+    s=1-0.78*w; rot=0.10*w; content=1-w*1.6;
+    if(w>0.85)alpha=1-(w-0.85)/0.15;
+  }
+  return {x:x,y:y,s:s,rot:rot,alpha:alpha,content:clamp01(content),p:p};
+}
+function neckState(tc){
+  const p=emitPhase(tc);
+  if(p<0.055||p>=0.86)return null;
+  if(p<0.115)return {k:(p-0.055)/0.06,r:0};
+  if(p<0.42) return {k:1,r:0};
+  if(p<0.52) return {k:1-0.85*((p-0.42)/0.10),r:easeInOut((p-0.42)/0.10)}; // snap back
+  if(p<0.62) return null;
+  if(p<0.66) return {k:0.75*(p-0.62)/0.04,r:0};   // reform for swallow
+  if(p<0.82) return {k:0.75,r:0};
+  return {k:0.75*(1-(p-0.82)/0.04),r:0};
+}
+
+/* ============ physics ============ */
+let simT=0;
+const STEP=1/60;
+function stepPhysics(){
+  const tc=simT;
+  // emit bulge toward spawn direction (pre-emit swell + swallow)
+  const p=emitPhase(tc);
+  bulgeAmp=0;
+  if(p>=0&&p<0.45){ // swell toward the card during emergence
+    const env=p<0.08?smooth(p/0.08):(p<0.28?1:1-smooth((p-0.28)/0.17));
+    bulgeAmp=24*S*env;
+  }else if(p>=0.70&&p<0.88)bulgeAmp=26*S*Math.sin(Math.PI*clamp01((p-0.70)/0.18));
+
+  const rr=Math.min(1,tc/REVEAL_T);
+  const rE=1-Math.pow(1-rr,1.9);
+  const revealing=rr<1;
+
+  // neck targets
+  const ns=neckState(tc);
+  const cs=ns?cardState(tc):null;
+  let NSx=0,NSy=0,NEx=0,NEy=0,perpX=0,perpY=0;
+  if(ns){
+    NSx=CXc+spCos*R0*0.5; NSy=CYc+spSin*R0*0.5;
+    if(cs){ NEx=cs.x-spCos*CARDW*0.20*cs.s; NEy=cs.y-spSin*CARDW*0.20*cs.s; } // tucked under the card edge
+    else { NEx=NSx; NEy=NSy; }
+    perpX=-spSin; perpY=spCos;
+  }
+
+  for(let i=0;i<N;i++){
+    /* --- reveal: kinematic pour along bezier --- */
+    if(!arrived[i]){
+      const ar=clamp01((rE-0.62*stag[i])/0.38);
+      let gx,gy;
+      if(ar>=1){ // chase the exact home spot; hand off to the sim only when there
+        gx=CXc+homeX[i]; gy=CYc+homeY[i];
+      }else{
+        const pe=1-Math.pow(1-ar,1.7);
+        const u=1-pe;
+        const bx=u*u*ANCHOR.x+2*u*pe*RBx+pe*pe*CXc;
+        const by=u*u*ANCHOR.y+2*u*pe*RBy+pe*pe*CYc;
+        // path tangent -> perpendicular wiggle (coherent meander)
+        let tx=2*u*(RBx-ANCHOR.x)+2*pe*(CXc-RBx);
+        let ty=2*u*(RBy-ANCHOR.y)+2*pe*(CYc-RBy);
+        const tl=Math.sqrt(tx*tx+ty*ty)+1e-6; tx/=tl; ty/=tl;
+        const wig=vnoise(pe*3.1,tc*0.8,7.7)*26*(1-ar)*S;
+        const wf=0.10+0.90*Math.pow(ar,2.0);
+        gx=bx+homeX[i]*wf-ty*wig;
+        gy=by+homeY[i]*wf+tx*wig;
+      }
+      const kk=1-Math.exp(-STEP*16);
+      const nxp=px[i]+(gx-px[i])*kk, nyp=py[i]+(gy-py[i])*kk;
+      vx[i]=(nxp-px[i])/STEP*0.5; vy[i]=(nyp-py[i])/STEP*0.5;
+      px[i]=nxp; py[i]=nyp;
+      if(ar>=1){
+        const ddx=gx-px[i], ddy=gy-py[i];
+        if(ddx*ddx+ddy*ddy<81*S*S)arrived[i]=1;
+      }
+      continue;
+    }
+    /* neck stream particles are handled after this loop */
+    if(ns&&isStream[i])continue;
+
+    const dx=px[i]-CXc, dy=py[i]-CYc;
+    const dist=Math.sqrt(dx*dx+dy*dy)+1e-6;
+    const ux=dx/dist, uy=dy/dist;
+    const ang=Math.atan2(dy,dx);
+    const bd=boundary(ang,tc);
+    let fx=0,fy=0;
+    // radial spring to this particle's share of the (breathing, pod-bumped)
+    // boundary: keeps the body evenly filled and drives pods/bulges outward
+    const dr=hrf[i]*bd.r*(0.55+0.45*rE)-dist; // coalesce factor tightens the head mid-reveal
+    fx+=ux*dr*5.5; fy+=uy*dr*5.5;
+    if(dist>bd.r){const ex=dist-bd.r; fx-=ux*ex*30; fy-=uy*ex*30;} // hard skin
+    const cu=curlAt(px[i],py[i],tc*0.32);
+    const ca=3200*S*(0.35+0.65*Math.min(1,dist/(R0*0.85))); // calmer core
+    fx+=cu.x*ca; fy+=cu.y*ca;
+    const dmp=Math.exp(-2.4*STEP);
+    vx[i]=(vx[i]+fx*STEP)*dmp; vy[i]=(vy[i]+fy*STEP)*dmp;
+    px[i]+=vx[i]*STEP; py[i]+=vy[i]*STEP;
+  }
+
+  /* --- stream particles: liquid neck carrying the card --- */
+  if(ns){
+    for(let j=0;j<streamIdx.length;j++){
+      const i=streamIdx[j];
+      if(!arrived[i])continue;
+      const q=streamQ[j]*(1-ns.r);
+      const bx=NSx+(NEx-NSx)*q, by=NSy+(NEy-NSy)*q;
+      const width=S*((1-q)*18+7)+S*13*Math.exp(-Math.pow((q-1)*5,2));
+      const wob=vnoise(q*2.2+7.1,tc*0.9,17.3)*5*S;
+      const gx=bx+perpX*(streamJ[j]*width+wob);
+      const gy=by+perpY*(streamJ[j]*width+wob);
+      const kk=1-Math.exp(-STEP*13*ns.k);
+      const nxp=px[i]+(gx-px[i])*kk, nyp=py[i]+(gy-py[i])*kk;
+      vx[i]=(nxp-px[i])/STEP*0.6; vy[i]=(nyp-py[i])/STEP*0.6;
+      px[i]=nxp; py[i]=nyp;
+    }
+  }
+  simT+=STEP;
+}
+
+/* ============ field splat + threshold shading ============ */
+const fw=Math.round(VW*FS), fh=Math.round(VH*FS);
+const field=new Float32Array(fw*fh);
+const fieldB=new Float32Array(fw*fh);
+const cv=document.getElementById('c');
+cv.width=VW; cv.height=VH;
+const ctx=cv.getContext('2d',{alpha:true});
+const fcan=document.createElement('canvas'); fcan.width=fw; fcan.height=fh;
+const fctx=fcan.getContext('2d');
+const imgData=fctx.createImageData(fw,fh);
+
+const A0=0.82, A1=1.32, invA=1/(A1-A0);  // alpha (silhouette) ramp
+const RIM0=1.45, RIMW=1.55;              // rim band: fades out by f = RIM0+RIMW
+const GS=1.6;                            // gradient (bump) scale
+// light vectors (normalized): key light upper-left, half-vector with view
+const HX=-0.2306,HY=-0.3404,HZ=0.9116;
+const L2X=-0.376,L2Y=-0.538,L2Z=0.755;
+
+function splatKernel(fx,fy,kr,w){
+  const x0=Math.max(1,Math.floor(fx-kr)),x1=Math.min(fw-2,Math.ceil(fx+kr));
+  const y0=Math.max(1,Math.floor(fy-kr)),y1=Math.min(fh-2,Math.ceil(fy+kr));
+  if(x1<x0||y1<y0)return;
+  const inv=1/(kr*kr);
+  for(let y=y0;y<=y1;y++){
+    const dy=y-fy, dy2=dy*dy, row=y*fw;
+    for(let x=x0;x<=x1;x++){
+      const dx=x-fx;
+      const q=1-(dx*dx+dy2)*inv;
+      if(q>0)field[row+x]+=q*q*w;
+    }
+  }
+}
+function splat(){
+  field.fill(0);
+  const t=simT;
+  const nsK=(function(){const n=neckState(t);return n?n.k:0;})();
+  const wMul=1+0.30*nsK; // compensate body mass while the stream is out
+  for(let i=0;i<N;i++){
+    const kr=krad[i]*(1+0.08*Math.sin(t*0.9+i*0.61));
+    splatKernel(px[i]*FS,py[i]*FS,kr,kw[i]*(isStream[i]?1:wMul));
+  }
+  // interior core: one large soft kernel so the body never hollows out;
+  // fades in as the poured head coalesces, breathes with the boundary
+  const coal=smooth((t-1.2)/1.3);
+  if(coal>0){
+    const breath=1+0.045*Math.sin(t*0.9+0.6)+0.028*Math.sin(t*0.537+2.1);
+    splatKernel(CXc*FS,CYc*FS,R0*0.80*breath*FS,1.35*coal);
+  }
+}
+function blurField(){ // separable [1 2 1]/4, smooths particle granularity
+  for(let y=0;y<fh;y++){
+    const row=y*fw;
+    let prev=field[row];
+    fieldB[row]=prev; fieldB[row+fw-1]=field[row+fw-1];
+    for(let x=1;x<fw-1;x++){
+      const i=row+x, c=field[i];
+      fieldB[i]=(prev+2*c+field[i+1])*0.25;
+      prev=c;
+    }
+  }
+  for(let y=1;y<fh-1;y++){
+    const row=y*fw;
+    for(let x=0;x<fw;x++){
+      const i=row+x;
+      field[i]=(fieldB[i-fw]+2*fieldB[i]+fieldB[i+fw])*0.25;
+    }
+  }
+}
+function shade(){
+  const d=imgData.data;
+  d.fill(0);
+  for(let y=1;y<fh-1;y++){
+    let i=y*fw+1;
+    for(let x=1;x<fw-1;x++,i++){
+      const f=field[i];
+      if(f<A0)continue;
+      let a=(f-A0)*invA; if(a>1)a=1; a=a*a*(3-2*a);
+      const gx=field[i+1]-field[i-1], gy=field[i+fw]-field[i-fw];
+      let nx=-gx*GS,ny=-gy*GS;
+      const il=1/Math.sqrt(nx*nx+ny*ny+0.5184);
+      nx*=il;ny*=il;const nz=0.72*il;
+      // rim: value-band near the threshold only (edge of the silhouette),
+      // modulated by the surface tilt so it shimmers as the surface moves
+      let rim=1-(f-RIM0)/RIMW; rim=rim<0?0:(rim>1?1:rim); rim*=rim;
+      const fres=Math.pow(1-nz,1.4);
+      const rimI=rim*(0.35+0.65*fres);
+      let dh=nx*HX+ny*HY+nz*HZ; if(dh<0)dh=0;
+      const sp=Math.pow(dh,30);
+      let d2=nx*L2X+ny*L2Y+nz*L2Z; if(d2<0)d2=0;
+      const sh=d2*d2*d2*d2;
+      const o=i*4;
+      d[o]  =6 + 64*rimI +170*sp +12*sh;
+      d[o+1]=8 +102*rimI +195*sp +17*sh;
+      d[o+2]=13+158*rimI +225*sp +26*sh;
+      d[o+3]=a*255;
+    }
+  }
+  fctx.putImageData(imgData,0,0);
+}
+
+/* ============ document card ============ */
+function drawCard(cs){
+  const c=ctx;
+  c.save();
+  c.translate(cs.x,cs.y); c.rotate(cs.rot); c.scale(cs.s,cs.s);
+  c.globalAlpha=cs.alpha;
+  const w2=CARDW/2,h2=CARDH/2;
+  c.shadowColor='rgba(6,10,22,0.35)'; c.shadowBlur=28*S; c.shadowOffsetY=10*S;
+  c.fillStyle='#f8fafd';
+  c.beginPath(); c.roundRect(-w2,-h2,CARDW,CARDH,13*S); c.fill();
+  c.shadowColor='transparent'; c.shadowBlur=0; c.shadowOffsetY=0;
+  c.strokeStyle='rgba(175,190,212,0.85)'; c.lineWidth=Math.max(1,1*S);
+  c.stroke();
+  // folded corner
+  c.fillStyle='#e7edf5';
+  c.beginPath();
+  c.moveTo(w2-22*S,-h2); c.lineTo(w2,-h2+22*S); c.lineTo(w2,-h2+13*S);
+  c.quadraticCurveTo(w2,-h2,w2-13*S,-h2); c.closePath(); c.fill();
+  // content (staggered fade-in)
+  const ca=cs.alpha*cs.content;
+  if(ca>0.01){
+    c.globalAlpha=ca;
+    c.fillStyle='#6f8fe8';
+    c.beginPath(); c.arc(-w2+18*S,-h2+20*S,4.5*S,0,Math.PI*2); c.fill();
+    c.fillStyle='#3d4759';
+    c.beginPath(); c.roundRect(-w2+30*S,-h2+15.5*S,64*S,9*S,4.5*S); c.fill();
+    const lw=[0.72,0.60,0.68,0.42];
+    c.fillStyle='#ccd6e3';
+    for(let k=0;k<4;k++){
+      c.globalAlpha=ca*clamp01(cs.content*4-k*0.6);
+      c.beginPath();
+      c.roundRect(-w2+16*S,-h2+42*S+k*16*S,lw[k]*(CARDW-32*S),6*S,3*S);
+      c.fill();
+    }
+  }
+  c.restore();
+}
+
+/* ============ render ============ */
+let msPhys=0,msSplat=0,msShade=0,msFrames=0;
+function render(){
+  ctx.clearRect(0,0,VW,VH);
+  const cs=cardState(simT);
+  if(cs)drawCard(cs);          // card first: blob layer occludes -> emerges from body
+  let t0=performance.now();
+  splat();
+  blurField(); blurField();
+  let t1=performance.now();
+  shade();
+  let t2=performance.now();
+  msSplat+=t1-t0; msShade+=t2-t1;
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality='high';
+  ctx.drawImage(fcan,0,0,fw,fh,0,0,VW,VH);
+  if(PERF)drawPerf();
+}
+function drawPerf(){
+  const n=Math.max(1,msFrames);
+  const txt='phys '+(msPhys/n).toFixed(2)+'ms  splat '+(msSplat/n).toFixed(2)
+    +'ms  shade '+(msShade/n).toFixed(2)+'ms  ('+n+'f)';
+  ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(8,8,340,22);
+  ctx.fillStyle='#fff'; ctx.font='12px monospace'; ctx.fillText(txt,14,23);
+}
+
+/* ============ clock, pre-sim, main loop ============ */
+const Q=new URLSearchParams(location.search);
+const tOff=Math.max(0,parseFloat(Q.get('t'))||0);
+const FREEZE=Q.get('freeze')==='1';
+const PERF=Q.get('perf')==='1';
+
+{ // pre-simulate to the requested clock with the same fixed steps
+  const steps=Math.round(tOff/STEP);
+  for(let k=0;k<steps;k++)stepPhysics();
+}
+render();
+
+if(FREEZE){
+  // keep the timer queue alive so headless virtual-time screenshots don't stall
+  setInterval(function(){},250);
+}else{
+  let last=0,acc=0;
+  function frame(ts){
+    if(!last)last=ts;
+    let dt=Math.min(0.1,(ts-last)/1000); last=ts;
+    acc+=dt;
+    let n=0;
+    const t0=performance.now();
+    while(acc>=STEP&&n<5){stepPhysics();acc-=STEP;n++;}
+    msPhys+=performance.now()-t0;
+    if(acc>=STEP)acc=STEP; // drop backlog rather than spiral
+    msFrames++;
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

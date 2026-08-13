@@ -28,6 +28,12 @@ class Task:
     result: Optional[TaskResult] = None
     created_at: float = 0.0
     finished_at: Optional[float] = None
+    # long-task plumbing (PR 11): a short spoken handle, the last progress
+    # line a worker reported, and the agent session behind the task (what
+    # makes it resumable — even across an Echo restart)
+    title: str = ""
+    progress: Optional[str] = None
+    session_id: Optional[str] = None
 
     @property
     def kind(self):

@@ -9,7 +9,7 @@ See **[PLAN.md](PLAN.md)** for the full architecture, decisions (and what was re
 1. **Wake word** — Vosk keyword spotting for "echo echo" (open source, no keys, no training).
 2. **Voice loop** — OpenAI Realtime API speech-to-speech (`gpt-realtime-2.1[-mini]`), semantic VAD, barge-in, reconnect-with-backoff so the daemon never dies.
 3. **Orchestrator** — a generic in-process task queue: the voice agent dispatches tasks, async workers do them, results are ranked (interrupt / ambient / silent) and injected back into the live conversation at safe turn boundaries. Tasks that finish while Echo is asleep are surfaced on the next wake as a "[since last session]" note.
-4. **Live workspace** — everything workers produce is markdown in `workspace/`, rendered live in a browser tab via a tiny SSE auto-refresh viewer (changed sections flash briefly).
+4. **Live workspace** — everything workers produce lands in `workspace/` (any file type, subdirectories welcome), rendered live in a browser tab via a tiny SSE auto-refresh viewer: a file tree, type-aware rendering (markdown, code, images, downloads), changed markdown sections flash briefly.
 
 ## Mac runbook (from zero to talking)
 
@@ -97,8 +97,82 @@ Full line-by-line scripts with timestamps: [`scripts/demo_cheatsheet.md`](script
 2. **Groceries + recipes** — "Echo echo … help me plan dinners this week, I'm thinking pad thai one night." (then halloumi, "drop the fish sauce", "that's it")
 3. **Learning** — "Echo echo. Teach me about fermentation in food." (then "sourdough", answer the quiz question, "that's it")
 
-Headless merge gate (runs all three scripted, asserts artifacts + task log,
-then the full test suite): `bash scripts/demo_check.sh`.
+Since PR 10 ([PLAN-GENERIC.md](PLAN-GENERIC.md)) the product's one advertised
+kind is **`agent.run`**: any ask is handed to a headless coding agent
+(`claude -p` / `codex exec`) working inside `workspace/`. The demo workers
+above live on as optional fast-path plugins — dispatchable always, advertised
+to the voice model only with `ECHO_PLUGINS=1`.
+
+PR 11 makes those agent tasks long-task-shaped: progress streams back as
+throttled ambient lines (`ECHO_PROGRESS_INTERVAL`, default 30 s), `check_tasks`
+shows elapsed time and the last progress line ("how's it going?" works
+mid-task), and tasks are referred to by a short spoken handle. To steer or
+extend an earlier task, dispatch `agent.run` again with `args.task_id` — it
+resumes the same agent session (`--resume`). A task that ends with a
+`QUESTION:` line comes back as an interrupt so Echo can ask you. The task
+table persists to `.tasks.jsonl`, so a finished task announces on the next
+wake even across a restart, and a task caught mid-flight is reported as
+interrupted (and resumable if its agent session was checkpointed). Runaway
+agents are bounded by a wall-clock budget (`ECHO_AGENT_TIMEOUT`, default
+15 min); on breach the agent is stopped and the partial work is left staged
+and resumable.
+
+PR 12 adds the sandbox ladder's tier 2 — **Echo's own macOS VM**. `ECHO_SANDBOX=vm`
+(or a per-task `args.sandbox="vm"`) runs the agent inside a macOS guest managed by
+[Lume](https://github.com/trycua/cua) over SSH, with `workspace/` shared read-write
+so the viewer and touched-file detection keep working unchanged. Scratch VMs are
+APFS-clones of a golden image, so rollback ("undo that") is a delete + re-clone.
+Build the golden image once on the Mac: `AGENT=1 bash scripts/vm_golden.sh` (pulls a
+~18 GB base image, installs Echo's SSH key, allows model API keys through the guest
+`sshd`, and installs the `claude` CLI in the guest). The default tier stays `shell`
+(host subprocess); the whole VM code path is exercised keyless/Linux via a `FakeVM`
+behind the same port, so CI never needs a Mac.
+
+PR 14 adds **GUI computer-use** — the sandbox ladder's GUI tier. The
+`computer.use` kind (advertised when `ECHO_SANDBOX=vm`) drives real Mac apps
+inside the VM by a sequence of steps (`launch` / `type` / `key` / `wait` /
+`screenshot`) via a `GuiDriver` port: `SshGuiDriver` uses only macOS built-ins
+(`open`, `osascript`, `screencapture`) over the same SSH channel as the agent
+tier, and a screenshot after every step lands in `workspace/screens/<task>/`
+(the viewer renders them — that shot trail is the recording). Live-validated
+on a real VM: app launch + screenshots work end-to-end (screenshots reach the
+host via virtiofs). **Caveat:** synthetic keystrokes (`type`/`key`) need macOS
+Accessibility permission, which a SIP-enabled vanilla image won't grant to an
+SSH-invoked process — the golden image must pre-grant it (SIP-off build + TCC,
+or a PPPC profile); until then those steps fail fast with a clear message
+rather than hanging. Coordinate clicks and a model-driven perceive→act loop
+are the follow-up.
+
+PR 13 adds **mediated access to your real documents**. Point Echo at folders with
+`ECHO_USER_DOCS=~/Documents:~/Desktop`; they mount **read-only** into the VM, so an
+agent can read them but never write them. Proposed edits are staged in
+`workspace/outbox/<task>/` (full updated files + a `MANIFEST.json` mapping each to its
+original + a `CHANGES.md`), and nothing touches a real document until you say **"apply
+it"** — which dispatches the tier-0 `outbox.apply` worker. That worker re-validates
+every target against your shared-folder allowlist (the agent's manifest is not
+trusted), backs up each original with a timestamp, then writes atomically. With no
+folders shared, `outbox.apply` isn't even advertised and the approval flow is absent.
+
+PR 15 adds the **Echo Orb** — a menu-bar app face for the viewer (`app/`,
+Electron) — and an **interactive portal into Echo's Mac**. Echo lives in the
+menu bar as a code-drawn orb; clicking it (or saying "echo echo" — the wake
+event arrives over the same SSE feed the web viewer uses) pours a black
+procedural blob out of the menu bar, genie-style, into a transparent
+always-on-top scene. Documents and transcript wisps emerge from the blob; the
+"Echo's Mac" item is a live VNC view of the Lume VM — interactive by default
+(it's Echo's Mac; the blast radius is the sandbox, and your shared folders stay
+read-only) with a view-only toggle. Lume already runs a password-protected VNC
+server even under `--no-display`, so the portal needs no VM changes: the app
+asks the viewer's new `/vnc-info` endpoint (or `ECHO_VNC_URL`) for the
+endpoint, bridges WebSocket↔TCP locally, and renders it with noVNC. Because
+VNC input lands at the virtual-hardware level, *you* can type in the VM even
+where the agent's `osascript` keystrokes are still TCC-blocked (see the PR 14
+caveat). Run it with `cd app && npm install && npm start`; the blob look-lab
+lives in `app/prototypes/`. The web viewer at :8765 is unchanged.
+
+Headless merge gate (runs all three scripted demos plus the generic agent.run
+rewrite of them, asserts artifacts + task log, then the full test suite):
+`bash scripts/demo_check.sh`.
 
 ### Troubleshooting
 
@@ -119,6 +193,10 @@ then the full test suite): `bash scripts/demo_check.sh`.
   (FakeLLM fixtures; live keyless WordPress/Wikipedia endpoints for search),
   workspace + `.tasks.jsonl` asserted, full pytest suite.
 - `ECHO_TEXT=1 ECHO_FAKE_LLM=1 python3 echo.py --script fixtures/smoke.txt` — 60-line smoke run.
+- `ECHO_FAKE_AGENT_SCRIPT=fixtures/agent/demo_generic python3 echo.py --script fixtures/demo_generic.txt`
+  — the generic demo: `agent.run` replayed from recorded stream-json fixtures
+  (a directory is consumed in sorted order, one file per task; a single
+  `.jsonl` replays for every task).
 - `ECHO_FAKE_LLM=1 python3 echo.py --text` — interactive keyless REPL.
 - `python3 -m pytest tests/ -q` — everything except `-m network` live-endpoint tests.
 
@@ -193,4 +271,4 @@ barge-in weirdness. `meta.json`'s `end_reason` tells you how sessions die
 
 ## Status
 
-Prototype complete as a stack of PRs (`echo/01-…` through `echo/06-…`), each headlessly testable — the full orchestrator/worker/artifact loop runs with no audio and no API key (text REPL + fixtures + FakeTransport event replay). Only the mic/speaker and the real Realtime connection need your Mac. A stretch `code` task kind (headless `codex exec` / `claude -p` subprocess) registers automatically when one of those CLIs is on PATH.
+Prototype complete as a stack of PRs (`echo/01-…` through `echo/06-…`), each headlessly testable — the full orchestrator/worker/artifact loop runs with no audio and no API key (text REPL + fixtures + FakeTransport event replay). Only the mic/speaker and the real Realtime connection need your Mac. The v2 generic build-out (`echo/10-…`, see [PLAN-GENERIC.md](PLAN-GENERIC.md)) replaces the stretch `code` kind with the first-class `agent.run` worker: the first agent CLI found on PATH (`claude`, then `codex`) runs each task with the workspace as its cwd.

@@ -1,41 +1,72 @@
 """Live workspace viewer: stdlib HTTP + SSE, no dependencies.
 
-GET /            -> index.html (marked.js tabs page + live transcript pane)
-GET /doc?f=name  -> raw markdown; basename'd, *.md only, inside workspace only
+GET /            -> index.html (file tree + type-aware pane + live transcript)
+GET /doc?f=path  -> any visible workspace file (relative path, subdirs ok);
+                    resolution goes through artifacts.resolve, so traversal,
+                    dotfiles, and workspace-escaping symlinks 404.
+                    Markdown/images/PDF get their real content type; other
+                    text is served as text/plain (never text/html — the
+                    viewer must not execute workspace files); undecodable
+                    bytes fall back to application/octet-stream. Every /doc
+                    response carries a script-free CSP so script-capable
+                    types (SVG!) stay inert opened as documents.
 GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
-                    and whenever a 250ms mtime poll sees a change to a *.md
-                    doc OR to the .events.jsonl feed
+                    and whenever a 250ms poll sees any visible file change
+                    OR an append to the .events.jsonl feed
+GET /vnc-info    -> {"url": "vnc://[:pass@]host:port"} for Echo's Mac, or 503
+                    {"error": ...}; source: ECHO_VNC_URL env override, else
+                    lume (vm tier, or lume on PATH — the tier may be chosen
+                    per-task), read fresh on every call. The ONLY route that
+                    serves credentials, so it alone requires
+                    "Authorization: Bearer <token>" (else 403); the token is
+                    regenerated per run and written 0o600 to
+                    ECHO_VIEWER_TOKEN_FILE (default ~/.echo/viewer.token),
+                    where the Electron portal reads it fresh per call
 
 Workspace writes are atomic (tmp + os.rename), so /doc never serves a
 half-written file.
 """
 import json
 import os
+import secrets
+import shutil
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from echo_app import config
+from echo_app.services import artifacts, vm
 
 POLL_INTERVAL = 0.25
 INDEX = Path(__file__).with_name("index.html")
 EVENTS_FEED = ".events.jsonl"  # echo_app.events feed inside the workspace
 TRANSCRIPT_LIMIT = 400
 
+# Types the browser may render natively; everything else is text/plain or a
+# download. Deliberately no text/html: workspace files never run as pages.
+NATIVE_TYPES = {
+    ".md": "text/markdown; charset=utf-8",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+}
+
 
 def workspace_state(workspace):
-    """{name: (mtime, size, inode)} for visible workspace *.md files.
+    """{relative posix path: (mtime, size, inode)} for every visible
+    workspace file, recursively (dotted files/dirs excluded).
 
     Size + inode matter: coarse filesystem mtime granularity can hide two
     atomic writes in the same tick, but tmp+rename always swaps the inode.
     """
     ws = Path(workspace)
     state = {}
-    if ws.is_dir():
-        for p in sorted(ws.iterdir()):
-            if p.is_file() and p.suffix == ".md" and not p.name.startswith("."):
-                st = p.stat()
-                state[p.name] = (st.st_mtime, st.st_size, st.st_ino)
+    for name in artifacts.list_files(ws):
+        key = artifacts.stat_key(ws, name)  # None: deleted mid-poll, or a
+        if key is not None:                 # symlink escaping the workspace
+            state[name] = key
     return state
 
 
@@ -71,9 +102,35 @@ def read_transcript(workspace, limit=TRANSCRIPT_LIMIT):
     return out
 
 
+def token_path():
+    """Where the per-run viewer token lives — the Electron portal reads the
+    same path, so the two sides must agree byte-for-byte."""
+    raw = os.environ.get("ECHO_VIEWER_TOKEN_FILE", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".echo" / "viewer.token"
+
+
+def _write_token(token):
+    """Persist the token 0o600 (parent dir 0o700 if we create it): it gates
+    the one route that serves credentials, so only this user may read it."""
+    path = token_path()
+    if not path.parent.is_dir():
+        path.parent.mkdir(parents=True)
+        os.chmod(str(path.parent), 0o700)
+    # O_CREAT's mode is umask-filtered and skipped for an existing file, so
+    # the explicit chmod below is what actually guarantees 0o600
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token)
+    os.chmod(str(path), 0o600)
+    return path
+
+
 class _Handler(BaseHTTPRequestHandler):
     workspace = None   # set on the subclass by ViewerServer
     stopping = None    # threading.Event
+    token = None       # per-run bearer token gating /vnc-info
 
     def log_message(self, fmt, *args):  # keep the demo console quiet
         pass
@@ -89,29 +146,79 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(200, "application/json; charset=utf-8", body)
         elif parsed.path == "/events":
             self._events()
+        elif parsed.path == "/vnc-info":
+            self._vnc_info()
         else:
             self._respond(404, "text/plain", b"not found")
 
-    def _respond(self, status, ctype, body):
+    def _vnc_info(self):
+        """Where Echo's Mac's VNC lives: ECHO_VNC_URL override (tests/CI, or
+        "I already know my VM") -> else ask lume when the vm tier is
+        configured OR lume is on PATH (the tier may be chosen per-task) ->
+        else 503. Never cached: a re-cloned VM changes address, and a stale
+        URL would strand the portal on a dead endpoint. Token-gated before
+        any work: this is the only route that serves credentials."""
+        auth = self.headers.get("Authorization") or ""
+        if not secrets.compare_digest(
+                auth.encode("utf-8", "replace"),
+                ("Bearer %s" % self.token).encode("utf-8")):
+            self._json(403, {"error": "missing or bad viewer token"})
+            return
+        override = os.environ.get("ECHO_VNC_URL", "").strip()
+        if override:
+            self._json(200, {"url": override})
+            return
+        if config.sandbox_tier() != "vm" and shutil.which("lume") is None:
+            self._json(503, {"error": (
+                "no VM configured: set ECHO_SANDBOX=vm, or point "
+                "ECHO_VNC_URL at any VNC server")})
+            return
+        try:
+            url = vm.vnc_url()
+        except Exception as exc:  # lume missing/failed: human-readable 503
+            self._json(503, {"error": str(exc) or type(exc).__name__})
+            return
+        self._json(200, {"url": url})
+
+    def _json(self, status, obj):
+        self._respond(status, "application/json; charset=utf-8",
+                      json.dumps(obj).encode("utf-8"))
+
+    def _respond(self, status, ctype, body, csp=None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # workspace files are agent-written: text/plain must stay text/plain
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if csp:
+            self.send_header("Content-Security-Policy", csp)
         self.end_headers()
         self.wfile.write(body)
 
     def _doc(self, parsed):
         qs = urllib.parse.parse_qs(parsed.query)
         raw = (qs.get("f") or [""])[0]
-        name = os.path.basename(raw)  # no traversal, ever
-        if not name.endswith(".md") or name.startswith("."):
-            self._respond(404, "text/plain", b"not a workspace markdown file")
+        try:
+            path = artifacts.resolve(self.workspace, raw)  # no traversal, ever
+        except ValueError:
+            self._respond(404, "text/plain", b"not a workspace file")
             return
-        path = Path(self.workspace) / name
         if not path.is_file():
             self._respond(404, "text/plain", b"no such file")
             return
-        self._respond(200, "text/markdown; charset=utf-8",
-                      path.read_bytes())
+        body = path.read_bytes()
+        ctype = NATIVE_TYPES.get(path.suffix.lower())
+        if ctype is None:
+            try:
+                body.decode("utf-8")
+                ctype = "text/plain; charset=utf-8"
+            except UnicodeDecodeError:
+                ctype = "application/octet-stream"
+        # script-free CSP: an agent-written SVG (image/svg+xml is a
+        # script-capable document type) opened directly must stay inert
+        self._respond(200, ctype, body,
+                      csp="default-src 'none'; img-src 'self' data:; "
+                          "style-src 'unsafe-inline'; object-src 'self'")
 
     def _events(self):
         self.send_response(200)
@@ -123,8 +230,8 @@ class _Handler(BaseHTTPRequestHandler):
             while not self.stopping.is_set():
                 docs = workspace_state(self.workspace)
                 state = dict(docs)
-                # non-doc sentinel: a transcript append must also fire SSE,
-                # but "files" below stays *.md-only (the tabs JS depends on it)
+                # non-file sentinel: a transcript append must also fire SSE,
+                # but never leak into the "files" list the tree JS renders
                 state["__events__"] = events_feed_state(self.workspace)
                 if state != last:
                     last = state
@@ -143,8 +250,13 @@ class ViewerServer:
 
     def __init__(self, workspace, host="127.0.0.1", port=8765):
         self._stopping = threading.Event()
+        # per-run /vnc-info token, generated once per server (never per
+        # request) and written where the portal expects to read it
+        self.token = secrets.token_hex(16)
+        _write_token(self.token)
         handler = type("Handler", (_Handler,), {
-            "workspace": Path(workspace), "stopping": self._stopping})
+            "workspace": Path(workspace), "stopping": self._stopping,
+            "token": self.token})
         self.httpd = ThreadingHTTPServer((host, port), handler)
         self.httpd.daemon_threads = True
         self._thread = None

@@ -18,30 +18,33 @@ from echo_app import config, events
 from echo_app.conversation.port import ConversationPort
 from echo_app.conversation.session import Session
 
-SYSTEM_PROMPT = config.SYSTEM_PROMPT  # tuned in config.py (PR 6)
-
-TOOLS = [
-    {"type": "function", "name": "dispatch_task",
-     "description": "Queue background work; returns {task_id, status} instantly.",
-     "parameters": {"type": "object", "properties": {
-         "kind": {"type": "string",
-                  "enum": ["doc.edit", "recipe.search", "grocery.merge",
-                           "learn.outline", "learn.deep_dive"]},
-         "instructions": {"type": "string"},
-         "args": {"type": "object"}},
-         "required": ["kind", "instructions"]}},
-    {"type": "function", "name": "check_tasks",
-     "description": "Status summaries for background tasks.",
-     "parameters": {"type": "object", "properties": {
-         "task_id": {"type": "string"}}}},
-    {"type": "function", "name": "read_artifact",
-     "description": "Read a workspace markdown file (e.g. grocery.md).",
-     "parameters": {"type": "object", "properties": {
-         "name": {"type": "string"}}, "required": ["name"]}},
-    {"type": "function", "name": "end_session",
-     "description": "End the session when the user is done.",
-     "parameters": {"type": "object", "properties": {}}},
-]
+def build_tools():
+    """The exact 4 Contract-A tools; the dispatch_task kind enum is generated
+    from the worker registry (call after load_all())."""
+    from echo_app.workers import base
+    return [
+        {"type": "function", "name": "dispatch_task",
+         "description": "Queue background work; returns {task_id, status} "
+                        "instantly. Kinds: %s." % (base.kinds_fragment()
+                                                   or "(none)"),
+         "parameters": {"type": "object", "properties": {
+             "kind": {"type": "string", "enum": base.kinds_enum()},
+             "instructions": {"type": "string"},
+             "args": {"type": "object"}},
+             "required": ["kind", "instructions"]}},
+        {"type": "function", "name": "check_tasks",
+         "description": "Status summaries for background tasks.",
+         "parameters": {"type": "object", "properties": {
+             "task_id": {"type": "string"}}}},
+        {"type": "function", "name": "read_artifact",
+         "description": "Read a text file from the workspace "
+                        "(e.g. grocery.md or research/notes.md).",
+         "parameters": {"type": "object", "properties": {
+             "name": {"type": "string"}}, "required": ["name"]}},
+        {"type": "function", "name": "end_session",
+         "description": "End the session when the user is done.",
+         "parameters": {"type": "object", "properties": {}}},
+    ]
 
 
 class RealConversationLLM:
@@ -56,8 +59,8 @@ class RealConversationLLM:
             from openai import AsyncOpenAI  # lazy: keyless paths never import
             self._client = AsyncOpenAI()
         resp = await self._client.responses.create(
-            model=self.model, instructions=SYSTEM_PROMPT,
-            input=history, tools=TOOLS)
+            model=self.model, instructions=config.system_prompt(),
+            input=history, tools=build_tools())
         items = []
         for item in resp.output:
             if item.type == "function_call":

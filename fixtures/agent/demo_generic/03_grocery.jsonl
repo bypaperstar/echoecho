@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "session_id": "fake-grocery-1"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Searching the recipe sites for a quick pad thai."}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Found a 30-minute chicken pad thai on RecipeTin Eats — merging its ingredients into grocery.md."}]}}
+{"type": "_write", "file": "grocery.md", "content": "# Grocery List\n\n## Produce\n- garlic (2 cloves)\n- lime (1)\n- bean sprouts (2 cups)\n- green onions (4)\n\n## Pantry\n- rice noodles (250 g)\n- fish sauce\n- tamarind paste\n- peanuts (1/2 cup)\n\n## Protein\n- chicken thighs (300 g)\n- eggs (2)\n\n## Meals\n- [Chicken Pad Thai](https://www.recipetineats.com/chicken-pad-thai/) (30 min)\n"}
+{"type": "result", "subtype": "success", "is_error": false, "session_id": "fake-grocery-1", "result": "Found a 30-minute chicken pad thai on RecipeTin Eats and merged its 10 ingredients into grocery.md, grouped by aisle, with the recipe linked under Meals."}

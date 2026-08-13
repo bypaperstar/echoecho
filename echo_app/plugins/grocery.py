@@ -64,7 +64,11 @@ def _regex_merge(current, ingredients, source):
     return "\n".join(lines).strip() + "\n", len(added), dupes
 
 
-@register("grocery.merge")
+@register("grocery.merge",
+          description="merge items or edits into workspace/grocery.md",
+          arg_schema={"ingredients": {"type": "array",
+                                      "items": {"type": "string"}},
+                      "source_recipe": {"type": "object"}})
 async def run(task, ctx):
     ingredients = list(task.request.args.get("ingredients", []))
     source = task.request.args.get("source_recipe")
