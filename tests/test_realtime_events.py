@@ -71,11 +71,42 @@ def test_session_update_is_first_send_with_full_config():
     # pcm16 24kHz both directions
     assert s["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert s["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
+    assert s["audio"]["input"]["noise_reduction"] == {"type": "far_field"}
     # semantic VAD with barge-in + input transcription enabled
     assert s["audio"]["input"]["turn_detection"] == {
         "type": "semantic_vad", "interrupt_response": True}
     assert s["audio"]["input"]["transcription"].get("model")
     assert s["tool_choice"] == "auto"
+
+
+def test_explicit_connect_is_idempotent_before_run():
+    """Voice mode configures Realtime before enabling mic callback uploads."""
+    transport = FakeTransport(str(FIX / "end_phrase.jsonl"))
+    client = RealtimeClient(transport, session=Session(clock=FakeClock()),
+                            poll_interval=0.01, out=lambda *_: None)
+
+    async def scenario():
+        await client.connect()
+        assert transport.sent_types() == ["session.update"]
+        await client.run()
+
+    asyncio.run(scenario())
+    assert transport.sent_types().count("session.update") == 1
+
+
+def test_input_audio_sender_follows_replaced_transport():
+    first, second = FakeTransport([]), FakeTransport([])
+    client = RealtimeClient(first)
+    event = {"type": "input_audio_buffer.append", "audio": "AAAA"}
+
+    async def scenario():
+        await client.send_input_audio(event)
+        client.transport = second
+        await client.send_input_audio(event)
+
+    asyncio.run(scenario())
+    assert first.sent == [event]
+    assert second.sent == [event]
 
 
 def test_four_tool_schema_matches_contract_a(monkeypatch):

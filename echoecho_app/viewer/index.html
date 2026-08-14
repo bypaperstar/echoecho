@@ -327,7 +327,12 @@ function activityLine(ev) {
   }
   if (t === 'audio')
     return ['🎧 mic: ' + (ev.input || 'system default') +
-            ' → speaker: ' + (ev.output || 'system default'), null];
+            ' → speaker: ' + (ev.output || 'system default'),
+            ev.processing === 'webrtc-aec' ? 'echo cancellation on' :
+            ev.processing === 'fallback-gate' ? 'playback gate fallback' : null];
+  if (t === 'audio_processing')
+    return ['⚠️ Echo cancellation switched to the playback gate',
+            ev.detail || null];
   if (t === 'tool_call') {
     const args = ev.args || {};
     if (ev.name === 'dispatch_task')

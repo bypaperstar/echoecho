@@ -3,3 +3,6 @@
 -r requirements.txt
 sounddevice==0.5.5
 vosk<=0.3.44
+# Native WebRTC Audio Processing Module (AEC and high-pass processing).
+# Current release publishes arm64/x86_64 macOS wheels for Python >=3.9.
+livekit==1.1.14

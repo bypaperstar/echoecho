@@ -2,12 +2,14 @@
 
 Device-open paths live behind lazy `import sounddevice` so this module
 imports cleanly on the Linux sandbox; the pure parts (chime synthesis, the
-playback buffer math) are unit-tested there. Capture: 100 ms int16 blocks ->
+playback buffer math) are unit-tested there. Capture: 20 ms int16 blocks ->
 base64 -> {"type": "input_audio_buffer.append", "audio": ...} scheduled onto
 the asyncio loop. Playback: response.output_audio.delta chunks feed a byte
-buffer drained by a RawOutputStream callback which advances the
+buffer drained by a low-latency RawOutputStream callback which advances the
 PlaybackTracker's played-ms cursor (the barge-in truncate bookkeeping);
-flush() empties the buffer on barge-in.
+flush() empties the buffer on barge-in.  A WebRTC Audio Processing pipeline
+uses the exact rendered speaker PCM as its reverse stream, removing that audio
+from microphone capture before it can reach server VAD.
 """
 import base64
 import math
@@ -15,9 +17,10 @@ import struct
 import threading
 
 from echoecho_app import events, recorder
+from echoecho_app.conversation.audio_pipeline import AudioPipeline
 
 RATE = 24000
-BLOCK_FRAMES = 2400  # 100 ms at 24 kHz
+BLOCK_FRAMES = 480  # 20 ms: two WebRTC APM frames, low-latency barge-in
 
 
 # -- device selection (PR 8) --------------------------------------------------
@@ -135,7 +138,7 @@ def end_chime():
 class AudioIO:
     def __init__(self, tracker=None, loop=None, rate=RATE,
                  block_frames=BLOCK_FRAMES, device=None,
-                 input_device=None, output_device=None):
+                 input_device=None, output_device=None, pipeline=None):
         self.tracker = tracker  # PlaybackTracker (advance() as audio plays)
         self.loop = loop        # asyncio loop for thread-safe send scheduling
         self.rate = rate
@@ -151,6 +154,10 @@ class AudioIO:
         self._in_stream = None
         self._out_stream = None
         self.muted_capture = False
+        self.pipeline = pipeline
+        self._output_delay_s = 0.0
+        self._pipeline_status_lock = threading.Lock()
+        self._pipeline_disabled_announced = False
 
     # -- capture: mic -> input_audio_buffer.append --------------------------
 
@@ -165,9 +172,29 @@ class AudioIO:
             return
         data = bytes(indata)
         if rec is not None:
-            rec.write_mic(data)  # what echoecho heard, muted teardown tail included
+            rec.write_mic(data)  # what Echo heard, muted teardown tail included
         if not sending:
             return
+        if self.pipeline is not None:
+            try:
+                delay_ms = None
+                if time_info is not None:
+                    try:
+                        capture_delay = max(
+                            0.0, float(time_info.currentTime
+                                       - time_info.inputBufferAdcTime))
+                        delay_ms = int(round(1000.0 * (
+                            capture_delay + self._output_delay_s)))
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                data = self.pipeline.process_capture(data, delay_ms)
+                if not self.pipeline.enabled:
+                    self._schedule_pipeline_warning(loop)
+            except Exception:  # DSP must never escape PortAudio callback
+                # The adapter itself is fail-safe; this last guard preserves
+                # capture if an unforeseen wrapper bug escapes it. Avoid I/O
+                # from PortAudio's real-time thread.
+                data = bytes(indata)
         event = {"type": "input_audio_buffer.append",
                  "audio": base64.b64encode(data).decode("ascii")}
 
@@ -203,13 +230,29 @@ class AudioIO:
         if played < need:
             chunk += b"\x00" * (need - played)
         outdata[:need] = chunk
+        if time_info is not None:
+            try:
+                self._output_delay_s = max(
+                    0.0, float(time_info.outputBufferDacTime
+                               - time_info.currentTime))
+            except (AttributeError, TypeError, ValueError):
+                pass
+        if self.pipeline is not None:
+            try:
+                # Exact wall-clock render reference: includes zero-fill and
+                # excludes queued audio that a barge-in flush prevented playing.
+                self.pipeline.process_render(chunk)
+                if not self.pipeline.enabled:
+                    self._schedule_pipeline_warning(self.loop)
+            except Exception:  # speaker callback stays fail-open too
+                pass
         if self.tracker is not None and played:
             self.tracker.advance(played / (self.rate * 2.0) * 1000.0)
         rec = recorder.active()
         if rec is not None:
             if status:  # underflow: playback glitched, alignment suspect
                 rec.note_status("output", status)
-            rec.write_echoecho(chunk)  # zero-fill included: timeline stays real
+            rec.write_echo(chunk)  # zero-fill included: timeline stays real
 
     def play_chime(self, kind):
         self.feed_pcm(wake_chime() if kind == "wake" else end_chime())
@@ -217,6 +260,32 @@ class AudioIO:
     def pending_ms(self):
         with self._lock:
             return len(self._buf) / (self.rate * 2.0) * 1000.0
+
+    def set_sender(self, send_event):
+        """Enable capture upload after Realtime session setup is complete."""
+        self.send_event = send_event
+
+    def _schedule_pipeline_warning(self, loop):
+        """Report a runtime DSP failure on the asyncio thread exactly once."""
+        if loop is None:
+            return
+        with self._pipeline_status_lock:
+            if self._pipeline_disabled_announced:
+                return
+            self._pipeline_disabled_announced = True
+        reason = self.pipeline.disabled_reason or "unknown error"
+
+        def report():
+            events.emit("audio_processing", status="fallback-gate",
+                        detail=reason)
+            print("[audio] WARNING: echo cancellation failed (%s); "
+                  "using playback gate" % reason)
+
+        try:
+            loop.call_soon_threadsafe(report)
+        except Exception:
+            with self._pipeline_status_lock:
+                self._pipeline_disabled_announced = False
 
     # -- device open/close (Mac-only) ----------------------------------------
 
@@ -228,32 +297,78 @@ class AudioIO:
         # refreshes PortAudio just before this, so hot-plugged devices show)
         in_dev = resolve_device(self.input_device, "input")
         out_dev = resolve_device(self.output_device, "output")
-        self._in_stream = sd.RawInputStream(
-            samplerate=self.rate, channels=1, dtype="int16",
-            blocksize=self.block_frames, device=in_dev,
-            callback=self._in_callback)
-        self._out_stream = sd.RawOutputStream(
-            samplerate=self.rate, channels=1, dtype="int16",
-            blocksize=self.block_frames, device=out_dev,
-            callback=self._out_callback)
-        rec = recorder.active()
-        if rec is not None:
-            # session.wav alignment: streams are built but not started, so
-            # this lands before the first write_echoecho (see set_echoecho_delay)
-            rec.set_echoecho_delay(_latency(self._in_stream)
-                               + _latency(self._out_stream))
-        self._in_stream.start()
-        self._out_stream.start()
+        try:
+            self._in_stream = sd.RawInputStream(
+                samplerate=self.rate, channels=1, dtype="int16",
+                blocksize=self.block_frames, device=in_dev,
+                callback=self._in_callback)
+            self._out_stream = sd.RawOutputStream(
+                samplerate=self.rate, channels=1, dtype="int16",
+                blocksize=self.block_frames, device=out_dev,
+                callback=self._out_callback)
+            if self.pipeline is None:
+                # Stream latencies approximate the interval between reverse
+                # analysis and capture processing that contains its echoecho.
+                delay_ms = int(1000.0 * (_latency(self._in_stream)
+                                         + _latency(self._out_stream)))
+                self.pipeline = AudioPipeline(rate=self.rate,
+                                              stream_delay_ms=delay_ms)
+            # Seed callback timing with the stream's reported output latency;
+            # a valid PortAudio timestamp replaces it on first render.
+            self._output_delay_s = _latency(self._out_stream)
+            rec = recorder.active()
+            if rec is not None:
+                # session.wav alignment: streams are built but not started, so
+                # this lands before the first write_echo (see set_echoecho_delay)
+                rec.set_echoecho_delay(_latency(self._in_stream)
+                                   + _latency(self._out_stream))
+            self._in_stream.start()
+            self._out_stream.start()
+        except Exception:
+            # Construction and start failures both close the whole partial
+            # session immediately; PortAudio refresh must see zero streams.
+            try:
+                self.stop()
+            except Exception:
+                pass
+            raise
         in_name = device_label(in_dev, "input")
         out_name = device_label(out_dev, "output")
-        events.emit("audio", input=in_name, output=out_name)
+        processing = "webrtc-aec" if self.pipeline.enabled else "fallback-gate"
+        with self._pipeline_status_lock:
+            self._pipeline_disabled_announced = not self.pipeline.enabled
+        events.emit("audio", input=in_name, output=out_name,
+                    processing=processing)
         print("[audio] mic: %s -> speaker: %s" % (in_name, out_name))
+        if self.pipeline.enabled:
+            print("[audio] WebRTC echo cancellation + residual suppression enabled")
+        else:
+            print("[audio] WARNING: echo cancellation unavailable (%s)"
+                  % (self.pipeline.disabled_reason or "unknown error"))
         return self
 
     def stop(self):
-        for stream in (self._in_stream, self._out_stream):
-            if stream is not None:
-                stream.stop()
-                stream.close()
-        self._in_stream = self._out_stream = None
-        self.send_event = None
+        """Close every session resource, then surface the first close error."""
+        first_error = None
+        try:
+            for stream in (self._in_stream, self._out_stream):
+                if stream is None:
+                    continue
+                try:
+                    stream.stop()
+                except Exception as exc:
+                    first_error = first_error or exc
+                try:
+                    stream.close()
+                except Exception as exc:
+                    first_error = first_error or exc
+        finally:
+            self._in_stream = self._out_stream = None
+            self.send_event = None
+            if self.pipeline is not None:
+                try:
+                    self.pipeline.close()
+                except Exception as exc:
+                    first_error = first_error or exc
+        if first_error is not None:
+            raise first_error

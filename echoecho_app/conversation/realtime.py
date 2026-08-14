@@ -168,7 +168,8 @@ class FakeTransport:
 
 def build_session_update(instructions=None):
     """GA session.update: instructions, the exact 4 Contract-A tools, pcm16
-    24 kHz in/out, semantic VAD with barge-in, input transcription on."""
+    24 kHz in/out, far-field cleanup, semantic VAD with barge-in, and input
+    transcription. Local AudioPipeline handles acoustic echo separately."""
     return {"type": "session.update", "session": {
         "type": "realtime",
         "instructions": instructions or voice_prompt(),
@@ -176,6 +177,10 @@ def build_session_update(instructions=None):
         "audio": {
             "input": {
                 "format": {"type": "audio/pcm", "rate": 24000},
+                # Laptop/conference-room microphone cleanup happens before
+                # server VAD. Local WebRTC AEC remains responsible for the
+                # separate problem of removing Echo's own speaker reference.
+                "noise_reduction": {"type": "far_field"},
                 "transcription": {"model": "gpt-4o-mini-transcribe"},
                 "turn_detection": {"type": "semantic_vad",
                                    "interrupt_response": True},
@@ -221,6 +226,7 @@ class RealtimeClient(ConversationPort):
         self._sign_off_done = False
         self._sign_off_polls = 0
         self._connected_at = self.clock()
+        self._connected = False
 
     # -- ConversationPort -----------------------------------------------------
 
@@ -234,7 +240,7 @@ class RealtimeClient(ConversationPort):
         self.session.begin_ending("forced")
 
     async def run(self):
-        await self._connect()
+        await self.connect()
         while not self._done:
             try:
                 try:
@@ -259,6 +265,15 @@ class RealtimeClient(ConversationPort):
 
     # -- connection ------------------------------------------------------------
 
+    async def connect(self):
+        """Connect and configure once; audio capture may be enabled afterward."""
+        if not self._connected:
+            await self._connect()
+
+    def send_input_audio(self, event):
+        """Send one mic append to the currently active transport."""
+        return self.transport.send(event)
+
     async def _connect(self, reconnect=False):
         connect = getattr(self.transport, "connect", None)
         if connect is not None:
@@ -276,6 +291,7 @@ class RealtimeClient(ConversationPort):
         events.emit("session", event="connected",
                     model=getattr(self.transport, "model", ""))
         self._connected_at = self.clock()
+        self._connected = True
         self.session.wake()  # no-op if the FSM is already ACTIVE
 
     async def _try_reconnect(self):
@@ -293,6 +309,7 @@ class RealtimeClient(ConversationPort):
                                                   self.max_reconnects))
             try:
                 self.transport = self._transport_factory()
+                self._connected = False
                 await self._connect(reconnect=True)
                 return True
             except Exception as exc:
@@ -309,6 +326,7 @@ class RealtimeClient(ConversationPort):
         except Exception:
             pass
         self.transport = self._transport_factory()
+        self._connected = False
         await self._connect(reconnect=True)
 
     # -- server events -----------------------------------------------------------

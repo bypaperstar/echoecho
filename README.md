@@ -13,9 +13,11 @@ See **[PLAN.md](PLAN.md)** for the full architecture, decisions (and what was re
 
 ## Mac runbook (from zero to talking)
 
-**HEADPHONES REQUIRED.** There is no echo cancellation over the raw WebSocket:
-on speakers, echoecho hears itself and barge-in goes haywire. AirPods or any
-headphones — this is the one hard demo-day rule.
+Laptop speakers are supported. echoecho runs the rendered speaker signal and the
+microphone through WebRTC acoustic echo cancellation before uploading audio,
+adds conservative residual-echo suppression during playback/tails, and asks
+Realtime for far-field input noise reduction. Headphones still provide the
+most isolation, but they are no longer required.
 
 ```bash
 # 1. Clone, then make a plain venv (uv shown; pyenv/python3 -m venv also fine).
@@ -23,10 +25,8 @@ headphones — this is the one hard demo-day rule.
 #    sounddevice wheel and you get silent audio breakage.
 uv venv .venv && source .venv/bin/activate
 
-# 2. Install. requirements-mac.txt = requirements.txt + sounddevice, and pins
-#    vosk<=0.3.44 (the newest release with a macOS universal2 wheel; plain
-#    `pip install vosk` on Apple Silicon resolves to it anyway — the pin just
-#    makes it explicit).
+# 2. Install. requirements-mac.txt adds sounddevice, Vosk, and LiveKit's
+#    native WebRTC audio processor (AEC/high-pass processing).
 pip install -r requirements-mac.txt
 
 # 3. Sanity-check audio devices (should list your mic + output):
@@ -47,7 +47,7 @@ export OPENAI_API_KEY=sk-...
 #    then rerun and click "Allow" on the prompt.
 python3 echoecho.py --mic-check
 
-# 7. Run the daemon (put on your headphones first):
+# 7. Run the daemon — built-in Mac speakers and mic are supported:
 python3 echoecho.py --voice
 ```
 
@@ -93,9 +93,9 @@ keyless and headless.
 
 Full line-by-line scripts with timestamps: [`scripts/demo_cheatsheet.md`](scripts/demo_cheatsheet.md).
 
-1. **Doc co-writing** — "echoecho … let's write a one-page proposal for a team offsite in Lisbon." (then goals, agenda, "read me just the goals", "that's it")
-2. **Groceries + recipes** — "echoecho … help me plan dinners this week, I'm thinking pad thai one night." (then halloumi, "drop the fish sauce", "that's it")
-3. **Learning** — "echoecho. Teach me about fermentation in food." (then "sourdough", answer the quiz question, "that's it")
+1. **Doc co-writing** — "echoecho echo … let's write a one-page proposal for a team offsite in Lisbon." (then goals, agenda, "read me just the goals", "that's it")
+2. **Groceries + recipes** — "echoecho echo … help me plan dinners this week, I'm thinking pad thai one night." (then halloumi, "drop the fish sauce", "that's it")
+3. **Learning** — "echoecho echo. Teach me about fermentation in food." (then "sourdough", answer the quiz question, "that's it")
 
 Since PR 10 ([PLAN-GENERIC.md](PLAN-GENERIC.md)) the product's one advertised
 kind is **`agent.run`**: any ask is handed to a headless coding agent
@@ -171,15 +171,15 @@ caveat). Run it with `cd app && npm install && npm start`; the blob look-lab
 lives in `app/prototypes/`. The web viewer at :8765 is unchanged.
 
 The Orb installs as a real **echoecho.app** (Dock icon, Launchpad, Spotlight):
-`bash scripts/echoechoctl.sh install-app` generates the icon procedurally (a
+`bash scripts/echoctl.sh install-app` generates the icon procedurally (a
 zero-dependency PNG encoder in `app/lib/icon.js`, `iconutil` → icns), packages
 with `@electron/packager`, and drops it in `/Applications`. Opening echoecho.app
 shows a **control panel** — daemon / VM / orb status plus Summon, Start/Stop
 daemon, Wake / Reset echoecho's Mac, Update & relaunch (git pull → reinstall →
 rebuild → reopen), and a start-at-login toggle. The same lifecycle commands
-work from a terminal: `scripts/echoechoctl.sh {status|start-daemon|stop-daemon|
+work from a terminal: `scripts/echoctl.sh {status|start-daemon|stop-daemon|
 boot-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
-`ECHOECHO_INPUT_DEVICE`) live in `~/.echoecho/daemon.env`.
+`ECHOECHO_INPUT_DEVICE`) live in `~/.echo/daemon.env`.
 
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
@@ -190,7 +190,7 @@ rewrite of them, asserts artifacts + task log, then the full test suite):
 | Symptom | Fix |
 |---|---|
 | RMS meter all zeros in `--mic-check` | macOS TCC denied the mic to your terminal app: `sudo tccutil reset Microphone com.apple.Terminal` (or `com.googlecode.iterm2`, `com.microsoft.VSCode`), rerun, click Allow. |
-| Phantom barge-ins / echoecho interrupts itself | You're on speakers. Wear headphones. Also check the wake chime isn't leaking into an external mic. |
+| Phantom barge-ins / echoecho interrupts itself | Check startup logs for `WebRTC echo cancellation ... enabled`. If it says echo cancellation is unavailable, rerun `pip install -r requirements-mac.txt`; the fallback prevents self-triggering but cannot preserve barge-in. Prefer the built-in mic + speakers as a matched laptop pair, lower speaker volume, or use headphones if an external/very reverberant setup still leaks. |
 | Wake word won't fire | Say it as two clear words, "echoecho". Check `python3 -m sounddevice` shows the right default input. Enter in the terminal is the manual-wake override. Rerun `bash scripts/fetch_models.sh` if `models/vosk-model-small-en-us-0.15/` is missing. |
 | `pip install vosk` fails / no wheel | You're on an exotic Python; the macOS wheel is `vosk<=0.3.44` (any CPython 3.x). Use the pinned requirements-mac.txt in a plain venv. |
 | Silent playback or PortAudio errors in conda | Use a plain uv/pyenv venv — conda's portaudio shadows the wheel-bundled one. |
@@ -215,7 +215,13 @@ rewrite of them, asserts artifacts + task log, then the full test suite):
 
 - `scripts/fetch_models.sh` downloads the Vosk small English model into `models/` (~40 MB, gitignored).
 - The Vosk feed is suspended while a session is ACTIVE so echoecho saying "echo" can't self-trigger; wake/end chimes are synthesized sine waves, no asset files.
-- Detector behavior on the committed fixtures (`fixtures/audio/`, exercised by `tests/test_wake.py`): both "echoecho" WAVs fire; `decoy_single_wake_word`, `decoy_speech` and `decoy_gecko` do not ("gecko" decodes as `[unk] echo [unk] echo` — never the contiguous doubled phrase).
+- During an ACTIVE session, the exact zero-padded PCM that reaches the output
+  device is the WebRTC AEC reference. Capture is split into the processor's
+  10 ms frames, then sent upstream in low-latency 20 ms Realtime appends. Raw
+  `mic.wav` recordings stay untouched for diagnosis; only network audio is
+  cleaned. If native AEC is unavailable, echoecho suppresses capture during
+  speaker activity and its short acoustic tail, sacrificing barge-in safely.
+- Detector behavior on the committed fixtures (`fixtures/audio/`, exercised by `tests/test_wake.py`): both "echoecho" WAVs fire; `decoy_single_echo`, `decoy_speech` and `decoy_gecko` do not ("gecko" decodes as `[unk] echo [unk] echo` — never the contiguous doubled phrase).
 
 ### AirPods / switching audio devices
 
@@ -253,7 +259,7 @@ lands in `recordings/` (gitignored, local only) at every wake:
 recordings/2026-08-12_183104_voice/
 ├── session.wav     open this one — stereo review mix: left = you, right = echoecho
 ├── mic.wav         what the mic heard (24 kHz mono; feed it to an STT to audit wake/VAD)
-├── echoecho.wav        what actually reached the speaker, chimes included
+├── echo.wav        what actually reached the speaker, chimes included
 ├── transcript.md   review sheet: conversation + tools/tasks/injections, mm:ss offsets
 ├── events.jsonl    the raw event timeline (flushed per line — survives a crash)
 └── meta.json       end reason, durations, devices, model, per-type counts
@@ -269,7 +275,7 @@ barge-in weirdness. `meta.json`'s `end_reason` tells you how sessions die
 - Only ACTIVE sessions are recorded — never the idle wake-word listening.
   Recording starts at the wake chime and stops when the session closes.
 - `session.wav` alignment is approximate: the echoecho track is shifted by the
-  measured in+out device latency (`echoecho_delay_s` in meta.json) so barge-in
+  measured in+out device latency (`echo_delay_s` in meta.json) so barge-in
   timing reads true. If PortAudio reported overflows/underflows mid-session
   (`stream_status` in meta.json), treat fine-grained L/R timing with
   suspicion — dropped capture blocks shift the mic track.
