@@ -345,8 +345,12 @@ async def voice_main(args):
             try:
                 # close wake mic -> refresh PortAudio -> open session streams
                 # with FRESH device resolution (hot-plug pickup, every wake)
-                start_session_audio(mic, audio, loop,
-                                    lambda ev: client.transport.send(ev))
+                # Open audio with capture upload gated. Realtime must receive
+                # session.update before any input_audio_buffer.append; 20 ms
+                # callbacks can otherwise race a slow WebSocket handshake.
+                start_session_audio(mic, audio, loop, send_event=None)
+                await client.connect()
+                audio.set_sender(client.send_input_audio)
                 audio.play_chime("wake")
                 await client.run()  # returns when the session is back to IDLE
             except Exception as exc:  # daemon never dies: back to wake loop

@@ -19,7 +19,8 @@ import pytest
 import echoecho
 from echoecho_app import config, events
 from echoecho_app.conversation.audio import (AudioIO, device_label,
-                                         refresh_devices, resolve_device)
+                                         BLOCK_FRAMES, refresh_devices,
+                                         resolve_device)
 from echoecho_app.wake.mic import WakeMic
 
 DEVICES = [
@@ -115,6 +116,10 @@ def test_resolve_default_and_index_never_import_sounddevice():
     assert resolve_device(7, "output") == 7  # already-resolved int passthrough
 
 
+def test_active_audio_callback_is_two_webrtc_frames():
+    assert BLOCK_FRAMES == 480  # 20 ms at 24 kHz; APM internally uses 10 ms
+
+
 def test_resolve_substring_case_insensitive(fake_sd):
     assert resolve_device("usb", "input") == 2
     assert resolve_device("MICROPHONE", "input") == 0
@@ -175,13 +180,24 @@ class StubDetector(object):
         self.resumed += 1
 
 
+class StubPipeline(object):
+    enabled = True
+    disabled_reason = None
+
+    def __init__(self):
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
+
+
 def test_session_sequence_never_refreshes_with_open_streams(fake_sd, feed_dir):
     mic = WakeMic().start()
     detector = StubDetector()
     audio = AudioIO(output_device="pods")
     assert len(fake_sd.open_streams) == 1  # wake mic only
 
-    # AirPods connect while echoecho is IDLE (after PortAudio init)...
+    # AirPods connect while Echo is IDLE (after PortAudio init)...
     fake_sd.devices.append(dict(AIRPODS))
 
     # wake: mic fully closes BEFORE the refresh; session streams open after,
@@ -222,7 +238,9 @@ def test_crashed_audio_start_leaves_no_stream_open_across_refresh(fake_sd):
     fake_sd.RawOutputStream = failing_out
     with pytest.raises(Boom):
         echoecho.start_session_audio(mic, audio, loop=None, send_event=None)
-    assert len(fake_sd.open_streams) == 1  # orphaned session input stream
+    # AudioIO.start now closes a partially-opened pair immediately; the outer
+    # finally below remains idempotent and keeps the refresh invariant.
+    assert len(fake_sd.open_streams) == 0
     # voice_main's finally path:
     audio.muted_capture = True
     audio.play_chime("end")
@@ -231,6 +249,78 @@ def test_crashed_audio_start_leaves_no_stream_open_across_refresh(fake_sd):
     assert fake_sd.refresh_violations == 0  # orphan closed before re-init
     assert len(fake_sd.open_streams) == 1   # wake mic back, nothing leaked
     assert detector.resumed == 1
+
+
+def test_stream_start_failure_closes_both_streams_and_pipeline(fake_sd):
+    class Boom(Exception):
+        pass
+
+    pipeline = StubPipeline()
+    audio = AudioIO(pipeline=pipeline)
+    original_out = fake_sd.RawOutputStream
+
+    def failing_out(**kwargs):
+        stream = original_out(**kwargs)
+
+        def fail_start():
+            raise Boom("speaker would not start")
+
+        stream.start = fail_start
+        return stream
+
+    fake_sd.RawOutputStream = failing_out
+    with pytest.raises(Boom):
+        audio.start(loop=None, send_event=None)
+    assert fake_sd.open_streams == []
+    assert audio._in_stream is None and audio._out_stream is None
+    assert pipeline.closed == 1
+
+
+def test_initial_output_latency_is_used_before_first_render_timestamp(fake_sd,
+                                                                      monkeypatch):
+    pipeline = StubPipeline()
+    delays = []
+    pipeline.process_capture = lambda data, delay: delays.append(delay) or data
+    pipeline.process_render = lambda data: None
+    for stream_type in (fake_sd.RawInputStream, fake_sd.RawOutputStream):
+        original_init = stream_type.__init__
+
+        def with_latency(self, _init=original_init, **kwargs):
+            _init(self, **kwargs)
+            self.latency = 0.03
+
+        stream_type.__init__ = with_latency
+
+    audio = AudioIO(pipeline=pipeline)
+    audio.start(loop=types.SimpleNamespace(
+        call_soon_threadsafe=lambda fn: None), send_event=lambda event: None)
+    time_info = types.SimpleNamespace(currentTime=2.05,
+                                      inputBufferAdcTime=2.0)
+    audio._in_callback(b"\x00\x00" * 10, 10, time_info, None)
+    audio.stop()
+    assert delays == [80]  # 50 ms input callback age + 30 ms output latency
+
+
+def test_stop_attempts_both_streams_when_first_close_fails(fake_sd):
+    class Boom(Exception):
+        pass
+
+    pipeline = StubPipeline()
+    audio = AudioIO(pipeline=pipeline)
+    audio.start(loop=None, send_event=None)
+    first = audio._in_stream
+    real_close = first.close
+
+    def fail_after_close():
+        real_close()
+        raise Boom("input close failed")
+
+    first.close = fail_after_close
+    with pytest.raises(Boom):
+        audio.stop()
+    assert fake_sd.open_streams == []
+    assert audio._in_stream is None and audio._out_stream is None
+    assert pipeline.closed == 1
 
 
 def test_end_session_audio_survives_mic_reopen_failure(fake_sd):
@@ -271,6 +361,7 @@ def test_audio_start_emits_resolved_names_into_feed(fake_sd, feed_dir, capsys):
     assert len(recs) == 1
     assert recs[0]["input"] == "USB Audio Device"
     assert recs[0]["output"] == "MacBook Pro Speakers"
+    assert recs[0]["processing"] == "webrtc-aec"
     out = capsys.readouterr().out
     assert "[audio] mic: USB Audio Device -> speaker: MacBook Pro Speakers" in out
 
@@ -292,6 +383,7 @@ def test_viewer_renders_audio_event_as_activity_line():
             / "index.html").read_text(encoding="utf-8")
     assert "'audio'" in html
     assert "🎧 mic: " in html and "speaker: " in html
+    assert "echo cancellation on" in html and "audio_processing" in html
 
 
 # -- echoecho.py flags / env --------------------------------------------------------
