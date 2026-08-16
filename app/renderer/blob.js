@@ -85,7 +85,8 @@ let anchor = { x: W - 40, y: 0 };
 
 // rest pose: where the body idles; scene moves it, we ease between poses
 const POSE_DUR = 0.9;
-let poseFrom = { x: W * 0.5, y: H * 0.55, r: Math.min(W, H) * 0.14 };
+// placeholder until the scene's first setRest (see scene.js REST_R_FRAC)
+let poseFrom = { x: W * 0.5, y: H * 0.5, r: Math.min(W, H) * 0.035 };
 let poseTo = { ...poseFrom };
 let poseT0 = -1e9;
 let poseDur = POSE_DUR;
