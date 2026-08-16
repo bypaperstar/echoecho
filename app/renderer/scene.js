@@ -25,30 +25,35 @@ const easeOutBack = (p) => { const k = 1.35; const q = p - 1; return 1 + q * q *
 const now = () => performance.now() / 1000;
 
 // -------------------------------------------------------------- rest layout
-// Where the user last dragged the blob, as window fractions (survives
-// restarts and resizes); null means the default rest spot.
+// Where the user last parked the blob, as window fractions (survives dismissal,
+// restarts and resizes); null until the first drag — see restPose.
 let userPose = null;
 try {
   const saved = JSON.parse(localStorage.getItem('echoecho.pose'));
   if (saved && isFinite(saved.fx) && isFinite(saved.fy)) userPose = saved;
-} catch { /* default spot */ }
+} catch { /* first-summon spot */ }
+
+// Rest radius as a fraction of the short window edge. echoecho used to sit at
+// 0.135 (a ~240 px centrepiece); it rests at a quarter of that so it reads as a
+// companion you park beside your work rather than something covering it.
+const REST_R_FRAC = 0.135 * 0.25;
 
 function restPose(shrunk) {
+  const r = Math.min(innerWidth, innerHeight) * REST_R_FRAC;
   if (shrunk) {
-    // companion: peeks from the free bottom-left corner beside the expanded
-    // item (which anchors top-right), still breathing
-    const free = Math.max(56, innerWidth * 0.08 - 24);
-    return { x: free * 0.55, y: innerHeight - free * 0.68,
-             r: clamp(free * 0.7, 36, 64) };
+    // companion: waits in the free bottom-left corner beside the expanded item
+    // (which anchors top-right), still breathing. Same radius as at rest — at a
+    // quarter size it already stays out of the expanded item's way, and it sits
+    // fully onscreen instead of half-clipped, since clicking it restores.
+    return { x: r * 1.4, y: innerHeight - r * 1.4, r };
   }
-  const m = Math.min(innerWidth, innerHeight);
-  const r = m * 0.135;
   if (userPose) {
     return { x: clamp(userPose.fx * innerWidth, r * 0.5, innerWidth - r * 0.5),
              y: clamp(userPose.fy * innerHeight, r * 0.5, innerHeight - r * 0.5),
              r };
   }
-  return { x: innerWidth * 0.38, y: innerHeight * 0.62, r };
+  // never parked: the first summon ever lands in the middle of the screen
+  return { x: innerWidth * 0.5, y: innerHeight * 0.5, r };
 }
 let pose = restPose(false);
 function applyRest(shrunk) {
@@ -298,10 +303,12 @@ function wisp(role, text) {
   el.textContent = text.length > 140 ? text.slice(0, 137) + '…' : text;
   el.style.opacity = 0;
   itemsEl.appendChild(el);
-  // conversation drifts up the blob's left; items emerge to its right
-  const x = clamp(pose.x - (pose.r * 1.5 + 64) + (role === 'user' ? -12 : 30),
+  // conversation drifts up the blob's left; items emerge to its right. The
+  // gutter clears the silhouette by half a wisp (max-width 230px in CSS) plus a
+  // gap — mostly constant, since a quarter-size body no longer sets the scale.
+  const x = clamp(pose.x - (pose.r * 1.15 + 130) + (role === 'user' ? -12 : 30),
                   140, innerWidth - 140);
-  const y = pose.y - pose.r * (role === 'user' ? 0.55 : 1.1);
+  const y = pose.y - pose.r * 0.55 - (role === 'user' ? 0 : 60);
   wisps.push({ el, x, y, t0: now(), life: 7, ph: wisps.length * 2.4 });
   while (wisps.length > 5) { wisps[0].el.remove(); wisps.shift(); }
 }
@@ -359,7 +366,9 @@ function dismissScene() {
   if (expanded) restore();
   // drop any in-flight grab: the window hides before its mouseup arrives, and
   // a stale drag state would hold passthrough off — a full-screen invisible
-  // window silently eating every click until the next mouseup
+  // window silently eating every click until the next mouseup. The mouseup that
+  // would have parked the blob never comes, so park it here.
+  if (drag && drag.moved) parkPose();
   drag = null;
   if (itemDrag) { itemDrag.it.el.style.cursor = ''; itemDrag = null; }
   hideWhenDone = true;
@@ -416,6 +425,13 @@ function overItem(x, y) {
 let drag = null;                      // blob drag: { dx, dy, moved }
 let itemDrag = null;                  // item drag: { it, dx, dy, moved }
 let lastDragEnd = -1e9;
+
+// remember where echoecho now sits: the next summon (this session or after a
+// restart) rests it here instead of the middle of the screen
+function parkPose() {
+  userPose = { fx: pose.x / innerWidth, fy: pose.y / innerHeight };
+  try { localStorage.setItem('echoecho.pose', JSON.stringify(userPose)); } catch {}
+}
 
 function updateHover(x, y) {
   const onBlob = blob.hitTest(x, y);
@@ -499,8 +515,7 @@ window.addEventListener('mouseup', (e) => {
   if (!drag) return;
   if (drag.moved) {
     lastDragEnd = now();                       // swallow the trailing dblclick
-    userPose = { fx: pose.x / innerWidth, fy: pose.y / innerHeight };
-    try { localStorage.setItem('echoecho.pose', JSON.stringify(userPose)); } catch {}
+    parkPose();
   }
   drag = null;
   updateHover(e.clientX, e.clientY);
