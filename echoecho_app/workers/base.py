@@ -17,19 +17,23 @@ PLUGINS_PACKAGE = "echoecho_app.plugins"
 
 
 def register(kind, description="", arg_schema=None, advertise=True,
-             advertise_when=None):
+             advertise_when=None, serialize=False):
     """Attach Contract-B metadata to the worker fn and add it to REGISTRY.
     advertise=False keeps a kind dispatchable (tests, scripts, follow_ups)
     without ever showing it to the voice model. advertise_when is an optional
     predicate () -> bool checked at prompt-build time, so a kind can appear
     only when its feature is configured (e.g. outbox.apply once the user has
-    shared folders)."""
+    shared folders). serialize runs tasks one at a time, in dispatch order:
+    True locks per kind; a string names a shared lock group, so every kind
+    that mutates workspace files (agent.run, doc.edit) can join one
+    "workspace.write" group and never race each other on the same doc."""
     def deco(fn):
         fn.kind = kind
         fn.description = description
         fn.arg_schema = arg_schema or {}
         fn.advertise = advertise
         fn.advertise_when = advertise_when
+        fn.serialize = serialize
         fn.is_plugin = fn.__module__.startswith(PLUGINS_PACKAGE)
         REGISTRY[kind] = fn
         return fn

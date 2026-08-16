@@ -111,6 +111,8 @@ def test_input_audio_sender_follows_replaced_transport():
 
 def test_four_tool_schema_matches_contract_a(monkeypatch):
     monkeypatch.delenv("ECHOECHO_PLUGINS", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # hides doc.edit
+    monkeypatch.delenv("ECHOECHO_FAKE_LLM", raising=False)
     from echoecho_app.workers.base import load_all
     load_all()
     tools = build_session_update()["session"]["tools"]

@@ -352,6 +352,9 @@ def render_transcript(evs, started):
             lines.append("[%s] ⚙ %s %s"
                          % (at, ev.get("name", "?"),
                             json.dumps(ev.get("args", {}), default=str)))
+        elif t == "tool_result":
+            lines.append("[%s] ⚙ %s → %s"
+                         % (at, ev.get("name", "?"), ev.get("result", "")))
         elif t == "task":
             say = ev.get("say")
             lines.append("[%s] ⏳ task %s %s: %s%s"

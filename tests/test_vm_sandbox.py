@@ -57,12 +57,29 @@ def test_env_and_arg_select_vm(tmp_path, monkeypatch):
     ctx = WorkerContext(workspace=tmp_path)
     assert isinstance(for_task(Task(id="t1", request=TaskRequest(
         kind="agent.run")), ctx), LumeVM)
-    # a per-task arg overrides the env default either way
+    # a per-task arg overrides the env default when a VM can actually start
     monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)
+    monkeypatch.setattr(vm_mod.shutil, "which",
+                        lambda name: "/usr/local/bin/lume")
     assert isinstance(for_task(Task(id="t2", request=TaskRequest(
         kind="agent.run", args={"sandbox": "vm"})), ctx), LumeVM)
     assert isinstance(for_task(Task(id="t3", request=TaskRequest(
         kind="agent.run", args={"sandbox": "shell"})), ctx), ShellSandbox)
+
+
+def test_arg_vm_without_lume_falls_back_to_shell(tmp_path, monkeypatch):
+    # a model-chosen sandbox='vm' on a VM-less machine (operator default =
+    # shell) must run on the shell tier, not die at prepare()
+    monkeypatch.delenv("ECHOECHO_SANDBOX", raising=False)
+    monkeypatch.setattr(vm_mod.shutil, "which", lambda name: None)
+    ctx = WorkerContext(workspace=tmp_path)
+    assert isinstance(for_task(Task(id="t1", request=TaskRequest(
+        kind="agent.run", args={"sandbox": "vm"})), ctx), ShellSandbox)
+    # but an explicit ECHOECHO_SANDBOX=vm still tries the VM (loud failure)
+    monkeypatch.setenv("ECHOECHO_SANDBOX", "vm")
+    vm_mod._shared_vm = None
+    assert isinstance(for_task(Task(id="t2", request=TaskRequest(
+        kind="agent.run")), ctx), LumeVM)
 
 
 def test_injected_sandbox_wins(tmp_path):

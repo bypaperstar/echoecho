@@ -192,10 +192,14 @@ SYSTEM_PROMPT_TEMPLATE = (
     "starting now\") and keep the conversation going; never wait for a task. "
     "System lines like '[task tN done] ...' report finished background work: "
     "weave them into the conversation naturally, as if you just remembered — "
-    "don't read them verbatim. Never read URLs, file paths, or raw markdown "
+    "don't read them verbatim. Until a task's done line arrives it is NOT "
+    "finished: if asked, say it's still in progress — never claim something "
+    "was written or saved before its done line. Never read URLs, file "
+    "paths, or raw markdown "
     "syntax aloud; say where a thing came from instead (\"a 30-minute pad "
     "thai on RecipeTin Eats\"). Use read_artifact to quote workspace files, "
-    "summarizing just the part the user asked for. Long tasks report "
+    "summarizing just the part the user asked for — re-read the file right "
+    "before any read-back, never quote it from memory. Long tasks report "
     "progress as '[task tN progress]' lines and check_tasks shows elapsed "
     "time — refer to tasks by what they are (\"the lease review\"), never by "
     "raw ids. To steer, extend, or answer a question from an earlier agent "
@@ -211,12 +215,22 @@ APPROVAL_GUIDANCE = (
     "tell the user what changed and that they can say \"apply it\" to save "
     "over the originals; on \"apply it\", dispatch outbox.apply.")
 
+# Appended when NO folders are shared: without this the model half-remembers
+# a boundary it can't explain — playtests showed users asking "save it to a
+# document" and hearing a refusal because they meant a real file.
+WORKSPACE_ONLY_GUIDANCE = (
+    " Files you create live in echoecho's own workspace, which the user "
+    "sees live in the browser — writing docs there always works. If they "
+    "want their real documents edited, offer a workspace draft and mention "
+    "that launching echoecho with a shared documents folder unlocks staged "
+    "edits to the real files.")
+
 
 def system_prompt():
     """The tuned prompt with the kinds line generated from the registry —
     call after load_all() so every advertised worker has registered."""
     from echoecho_app.workers import base  # lazy: workers import config
-    approval = APPROVAL_GUIDANCE if user_docs() else ""
+    approval = APPROVAL_GUIDANCE if user_docs() else WORKSPACE_ONLY_GUIDANCE
     return SYSTEM_PROMPT_TEMPLATE % {
         "kinds": base.kinds_fragment() or "(none)", "approval": approval}
 

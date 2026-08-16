@@ -327,5 +327,11 @@ def for_task(task, ctx):
         return injected
     tier = task.request.args.get("sandbox") or config.sandbox_tier()
     if tier == "vm":
+        # Voice models sometimes ask for the VM on a machine that has none.
+        # When the operator's own default is the shell tier and lume isn't
+        # installed, run there instead of killing the task; an explicit
+        # ECHOECHO_SANDBOX=vm with lume missing stays a loud failure.
+        if config.sandbox_tier() != "vm" and shutil.which("lume") is None:
+            return ShellSandbox()
         return shared_vm(workspace=ctx.workspace)
     return ShellSandbox()

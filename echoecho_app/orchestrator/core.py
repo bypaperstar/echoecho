@@ -75,6 +75,7 @@ class Orchestrator:
         self.ctx.extra.setdefault("tasks", self.tasks)
         self._seq = 0
         self._running = set()
+        self._serial_locks = {}  # kind -> asyncio.Lock for serialize=True kinds
         # PR 11 announcement watermark: which task results have been spoken.
         # live=True means on_injection reaches an ACTIVE session, so a result
         # injected now counts as announced; while IDLE (live=False) results
@@ -258,9 +259,19 @@ class Orchestrator:
         return report
 
     async def _run_task(self, task):  # type: (Task) -> None
+        worker = self.registry.get(task.kind)
+        lock = None
+        serialize = getattr(worker, "serialize", False)
+        if serialize:
+            # serialized kinds run one at a time, in dispatch order: two
+            # live-dispatched edits of the same doc must not race (the later
+            # dispatch carries the later intent and must win). A string
+            # names a lock group shared across kinds (workspace writers).
+            key = serialize if isinstance(serialize, str) else task.kind
+            lock = self._serial_locks.setdefault(key, asyncio.Lock())
+            await lock.acquire()
         task.status = "running"
         events.emit("task", task_id=task.id, kind=task.kind, status="running")
-        worker = self.registry.get(task.kind)
         ctx = dataclasses.replace(self.ctx, report=self._reporter(task))
         try:
             if worker is None:
@@ -273,6 +284,9 @@ class Orchestrator:
             task.status = "error"
         else:
             task.status = "done"
+        finally:
+            if lock is not None:
+                lock.release()
         task.result = result
         task.finished_at = time.time()
         task.session_id = result.data.get("session_id") or task.session_id
