@@ -170,16 +170,72 @@ def test_task_id_resumes_the_prior_agent_session(tmp_path):
     assert orch.tasks["t2"].result.say == "added a budget section"
 
 
-def test_resume_unknown_or_unfinished_task_is_a_clean_refusal(tmp_path):
+def test_serialized_kind_runs_one_at_a_time_in_order(tmp_path):
+    # agent.run is serialize=True: two live dispatches editing the same doc
+    # must run in dispatch order, never concurrently (the later dispatch
+    # carries the later intent and must win the file)
+    trace = []
+
+    async def slow(task, ctx):
+        trace.append(("start", task.id))
+        await asyncio.sleep(0.05)
+        trace.append(("end", task.id))
+        return TaskResult(say="ok")
+    slow.serialize = True
+
+    orch = Orchestrator(registry={"slow.edit": slow},
+                        log_path=tmp_path / "t.jsonl",
+                        workspace=tmp_path)
+
+    async def go():
+        loop = asyncio.ensure_future(orch.run())
+        orch.submit(TaskRequest(kind="slow.edit", instructions="draft"))
+        orch.submit(TaskRequest(kind="slow.edit", instructions="revise"))
+        assert await orch.drain()
+        loop.cancel()
+
+    asyncio.run(go())
+    assert trace == [("start", "t1"), ("end", "t1"),
+                     ("start", "t2"), ("end", "t2")]
+    from echoecho_app.workers import agent_run, doc_edit
+    assert agent_run.run_agent.serialize == "workspace.write"
+    assert doc_edit.run.serialize == "workspace.write"  # shared lock group
+
+
+def test_resume_unknown_task_id_runs_fresh_instead_of_refusing(tmp_path):
+    # Voice models invent label-like ids for NEW work; an unknown id must
+    # start a fresh run (no --resume), never a refusal loop.
+    fake = FakeAgentCLI(write_script(tmp_path / "s.jsonl", [
+        {"type": "result", "is_error": False, "result": "wrote the doc"}]))
+    orch, _, _ = run_orch(
+        [TaskRequest(kind="agent.run", instructions="write the doc",
+                     args={"task_id": "speech_update_v2"})],
+        tmp_path, extra={"agent_cli": fake})
+    result = orch.tasks["t1"].result
+    assert result.say == "wrote the doc"
+    assert not result.data.get("error")
+    _, resume = fake.resumes[-1]
+    assert resume is None  # fresh session, not a resume
+
+
+def test_resume_unfinished_task_is_a_clean_refusal(tmp_path):
+    # a genuinely known-but-still-running task still refuses politely
+    fake = FakeAgentCLI(write_script(tmp_path / "s.jsonl", [
+        {"type": "result", "is_error": False, "result": "x"}]))
+
+    class Running:
+        status = "running"
+        title = "the lease review"
+        session_id = None
+        result = None
+
     orch, _, _ = run_orch(
         [TaskRequest(kind="agent.run", instructions="steer it",
-                     args={"task_id": "t99"})],
-        tmp_path, extra={"agent_cli": FakeAgentCLI(
-            write_script(tmp_path / "s.jsonl", [
-                {"type": "result", "is_error": False, "result": "x"}]))})
+                     args={"task_id": "t7"})],
+        tmp_path, extra={"agent_cli": fake, "tasks": {"t7": Running()}})
     result = orch.tasks["t1"].result
-    assert "don't have a task t99" in result.say
-    assert result.data["error"].startswith("unknown task_id")
+    assert "still running" in result.say
+    assert result.data["error"] == "task t7 still running"
 
 
 # -- persistence + orphan re-attach -------------------------------------------

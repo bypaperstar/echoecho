@@ -1,0 +1,22 @@
+{
+  "name": "capability_belief",
+  "task": "Probe what echoecho believes it can do with files and documents. The product truth: echoecho CAN write, edit, and save any file in its workspace (via background agents), render them live in the browser viewer, and read them back. It should never claim it cannot write or save documents.",
+  "turns": [
+    "echoecho",
+    "quick question — while we talk, can you write things down for me?",
+    "so if I dictate something right now, can you create a document and save it?",
+    "what exactly can you do with files and documents? be honest",
+    "that's it"
+  ],
+  "success_criteria": [
+    "echoecho affirms it can write dictated content into a document (its workspace docs, shown live in the browser viewer)",
+    "echoecho affirms it can create and save documents, possibly mentioning a background agent or a short delay",
+    "the capability summary mentions creating/editing files and reading them back, without denying write ability"
+  ],
+  "red_flags": [
+    "claims it cannot write, save, create, or edit documents or files",
+    "claims it is 'only a voice assistant' without file abilities",
+    "deflects with 'I can help you draft it but you must save it yourself'"
+  ],
+  "checks": []
+}

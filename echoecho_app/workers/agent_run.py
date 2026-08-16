@@ -13,6 +13,7 @@ real agent makes — real CLIs never emit them.
 import asyncio
 import json
 import os
+import shutil
 import signal
 from pathlib import Path
 
@@ -23,14 +24,24 @@ from echoecho_app.services import vm as vm_mod
 from echoecho_app.workers.base import register
 
 KIND = "agent.run"
+# Only tell the model about the VM tier where one can actually start —
+# advertising it unconditionally made voice models pick sandbox='vm' for
+# mundane writes on VM-less machines and every task died at prepare().
+_VM_ADVERTISED = (shutil.which("lume") is not None
+                  or config.sandbox_tier() == "vm")
 DESCRIPTION = ("hand any other task to a background agent that can research, "
-               "write or edit any workspace file, and run code; pass "
-               "args.task_id to steer, extend, or answer a previous agent "
-               "task; args.sandbox='vm' runs it inside echoecho's own Mac VM "
-               "(pick it for risky or code-heavy work)")
+               "write or edit any workspace file, and run code; to steer, "
+               "extend, or answer a previous agent task, pass the tN id "
+               "echoecho returned for it as args.task_id — omit task_id for "
+               "new work"
+               + ("; args.sandbox='vm' runs it inside echoecho's own Mac VM "
+                  "(pick it for risky or code-heavy work)"
+                  if _VM_ADVERTISED else ""))
 ARG_SCHEMA = {"task_id": {
     "type": "string",
-    "description": "resume a previous agent task: same agent session"},
+    "description": "ONLY to steer/extend a previous task: the id echoecho "
+                   "returned when it was dispatched (e.g. 't3'). Omit for "
+                   "new work — never make up a name here"},
     "sandbox": {
     "type": "string", "enum": ["shell", "vm"],
     "description": "where the agent runs; vm = echoecho's own disposable Mac"}}
@@ -210,9 +221,13 @@ def _resume_session(task, ctx):
         return None, None
     prior = (ctx.extra.get("tasks") or {}).get(prior_id)
     if prior is None:
-        return None, TaskResult(
-            say="I don't have a task %s to pick back up." % prior_id,
-            data={"error": "unknown task_id %r" % prior_id})
+        # Voice models invent label-like ids ("speech_update_v2") for NEW
+        # work; refusing here locked live sessions into an unrecoverable
+        # dispatch-refuse-retry loop (playtest: 37 straight refusals while
+        # the user heard "all set"). An unknown id — invented, or stale
+        # after a restart — just means there is no session to resume, so
+        # run the instructions as a fresh task instead.
+        return None, None
     if prior.status in ("queued", "running"):
         return None, TaskResult(
             say="'%s' is still running — I can steer it once it finishes."
@@ -228,7 +243,10 @@ def _resume_session(task, ctx):
     return session, None
 
 
-@register(KIND, description=DESCRIPTION, arg_schema=ARG_SCHEMA)
+@register(KIND, description=DESCRIPTION, arg_schema=ARG_SCHEMA,
+          # shared group with doc.edit: runs share workspace files (and
+          # touched-file attribution diffs mtimes), so writers never overlap
+          serialize="workspace.write")
 async def run_agent(task, ctx):
     runtime = agent_cli.for_ctx(ctx)
     if runtime is None:

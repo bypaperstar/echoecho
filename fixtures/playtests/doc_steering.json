@@ -1,0 +1,28 @@
+{
+  "name": "doc_steering",
+  "task": "Steer an in-flight document: create a doc, then revise a detail. Tests that echoecho routes the revision back into the same document (ideally resuming the same agent task via args.task_id) rather than refusing or spawning an unrelated file.",
+  "turns": [
+    "echoecho",
+    "draft a one paragraph team offsite announcement in offsite dot md, we're going to Lisbon in October",
+    "~wait 75",
+    "actually change Lisbon to Porto, keep everything else",
+    "~wait 75",
+    "read me the announcement",
+    "that's it"
+  ],
+  "success_criteria": [
+    "offsite.md is created with a Lisbon announcement",
+    "after the correction, offsite.md says Porto and no longer says Lisbon",
+    "echoecho routes the edit to the existing document (same file), ideally reusing the earlier task via args.task_id",
+    "the read-back matches the final file content"
+  ],
+  "red_flags": [
+    "claims it cannot edit an existing document",
+    "creates a second, unrelated file for the correction",
+    "read-back still says Lisbon"
+  ],
+  "checks": [
+    {"file": "offsite.md", "contains_any": ["Porto"]},
+    {"file": "offsite.md", "not_contains": ["Lisbon"]}
+  ]
+}

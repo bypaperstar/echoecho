@@ -87,6 +87,23 @@ def test_doc_edit_end_to_end(tmp_path):
     assert "add three goals" in injections[0].text
 
 
+def test_doc_edit_infers_filename_from_instructions(tmp_path):
+    # voice models name the doc in prose instead of args.file; the first
+    # filename mentioned wins over the doc.md default
+    orch, _ = run_orch(
+        [TaskRequest(kind="doc.edit",
+                     instructions="add three goals to speech.md please")],
+        tmp_path)
+    assert orch.tasks["t1"].result.artifacts_touched == ["speech.md"]
+    assert (tmp_path / "speech.md").is_file()
+    assert not (tmp_path / "doc.md").exists()
+    # an explicit args.file still beats anything mentioned in prose
+    orch, _ = run_orch(
+        [TaskRequest(kind="doc.edit", instructions="update notes.md",
+                     args={"file": "actual.md"})], tmp_path)
+    assert orch.tasks["t1"].result.artifacts_touched == ["actual.md"]
+
+
 # -- recipe.search -> grocery.merge chaining ---------------------------------
 
 def test_recipe_search_chains_grocery_merge(tmp_path):

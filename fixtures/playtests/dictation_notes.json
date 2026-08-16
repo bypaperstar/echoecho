@@ -1,0 +1,30 @@
+{
+  "name": "dictation_notes",
+  "task": "Pure live dictation: the user rattles off notes and expects them captured verbatim-ish into a notes file, with a follow-up addition landing in the same file.",
+  "turns": [
+    "echoecho",
+    "take this down in notes dot md: the quarterly goals are ship the beta, cut latency in half, and hire two engineers",
+    "~wait 75",
+    "also note that the beta ships March first",
+    "~wait 75",
+    "read the notes back to me",
+    "that's it"
+  ],
+  "success_criteria": [
+    "echoecho dispatches a background task to write notes.md instead of refusing or just repeating the notes aloud",
+    "notes.md contains all three quarterly goals (ship the beta, cut latency in half, hire two engineers)",
+    "notes.md contains the March first ship date after the follow-up",
+    "the read-back reflects the actual file content via read_artifact"
+  ],
+  "red_flags": [
+    "claims it cannot write or save notes",
+    "only repeats the notes verbally without persisting them",
+    "the follow-up note lands in a different file or overwrites the goals"
+  ],
+  "checks": [
+    {"file": "notes.md", "contains_any": ["beta"]},
+    {"file": "notes.md", "contains_any": ["latency"]},
+    {"file": "notes.md", "contains_any": ["two engineers", "2 engineers"]},
+    {"file": "notes.md", "contains_any": ["March 1", "March first", "March 1st"]}
+  ]
+}

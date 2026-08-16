@@ -268,3 +268,34 @@ def test_doc_never_serves_partial_content(server, tmp_path):
     finally:
         stop.set()
         t.join(timeout=2)
+
+
+def test_proto_index_lists_repo_mockups(server):
+    """/proto is the home for repo-shipped design prototypes: it must list
+    the live-writer mockup that ships in mockups/."""
+    status, body = get(server, "/proto")
+    assert status == 200
+    assert b"live-writer-demo" in body
+
+
+def test_proto_serves_mockup_as_html(server):
+    """Repo mockups (unlike agent-written /doc files) run as real pages."""
+    host, port = server.httpd.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    try:
+        conn.request("GET", "/proto/live-writer-demo")
+        resp = conn.getresponse()
+        body = resp.read()
+        assert resp.status == 200
+        assert resp.getheader("Content-Type", "").startswith("text/html")
+        assert b"Live Writer" in body
+    finally:
+        conn.close()
+
+
+def test_proto_refuses_traversal_and_unknown_names(server):
+    for path in ("/proto/../echoecho_app/viewer/server.py",
+                 "/proto/%2e%2e%2fserver",
+                 "/proto/no-such-mockup"):
+        status, _ = get(server, path)
+        assert status == 404

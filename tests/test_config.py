@@ -13,7 +13,11 @@ def test_env_local_loads_and_env_wins(tmp_path, monkeypatch):
         "ECHOECHO_REALTIME_MODEL=gpt-realtime-2.1\n"
         "EMPTY_VALUE=\n"
         "not a kv line\n")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # setenv-then-delenv so monkeypatch records a restore point: the direct
+    # os.environ write inside load_env_local must not leak past this test
+    # (doc.edit advertisement is keyed on OPENAI_API_KEY)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-sentinel")
+    monkeypatch.delenv("OPENAI_API_KEY")
     monkeypatch.setenv("ECHOECHO_REALTIME_MODEL", "from-real-env")
     monkeypatch.delenv("EMPTY_VALUE", raising=False)
 

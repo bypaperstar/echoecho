@@ -10,6 +10,12 @@ GET /doc?f=path  -> any visible workspace file (relative path, subdirs ok);
                     bytes fall back to application/octet-stream. Every /doc
                     response carries a script-free CSP so script-capable
                     types (SVG!) stay inert opened as documents.
+GET /proto       -> tiny HTML index of the repo's design prototypes (mockups/)
+GET /proto/name  -> mockups/<name>.html served as a real page. These are
+                    repo-shipped, reviewed files (NOT agent-written workspace
+                    output), which is why they may run as text/html while
+                    /doc never does. Names are a single [A-Za-z0-9._-] token
+                    resolved strictly inside mockups/, so traversal 404s.
 GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
                     and whenever a 250ms poll sees any visible file change
@@ -27,8 +33,10 @@ GET /vnc-info    -> {"url": "vnc://[:pass@]host:port"} for echoecho's Mac, or 50
 Workspace writes are atomic (tmp + os.rename), so /doc never serves a
 half-written file.
 """
+import html as html_mod
 import json
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -41,6 +49,9 @@ from echoecho_app.services import artifacts, vm
 
 POLL_INTERVAL = 0.25
 INDEX = Path(__file__).with_name("index.html")
+# Repo-shipped design prototypes (e.g. the live-writer vision mockup). Repo
+# files are trusted the same way index.html is; agent-written files are not.
+MOCKUPS = Path(__file__).resolve().parents[2] / "mockups"
 EVENTS_FEED = ".events.jsonl"  # echoecho_app.events feed inside the workspace
 TRANSCRIPT_LIMIT = 400
 
@@ -148,8 +159,44 @@ class _Handler(BaseHTTPRequestHandler):
             self._events()
         elif parsed.path == "/vnc-info":
             self._vnc_info()
+        elif parsed.path == "/proto" or parsed.path == "/proto/":
+            self._proto_index()
+        elif parsed.path.startswith("/proto/"):
+            self._proto(parsed.path[len("/proto/"):])
         else:
             self._respond(404, "text/plain", b"not found")
+
+    def _proto_index(self):
+        """List every mockups/*.html by stem — a home for design prototypes
+        that outlive the branch they were sketched on."""
+        names = sorted(p.stem for p in MOCKUPS.glob("*.html")) \
+            if MOCKUPS.is_dir() else []
+        items = "".join(
+            '<li><a href="/proto/%s">%s</a></li>'
+            % (urllib.parse.quote(n), html_mod.escape(n)) for n in names) \
+            or "<li>none yet — add an .html file under mockups/</li>"
+        body = ("<!doctype html><meta charset='utf-8'>"
+                "<title>echoecho — prototypes</title>"
+                "<body style='font:15px/1.6 -apple-system,sans-serif;"
+                "background:#0e1014;color:#e9ecf4;padding:40px'>"
+                "<h2>Design prototypes</h2><p style='color:#8b93a7'>"
+                "Repo-shipped mockups from <code>mockups/</code> — "
+                "simulations for aligning on look &amp; feel, not the real "
+                "pipeline.</p><ul>%s</ul>" % items).encode("utf-8")
+        self._respond(200, "text/html; charset=utf-8", body)
+
+    def _proto(self, raw):
+        """Serve mockups/<name>.html. One strict path token, resolved and
+        parent-checked inside mockups/ — repo files only, no traversal."""
+        name = urllib.parse.unquote(raw)
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or ".." in name:
+            self._respond(404, "text/plain", b"no such prototype")
+            return
+        path = (MOCKUPS / (name + ".html")).resolve()
+        if path.parent != MOCKUPS.resolve() or not path.is_file():
+            self._respond(404, "text/plain", b"no such prototype")
+            return
+        self._respond(200, "text/html; charset=utf-8", path.read_bytes())
 
     def _vnc_info(self):
         """Where echoecho's Mac's VNC lives: ECHOECHO_VNC_URL override (tests/CI, or

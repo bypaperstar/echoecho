@@ -141,11 +141,21 @@ def list_recordings():
 
 def make_tool_handler(orch, port):
     """Contract A: the 4 tools, backed by the orchestrator + workspace."""
-    from echoecho_app import config
+    import json
+
+    from echoecho_app import config, events
     from echoecho_app.bus import TaskRequest
     from echoecho_app.services import artifacts
 
     def handle(name, args):
+        result = _handle(name, args)
+        # every port emits tool_call before calling us; pairing the result
+        # into the feed makes recordings reviewable (was the artifact there?)
+        events.emit("tool_result", name=name,
+                    result=json.dumps(result, default=str)[:500])
+        return result
+
+    def _handle(name, args):
         if name == "dispatch_task":
             task = orch.submit(TaskRequest(kind=args["kind"],
                                            instructions=args.get("instructions", ""),
