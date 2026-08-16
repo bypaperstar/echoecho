@@ -813,7 +813,23 @@ def main():
                          "checks_passed": 0, "checks_total": 0, "notes": [],
                          "soft": bool(scenario.get("soft"))})
 
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=str(REPO_ROOT), capture_output=True,
+                             text=True).stdout.strip()
+    except OSError:
+        sha = "?"
     report = ["# Silent voice playtest — %s" % stamp, "",
+              "- revision: `%s`  loopback: `%s`  model: `%s`" % (
+                  sha, args.device,
+                  os.environ.get("ECHOECHO_REALTIME_MODEL",
+                                 "gpt-realtime-2.1-mini")),
+              "- every daemon under test was isolated (own viewer port, "
+              "recordings dir, token file) and only its own PID signalled; "
+              "no audio reached a speaker",
+              "- limitations: transcript wording checks depend on the live "
+              "model; barge-in is a soft scenario",
+              "",
               "| scenario | checks | echoecho voiced (s) | duration | error |",
               "|---|---|---|---|---|"]
     hard_fail = False
