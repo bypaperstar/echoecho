@@ -166,25 +166,39 @@ def resolve_input(device):
 
 class Injector:
     """Plays WAVs into the loopback device — the harness's 'mouth'.
-    Every playback window is logged so the monitor can subtract it."""
+    Every playback window is logged so the monitor can subtract it.
+
+    Playback runs in a SUBPROCESS (this script's hidden --player mode): a
+    blocking output stream opened next to the monitor's callback input
+    stream in one process makes CoreAudio's AUHAL fail silently
+    (kAudioUnitErr_CannotDoInCurrentContext, RMS 0 on the loop) — separate
+    processes, like a callback-in/callback-out pair, work every time."""
 
     def __init__(self, device):
         self.device = device
         self.windows = []  # [(t0, t1)] wall-clock spans we were speaking
 
-    def play(self, wav_path, lead_s=0.35, tail_s=0.7):
-        import sounddevice as sd
-        rate, samples = read_wav_mono(wav_path)
-        pcm = (b"\x00" * int(rate * lead_s) * 2 + samples.tobytes()
-               + b"\x00" * int(rate * tail_s) * 2)
+    def play(self, wav_path):
         t0 = time.time()
-        stream = sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16",
-                                    device=resolve_output(self.device))
-        with stream:
-            block = 2400 * 2
-            for i in range(0, len(pcm), block):
-                stream.write(pcm[i:i + block])
+        subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                        "--player", str(wav_path), "--device", self.device],
+                       check=True, capture_output=True)
         self.windows.append((t0, time.time() + 0.2))  # +device drain slop
+
+
+def player_main(wav_path, device, lead_s=0.35, tail_s=0.7):
+    """--player: block until the WAV (plus VAD-friendly lead/tail silence)
+    has been written to the loopback device, then exit."""
+    import sounddevice as sd
+    rate, samples = read_wav_mono(wav_path)
+    pcm = (b"\x00" * int(rate * lead_s) * 2 + samples.tobytes()
+           + b"\x00" * int(rate * tail_s) * 2)
+    stream = sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16",
+                                device=resolve_output(device))
+    with stream:
+        block = 2400 * 2
+        for i in range(0, len(pcm), block):
+            stream.write(pcm[i:i + block])
 
 
 class LoopMonitor:
@@ -712,33 +726,21 @@ def preflight(args):
         except Exception as exc:
             row("wake detector vs say(1)", False, str(exc))
 
-    # loopback: play a tone into the device, hear it back — silently
+    # loopback: play a tone into the device, hear it back — silently. One
+    # duplex playrec stream: the arrangement CoreAudio always allows (see
+    # the Injector docstring for the arrangement it silently doesn't).
     try:
+        import numpy as np  # sounddevice's convenience API needs it
         import sounddevice as sd
-        tone = array.array("h", (int(0.4 * 32767 * math.sin(2 * math.pi * 440
-                                                            * i / INJECT_RATE))
-                                 for i in range(INJECT_RATE)))
-        got = {"rms": 0.0}
-
-        def cb(indata, frames, t, status):
-            buf = array.array("h")
-            buf.frombytes(bytes(indata))
-            acc = sum(s * s for s in buf)
-            got["rms"] = max(got["rms"], math.sqrt(acc / max(1, len(buf))))
-
-        in_stream = sd.RawInputStream(samplerate=INJECT_RATE, channels=1,
-                                      dtype="int16",
-                                      device=resolve_input(args.device),
-                                      callback=cb)
-        with in_stream:
-            out = sd.RawOutputStream(samplerate=INJECT_RATE, channels=1,
-                                     dtype="int16",
-                                     device=resolve_output(args.device))
-            with out:
-                out.write(tone.tobytes())
-            time.sleep(0.3)
-        row("silent loopback", got["rms"] > 300,
-            "RMS %.0f (all-zeros = TCC mic permission denied)" % got["rms"])
+        t = np.arange(INJECT_RATE) / float(INJECT_RATE)  # 1 s
+        tone = (0.4 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        dev = (resolve_input(args.device), resolve_output(args.device))
+        rec = sd.playrec(tone.reshape(-1, 1), samplerate=INJECT_RATE,
+                         channels=1, device=dev)
+        sd.wait()
+        rms = float(np.sqrt((rec.astype(np.float64) ** 2).mean())) * 32767
+        row("silent loopback", rms > 300,
+            "RMS %.0f (all-zeros = TCC mic permission denied)" % rms)
     except Exception as exc:
         row("silent loopback", False, str(exc))
 
@@ -786,7 +788,12 @@ def main():
         "ECHOECHO_PLAYTEST_VOICE", ""),
         help="say(1) voice for synthesized turns (default: system voice)")
     ap.add_argument("--viewer-port", type=int, default=DEFAULT_VIEWER_PORT)
+    ap.add_argument("--player", metavar="WAV", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if args.player:  # internal: Injector's subprocess playback mode
+        player_main(args.player, args.device)
+        return
 
     if args.preflight:
         sys.exit(0 if preflight(args) else 1)
