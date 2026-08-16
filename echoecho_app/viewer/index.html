@@ -1,8 +1,11 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1116">
 <title>echoecho — live session</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%234da3ff'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%234da3ff' stroke-opacity='.55' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='15' fill='none' stroke='%234da3ff' stroke-opacity='.25' stroke-width='1.5'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
@@ -56,12 +59,27 @@
   #model { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   #taskcount.busy { color: var(--accent); }
 
+  /* ---------- connection-lost banner ---------- */
+  #conn {
+    display: none; flex: 0 0 auto; padding: 6px 18px; font-size: 12.5px;
+    background: #3a2320; color: #f0b9b2; border-bottom: 1px solid #6a3a33;
+    text-align: center;
+  }
+  #conn.show { display: block; }
+
   /* ---------- two-pane layout ---------- */
   #main { flex: 1 1 auto; display: flex; min-height: 0; }
   #left  { flex: 0 0 55%; display: flex; flex-direction: column;
-           min-width: 0; border-right: 1px solid var(--border); }
+           min-width: 0; border-right: 1px solid var(--border);
+           position: relative; }
   #right { flex: 1 1 45%; display: flex; flex-direction: column;
            min-width: 0; background: var(--panel); }
+  @media (max-width: 880px) {
+    #main { flex-direction: column; }
+    #left { flex: 1 1 55%; min-height: 0; border-right: none;
+            border-bottom: 1px solid var(--border); }
+    #right { flex: 1 1 45%; min-height: 0; }
+  }
 
   /* ---------- transcript (left) ---------- */
   /* no scroll-behavior:smooth here: the feed is rebuilt on every refresh and
@@ -98,6 +116,16 @@
                       letter-spacing: 0.03em; margin-top: 18px; }
   #transcript-empty { color: var(--faint); text-align: center;
                       padding: 30px 0; }
+  #jump {
+    display: none; position: absolute; bottom: 16px; left: 50%;
+    transform: translateX(-50%); z-index: 5;
+    padding: 6px 16px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--accent); font-size: 12.5px;
+    font-weight: 600; font-family: inherit; cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+  }
+  #jump.show { display: block; }
+  #jump:hover { background: var(--panel); }
 
   /* ---------- workspace files (right): tree + type-aware pane ---------- */
   #workspace { flex: 1 1 auto; display: flex; min-height: 0; }
@@ -115,12 +143,34 @@
   #tree button.nested { padding-left: 20px; }
   #tree button.active { background: var(--panel); color: var(--text);
                         font-weight: 600; }
+  #docpane { flex: 1 1 auto; display: flex; flex-direction: column;
+             min-width: 0; min-height: 0; }
+  #filebar { display: none; flex: 0 0 auto; align-items: center; gap: 14px;
+             padding: 8px 30px; border-bottom: 1px solid var(--border);
+             font-size: 12.5px; color: var(--muted); }
+  #filebar.show { display: flex; }
+  #filebar #filename { font-family: ui-monospace, SFMono-Regular, Menlo,
+                       monospace; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; min-width: 0; }
+  #filebar .spacer { flex: 1 1 auto; }
+  #filebar a { flex: 0 0 auto; font-size: 12px; }
   #content { flex: 1 1 auto; overflow-y: auto; padding: 22px 30px 80px;
              line-height: 1.6; min-width: 0; }
   #content img { max-width: 100%; }
+  #content pre { position: relative; }
   #content pre.raw { background: var(--panel-2); padding: 14px;
                      border-radius: 8px; overflow-x: auto;
                      font-size: 12.5px; line-height: 1.5; }
+  .copy-btn {
+    position: absolute; top: 6px; right: 6px; padding: 3px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel); color: var(--muted); font-size: 11px;
+    font-family: inherit; cursor: pointer; opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  #content pre:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+  .copy-btn:hover { color: var(--text); }
+  .copy-btn.done { color: var(--green); border-color: #2c5a35; opacity: 1; }
   #content h1 { border-bottom: 1px solid var(--border); padding-bottom: 6px; }
   #content h1, #content h2, #content h3 { color: var(--text); }
   #content code { background: var(--panel-2); padding: 1px 5px;
@@ -132,6 +182,9 @@
   a { color: var(--accent); }
   .flash { animation: flash 1.4s ease-out; }
   @keyframes flash { 0% { background: #3d3a17; } 100% { background: transparent; } }
+  @media (prefers-reduced-motion: reduce) {
+    .badge.active .pip, .flash { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -141,6 +194,7 @@
   <span class="badge" id="state-badge"><span class="pip"></span><span id="state-label">IDLE</span></span>
   <div id="meta"><span id="taskcount"></span><span id="model"></span></div>
 </div>
+<div id="conn" role="status">Connection lost — reconnecting…</div>
 
 <div id="main">
   <div id="left">
@@ -156,11 +210,20 @@
       </details>
       <div id="feed"><div id="transcript-empty">Waiting for the session to start…</div></div>
     </div>
+    <button id="jump" type="button">↓ Jump to latest</button>
   </div>
   <div id="right">
     <div id="workspace">
       <div id="tree"></div>
-      <div id="content"><div id="empty">Waiting for workspace files…</div></div>
+      <div id="docpane">
+        <div id="filebar">
+          <span id="filename"></span>
+          <span class="spacer"></span>
+          <a id="fopen" target="_blank" rel="noopener">Open in new tab ↗</a>
+          <a id="fdownload">Download</a>
+        </div>
+        <div id="content"><div id="empty">Waiting for workspace files…</div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -217,6 +280,26 @@ function sectionMap(root) {
   return map;
 }
 
+// copy-to-clipboard button on every code block; text captured before the
+// button joins the pre so it never leaks into what gets copied
+function addCopyButtons(root) {
+  for (const pre of root.querySelectorAll('pre')) {
+    if (pre.querySelector('.copy-btn')) continue;
+    const text = (pre.querySelector('code') || pre).innerText;
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.type = 'button';
+    btn.textContent = 'Copy';
+    btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(text); } catch { return; }
+      btn.textContent = 'Copied';
+      btn.classList.add('done');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1200);
+    };
+    pre.appendChild(btn);
+  }
+}
+
 function showMarkdown(name, text) {
   const content = document.getElementById('content');
   // workspace markdown is agent-written = untrusted: sanitize before it
@@ -229,8 +312,12 @@ function showMarkdown(name, text) {
     pre.textContent = text;
     content.innerHTML = '';
     content.appendChild(pre);
+    addCopyButtons(content);
     return;
   }
+  // buttons go in before the section snapshot so both sides of the diff
+  // contain them and a button never reads as a changed section
+  addCopyButtons(content);
   const now = sectionMap(content), prev = lastSections[name];
   if (prev) {  // flash every element of a new or changed h2 section
     let key = '(intro)';
@@ -242,10 +329,22 @@ function showMarkdown(name, text) {
   lastSections[name] = now;
 }
 
+function updateFilebar(name, url) {
+  const bar = document.getElementById('filebar');
+  bar.className = 'show';
+  document.getElementById('filename').textContent = name;
+  document.getElementById('filename').title = name;
+  document.getElementById('fopen').href = url;
+  const dl = document.getElementById('fdownload');
+  dl.href = url;
+  dl.setAttribute('download', name.split('/').pop());
+}
+
 async function show(name) {
   active = name;
   renderTree();
   const url = '/doc?f=' + encodeURIComponent(name);
+  updateFilebar(name, url);
   const content = document.getElementById('content');
   const ext = extOf(name);
   if (IMAGE_EXTS.includes(ext)) {
@@ -259,20 +358,28 @@ async function show(name) {
     return;
   }
   const r = await fetch(url);
-  if (!r.ok) return;
+  // stale-load guard: show() can be re-entered (SSE auto-focus racing a tree
+  // click) — only the newest call may fill the pane, or the content could
+  // disagree with the filebar's name/download links
+  if (!r.ok || active !== name) return;
   const ctype = r.headers.get('Content-Type') || '';
   if (ext === 'md') {
-    showMarkdown(name, await r.text());
+    const text = await r.text();
+    if (active !== name) return;
+    showMarkdown(name, text);
   } else if (ctype.startsWith('text/')) {  // code/config/CSV: highlighted
+    const text = await r.text();
+    if (active !== name) return;
     const pre = document.createElement('pre');
     pre.className = 'raw';
     const code = document.createElement('code');
     code.className = 'language-' + ext;
-    code.textContent = await r.text();  // textContent: hljs gets inert input
+    code.textContent = text;  // textContent: hljs gets inert input
     pre.appendChild(code);
     content.innerHTML = '';
     content.appendChild(pre);
     if (window.hljs) hljs.highlightElement(code);
+    addCopyButtons(content);
   } else {  // pdf/binary: hand off to the browser
     content.innerHTML = '';
     const a = document.createElement('a');
@@ -369,17 +476,25 @@ function activityLine(ev) {
   return null;  // unknown/bubble types handled elsewhere
 }
 
-function bubbleRow(role, text) {
+function fmtTime(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+}
+
+function bubbleRow(role, text, ts) {
   const row = document.createElement('div');
   row.className = 'bubble-row ' + role;
   const wrap = document.createElement('div');
   const who = document.createElement('div');
   who.className = 'who';
   who.style.textAlign = role === 'user' ? 'right' : 'left';
-  who.textContent = role === 'user' ? 'you' : 'echoecho';
+  const time = fmtTime(ts);
+  who.textContent = (role === 'user' ? 'you' : 'echoecho') +
+    (time ? ' · ' + time : '');
   const b = document.createElement('div');
   b.className = 'bubble';
   b.textContent = text;
+  if (ts) b.title = new Date(ts * 1000).toLocaleString();
   wrap.appendChild(who); wrap.appendChild(b);
   row.appendChild(wrap);
   return row;
@@ -394,11 +509,11 @@ function renderTranscript(events) {
   }
   for (const ev of events) {
     if (ev.type === 'user_text') {
-      if ((ev.text || '').trim()) feed.appendChild(bubbleRow('user', ev.text));
+      if ((ev.text || '').trim()) feed.appendChild(bubbleRow('user', ev.text, ev.ts));
       continue;
     }
     if (ev.type === 'assistant_text') {
-      if ((ev.text || '').trim()) feed.appendChild(bubbleRow('assistant', ev.text));
+      if ((ev.text || '').trim()) feed.appendChild(bubbleRow('assistant', ev.text, ev.ts));
       continue;
     }
     const line = activityLine(ev);
@@ -406,6 +521,7 @@ function renderTranscript(events) {
     const div = document.createElement('div');
     div.className = 'activity' + (ev.type === 'run' ? ' section' : '');
     div.textContent = line[0];
+    if (ev.ts) div.title = new Date(ev.ts * 1000).toLocaleString();
     if (line[1]) {
       const note = document.createElement('span');
       note.className = 'note';
@@ -442,14 +558,27 @@ function updateHeader(events) {
   tc.textContent = running ? running + ' task' + (running > 1 ? 's' : '') +
     ' running' : '';
   tc.className = running ? 'busy' : '';
+  // tab title mirrors the session at a glance, even from another tab
+  document.title =
+    (state === 'ACTIVE' ? '🟢 live' : state === 'ENDING' ? '🌙 ending' : 'idle') +
+    (running ? ' · ' + running + ' task' + (running > 1 ? 's' : '') : '') +
+    ' — echoecho';
 }
 
 /* -------- auto-scroll: pinned to bottom unless the user scrolled up -------- */
 const pane = document.getElementById('transcript');
+const jump = document.getElementById('jump');
 let stickToBottom = true;
+function updateJump() { jump.className = stickToBottom ? '' : 'show'; }
 pane.addEventListener('scroll', () => {
   stickToBottom =
     pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40;
+  updateJump();
+});
+jump.addEventListener('click', () => {
+  pane.scrollTop = pane.scrollHeight;
+  stickToBottom = true;
+  updateJump();
 });
 
 async function refreshTranscript() {
@@ -460,11 +589,15 @@ async function refreshTranscript() {
     renderTranscript(events);
     updateHeader(events);
     if (stickToBottom) pane.scrollTop = pane.scrollHeight;
+    updateJump();
   } catch (e) { /* feed is best-effort; never break the page */ }
 }
 
 /* =================== SSE: one stream drives both panes =================== */
 const es = new EventSource('/events');
+// EventSource auto-reconnects; surface the gap so a dead daemon is obvious
+es.onerror = () => { document.getElementById('conn').className = 'show'; };
+es.onopen = () => { document.getElementById('conn').className = ''; };
 es.addEventListener('reload', ev => {
   refreshTranscript();  // events feed may have changed (it's in the poll)
   files = JSON.parse(ev.data).files;

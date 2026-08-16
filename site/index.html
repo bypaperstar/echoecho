@@ -8,6 +8,8 @@
 <meta property="og:title" content="echoecho — the always-on voice agent for your Mac">
 <meta property="og:description" content="Say “echoecho” and talk. Background agents do real work while you speak.">
 <meta property="og:type" content="website">
+<meta name="theme-color" content="#0b0d12">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%235ee6c8'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%235ee6c8' stroke-opacity='.55' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='15' fill='none' stroke='%235ee6c8' stroke-opacity='.25' stroke-width='1.5'/%3E%3C/svg%3E">
 <style>
   :root{
     --bg:#0b0d12; --panel:#12151d; --panel2:#171b25; --line:#232937;
@@ -68,8 +70,16 @@
   .demo .sys{color:var(--dim);font-style:italic}
 
   pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);
-    padding:20px 22px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.8}
+    padding:20px 22px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.8;
+    position:relative}
   pre .c{color:var(--dim)} pre .p{color:var(--accent2)}
+  .copy-btn{position:absolute;top:10px;right:10px;padding:5px 12px;
+    border:1px solid var(--line);border-radius:8px;background:var(--panel);
+    color:var(--muted);font:600 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    cursor:pointer}
+  .copy-btn:hover{color:var(--text)}
+  .copy-btn.done{color:var(--accent2);border-color:var(--accent2)}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.btn{transition:none}}
   .steps{counter-reset:step;list-style:none;display:flex;flex-direction:column;gap:10px;margin-bottom:22px}
   .steps li{color:var(--muted);padding-left:34px;position:relative}
   .steps li::before{counter-increment:step;content:counter(step);
@@ -155,7 +165,7 @@
 <section id="install">
   <div class="wrap">
     <h2>Install in five minutes</h2>
-    <p class="sub">You need macOS, Python 3, headphones, and an OpenAI API key.</p>
+    <p class="sub">You need macOS, Python 3, and an OpenAI API key. Headphones are optional.</p>
     <ol class="steps">
       <li><strong>Download</strong> the release above (or clone the repo) and open a terminal in the folder.</li>
       <li><strong>Install</strong> the environment and fetch the offline wake-word model (~40&nbsp;MB).</li>
@@ -170,11 +180,11 @@ bash scripts/fetch_models.sh
 echo 'OPENAI_API_KEY=sk-...' &gt; .env.local
 
 python3 echoecho.py --mic-check   <span class="c"># RMS meter should move when you speak</span>
-python3 echoecho.py --voice       <span class="c"># put your headphones on first</span></pre>
+python3 echoecho.py --voice       <span class="c"># speakers or headphones both work</span></pre>
     <p style="color:var(--muted);font-size:14.5px">Then open <span style="font-family:var(--mono)">http://127.0.0.1:8765/</span> for the live workspace, say <b style="color:var(--text)">“echoecho”</b>, and talk. Full runbook, troubleshooting table, and AirPods notes are in the <a href="https://github.com/bypaperstar/echoecho#readme">README</a>.</p>
     <div class="note">
       <div>🎧</div>
-      <div><b>Headphones required.</b> There’s no echo cancellation over the raw WebSocket — on speakers, echoecho hears itself and barge-in goes haywire. AirPods or any headphones work.</div>
+      <div><b>Speakers work; headphones isolate best.</b> echoecho runs your mic through WebRTC echo cancellation, so built-in Mac speakers are supported. Headphones (AirPods or any) still give the cleanest barge-in.</div>
     </div>
   </div>
 </section>
@@ -207,5 +217,22 @@ python3 echoecho.py --voice       <span class="c"># put your headphones on first
   </div>
 </footer>
 
+<script>
+// copy-to-clipboard on the install snippet (and any future code block)
+for (const pre of document.querySelectorAll('pre')) {
+  const text = pre.innerText;
+  const btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.type = 'button';
+  btn.textContent = 'Copy';
+  btn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(text); } catch { return; }
+    btn.textContent = 'Copied ✓';
+    btn.classList.add('done');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1500);
+  });
+  pre.appendChild(btn);
+}
+</script>
 </body>
 </html>

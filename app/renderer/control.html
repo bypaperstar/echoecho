@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy"
@@ -73,13 +73,13 @@
     </div>
 
     <div class="actions">
-      <button class="primary" id="b-summon">Summon echoecho ✦</button>
-      <button id="b-daemon">Start daemon</button>
-      <button id="b-vm">Wake echoecho's Mac</button>
-      <button id="b-reset" class="danger">Reset echoecho's Mac</button>
-      <button id="b-update">Update &amp; relaunch</button>
+      <button class="primary" id="b-summon" title="Reveal the orb scene on your desktop">Summon echoecho ✦</button>
+      <button id="b-daemon" title="Start or stop the background voice daemon">Start daemon</button>
+      <button id="b-vm" title="Clone and boot the sandbox VM (~a minute)">Wake echoecho's Mac</button>
+      <button id="b-reset" class="danger" title="Delete the VM and re-clone it fresh from the golden image">Reset echoecho's Mac</button>
+      <button id="b-update" title="Pull latest main, reinstall, rebuild, and relaunch">Update &amp; relaunch</button>
     </div>
-    <div id="note"></div>
+    <div id="note" role="status" aria-live="polite"></div>
 
     <div class="foot">
       <label><input type="checkbox" id="login" /> Start at login</label>

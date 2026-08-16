@@ -74,13 +74,20 @@
     $('v-orb').textContent = st.orbVisible ? 'revealed' : 'in the menu bar';
     $('b-daemon').textContent = daemonUp ? 'Stop daemon' : 'Start daemon';
     $('b-vm').textContent = vmUp ? "echoecho's Mac is awake" : "Wake echoecho's Mac";
-    $('b-vm').disabled = vmUp;
+    $('b-vm').disabled = vmUp || busy;  // the 3s poll must not undo the busy grey-out
     $('login').checked = !!st.loginItem;
+  }
+
+  // grey the whole action grid while one runs: double-clicks were already
+  // ignored via `busy`, but nothing showed the user that
+  function setActionsDisabled(on) {
+    document.querySelectorAll('.actions button').forEach((b) => { b.disabled = on; });
   }
 
   async function act(name, noteText) {
     if (busy) return;
     busy = true;
+    setActionsDisabled(true);
     $('note').textContent = noteText || '';
     try {
       const res = await window.ctl.action(name);
@@ -88,6 +95,7 @@
       else if (res && res.ok && !noteText) $('note').textContent = '';
     } finally {
       busy = false;
+      setActionsDisabled(false);
       refresh();
     }
   }
