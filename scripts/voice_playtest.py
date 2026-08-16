@@ -395,8 +395,10 @@ def check_files(scenario, ws):
     out = []
     for check in scenario.get("checks", []):
         if "file_glob" in check:
-            paths = sorted(p for p in ws.rglob(check["file_glob"])
-                           if p.is_file())
+            globs = check["file_glob"]
+            globs = [globs] if isinstance(globs, str) else globs
+            paths = sorted({p for g in globs for p in ws.rglob(g)
+                            if p.is_file() and not p.name.startswith(".")})
         else:
             p = ws / check["file"]
             paths = [p] if p.is_file() else []
@@ -631,6 +633,20 @@ def run_scenario(scenario, args, outdir):
             elif raw.startswith("~say-nowait "):
                 say_turn(raw.split(None, 1)[1], wait_reply=False)
             else:
+                # a session that already closed (silence timeout, the model
+                # hanging up on its own) can't hear this turn — record that
+                # and stop instead of timing out on every remaining turn
+                tail.poll()
+                open_sessions = sum(1 for e in tail.events
+                                    if e.get("type") == "session"
+                                    and e.get("event") == "connected")
+                closed_sessions = sum(1 for e in tail.events
+                                      if e.get("type") == "session"
+                                      and e.get("event") == "closed")
+                if closed_sessions >= open_sessions:
+                    notes.append("session closed before %r — remaining "
+                                 "turns skipped" % raw[:40])
+                    break
                 say_turn(raw)
     except Exception as exc:
         error = "%s: %s" % (type(exc).__name__, exc)

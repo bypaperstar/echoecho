@@ -28,20 +28,32 @@
   ],
   "checks": [
     {
-      "file_glob": "*acking*",
+      "file_glob": [
+        "*.md",
+        "*acking*",
+        "*hecklist*"
+      ],
       "contains_any": [
         "tent"
       ],
       "min_bullets": 4
     },
     {
-      "file_glob": "*acking*",
+      "file_glob": [
+        "*.md",
+        "*acking*",
+        "*hecklist*"
+      ],
       "contains_any": [
         "sunscreen"
       ]
     },
     {
-      "file_glob": "*acking*",
+      "file_glob": [
+        "*.md",
+        "*acking*",
+        "*hecklist*"
+      ],
       "contains_any": [
         "sleeping bag"
       ]
