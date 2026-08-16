@@ -188,3 +188,45 @@ def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
         asyncio.run(driver.key("cmd+s"))
     assert time.monotonic() - t0 < 5.0  # bounded, not a 30s hang
     assert "Accessibility" in str(ei.value)
+
+
+def test_computer_use_prepares_a_cold_vm_before_stepping(tmp_path):
+    """A cold daemon's first computer.use must boot the VM itself (the silent
+    Mac playtest caught 'VM not prepared'): a driver exposing .vm.prepare()
+    gets prepared once before any step; a prepare failure is a clean spoken
+    error, not a crash."""
+    class PreparedFake(FakeGuiDriver):
+        def __init__(self, ws):
+            super().__init__(ws)
+            outer = self
+
+            class Vm:
+                prepared = 0
+
+                async def prepare(self):
+                    Vm.prepared += 1
+                    outer.prepared_before_steps = not outer.actions
+            self.vm = Vm()
+
+    fake = PreparedFake(tmp_path / "ws")
+    task, _ = run_task({"steps": [{"action": "launch", "app": "TextEdit"}]},
+                       tmp_path, extra={"gui_driver": fake})
+    assert task.status == "done"
+    assert type(fake.vm).prepared == 1
+    assert fake.prepared_before_steps
+
+    class BrokenVmFake(FakeGuiDriver):
+        def __init__(self, ws):
+            super().__init__(ws)
+
+            class Vm:
+                async def prepare(self):
+                    raise RuntimeError("no golden image")
+            self.vm = Vm()
+
+    broken = BrokenVmFake(tmp_path / "ws")
+    task, _ = run_task({"steps": [{"action": "launch", "app": "TextEdit"}]},
+                       tmp_path, extra={"gui_driver": broken})
+    assert task.status == "done"  # a reported failure, not a worker crash
+    assert "couldn't start my Mac VM" in task.result.say
+    assert broken.actions == []  # never stepped without a VM

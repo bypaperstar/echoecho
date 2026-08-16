@@ -87,6 +87,18 @@ async def run_computer_use(task, ctx):
                 % MAX_STEPS,
             priority="interrupt", data={"error": "too many steps"})
 
+    # agent.run's worker prepares its sandbox before every task; the GUI tier
+    # must do the same, or computer.use on a cold daemon (no prior vm task to
+    # warm the shared VM) dies on ssh_argv's "VM not prepared"
+    prepare = getattr(getattr(driver, "vm", None), "prepare", None)
+    if prepare is not None:
+        try:
+            await prepare()  # idempotent: clone from golden, boot, wait for ssh
+        except Exception as exc:
+            return TaskResult(
+                say="I couldn't start my Mac VM: %s" % exc,
+                priority="interrupt", data={"error": str(exc)})
+
     shot_dir = "%s/%s" % (SHOT_DIR, task.id)
     done, shots = [], []
     for idx, step in enumerate(steps):
