@@ -40,13 +40,12 @@ let vncProxy = null; // lazy require, holds { start, stop }
 let visible = false;
 
 function sceneBounds() {
+  // The whole work area: the scene is click-through everywhere except the
+  // blob and its items, so covering the screen costs nothing — and it lets
+  // the orb (and its items) be dragged anywhere instead of hitting the edge
+  // of an invisible top-right box.
   const area = screen.getPrimaryDisplay().workArea;
-  const w = Math.min(Math.round(area.width * 0.74), 1320);
-  const h = Math.min(Math.round(area.height * 0.86), 900);
-  // Anchored toward the top-right, where the menu bar orb lives.
-  const x = area.x + area.width - w - 24;
-  const y = area.y + 8;
-  return { x, y, width: w, height: h };
+  return { x: area.x, y: area.y, width: area.width, height: area.height };
 }
 
 // Where the blob pours from, in window-relative coordinates.
@@ -129,9 +128,13 @@ let dismissing = false;
 
 function summon(reason) {
   if (!win) createWindow();
+  // re-cover the work area every summon: displays change, docks move
   const bounds = win.getBounds();
   const fresh = sceneBounds();
-  if (Math.abs(bounds.width - fresh.width) > 200) win.setBounds(fresh);
+  if (bounds.x !== fresh.x || bounds.y !== fresh.y ||
+      bounds.width !== fresh.width || bounds.height !== fresh.height) {
+    win.setBounds(fresh);
+  }
   visible = true;
   dismissing = false;
   win.show();

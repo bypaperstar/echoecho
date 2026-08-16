@@ -117,8 +117,10 @@ function emergeItem(el, kind, w, h, opts = {}) {
     `${50 - (dx / dl) * 50}% ${50 - (dy / dl) * 50}%`;
   setTransform(it, 0.01, 0.01, 0);
   el.addEventListener('click', () => {
+    if (now() - it.dragEnd < 0.4) return;   // a drag release is not a click
     if (it.mode === 'float' && !expanded) expand(it);
   });
+  it.dragEnd = -1e9;
   items.push(it);
   return it;
 }
@@ -355,6 +357,11 @@ window.orb.onReveal(({ anchor: a, reason }) => {
 
 function dismissScene() {
   if (expanded) restore();
+  // drop any in-flight grab: the window hides before its mouseup arrives, and
+  // a stale drag state would hold passthrough off — a full-screen invisible
+  // window silently eating every click until the next mouseup
+  drag = null;
+  if (itemDrag) { itemDrag.it.el.style.cursor = ''; itemDrag = null; }
   hideWhenDone = true;
   revealTo(0, DISMISS_DUR);
   for (const it of items) {
@@ -406,24 +413,47 @@ function overItem(x, y) {
   return false;
 }
 
-let drag = null;                      // { dx, dy, moved }
+let drag = null;                      // blob drag: { dx, dy, moved }
+let itemDrag = null;                  // item drag: { it, dx, dy, moved }
 let lastDragEnd = -1e9;
 
 function updateHover(x, y) {
   const onBlob = blob.hitTest(x, y);
-  setPassthrough(!(drag || onBlob || overItem(x, y)));
+  setPassthrough(!(drag || itemDrag || onBlob || overItem(x, y)));
   canvas.style.cursor =
     drag ? 'grabbing' : onBlob ? (expanded ? 'pointer' : 'grab') : '';
 }
 
+// which item a press may drag: docs grab anywhere on the card, echoecho's Mac
+// only by its title bar (the VNC screen owns its own mouse), never buttons,
+// never mid-animation modes
+function dragTargetItem(e) {
+  const el = e.target.closest ? e.target.closest('.item') : null;
+  if (!el) return null;
+  const it = items.find((i) => i.el === el);
+  // only settled items: mid-emerge the visual position lags `base`, so a
+  // grab would snap the card to its landing spot
+  if (!it || (it.mode !== 'float' && it.mode !== 'held')) return null;
+  if (e.target.closest('button')) return null;
+  if (it.kind === 'mac' && !e.target.closest('.mac-title')) return null;
+  return it;
+}
+
 window.addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || expanded || rv.value < 0.95) return;
   // grab the landed blob (not the companion — clicking that restores); only
   // from the canvas itself, so item presses that overlap the silhouette
   // (bubbled here) never start a drag
-  if (e.button !== 0 || e.target !== canvas || expanded || rv.value < 0.95) return;
-  if (!blob.hitTest(e.clientX, e.clientY)) return;
-  drag = { dx: pose.x - e.clientX, dy: pose.y - e.clientY, moved: false };
-  updateHover(e.clientX, e.clientY);
+  if (e.target === canvas && blob.hitTest(e.clientX, e.clientY)) {
+    drag = { dx: pose.x - e.clientX, dy: pose.y - e.clientY, moved: false };
+    updateHover(e.clientX, e.clientY);
+    return;
+  }
+  const it = dragTargetItem(e);
+  if (it) {
+    itemDrag = { it, dx: it.base.x - e.clientX, dy: it.base.y - e.clientY, moved: false };
+    updateHover(e.clientX, e.clientY);
+  }
 });
 
 window.addEventListener('mousemove', (e) => {
@@ -436,6 +466,19 @@ window.addEventListener('mousemove', (e) => {
                y: clamp(ny, r * 0.5, innerHeight - r * 0.5), r };
       blob.setRest(pose.x, pose.y, r, 0.12);   // short ease: liquid trail
     }
+  } else if (itemDrag) {
+    const it = itemDrag.it;
+    const nx = e.clientX + itemDrag.dx, ny = e.clientY + itemDrag.dy;
+    if (!itemDrag.moved && Math.hypot(nx - it.base.x, ny - it.base.y) > 3) {
+      itemDrag.moved = true;
+      releaseNeck(it);                         // a held card comes free in hand
+      it.el.style.cursor = 'grabbing';
+    }
+    if (itemDrag.moved) {
+      // same margins as spawnPointFor: anywhere onscreen, never lost offscreen
+      it.base.x = clamp(nx, it.w / 2 + 12, innerWidth - it.w / 2 - 12);
+      it.base.y = clamp(ny, it.h / 2 + 12, innerHeight - it.h / 2 - 12);
+    }
   } else if (e.buttons) {
     // mid-press over an item (VNC drag, text selection in a doc): freeze the
     // passthrough state so the gesture can stray off the item without the
@@ -446,6 +489,13 @@ window.addEventListener('mousemove', (e) => {
 });
 
 window.addEventListener('mouseup', (e) => {
+  if (itemDrag) {
+    if (itemDrag.moved) itemDrag.it.dragEnd = now();  // swallow the trailing click
+    itemDrag.it.el.style.cursor = '';
+    itemDrag = null;
+    updateHover(e.clientX, e.clientY);
+    return;
+  }
   if (!drag) return;
   if (drag.moved) {
     lastDragEnd = now();                       // swallow the trailing dblclick

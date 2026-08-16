@@ -113,6 +113,7 @@ body.demo {
 }
 .mac-title {
   flex: none;
+  cursor: grab; /* the title bar is the drag handle; the screen is the VNC's */
   height: 22px;
   display: flex;
   align-items: center;
