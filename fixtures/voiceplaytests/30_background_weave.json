@@ -1,0 +1,39 @@
+{
+  "name": "30_background_weave",
+  "task": "Background work weaves into live conversation: dispatch a real agent task by voice, keep talking while it runs, and the finished result must be injected back and mentioned naturally — the orchestrator's whole reason to exist.",
+  "env": {"ECHOECHO_SILENCE_TIMEOUT": "450"},
+  "turns": [
+    "~wake",
+    "in the background, write a three line haiku about geckos into a file called gecko dot md. while it runs, let's keep chatting",
+    "tell me one fun fact about lighthouses while we wait",
+    "~wait-task 300",
+    "so, how is that haiku coming along?",
+    "~end"
+  ],
+  "success_criteria": [
+    "the task is dispatched with a brief verbal ack, conversation continues during the run",
+    "the lighthouse question is answered while the task is still running",
+    "the finished task is injected at a turn boundary and echoecho reports it done",
+    "gecko.md exists with the haiku"
+  ],
+  "red_flags": [
+    "echoecho blocks the conversation waiting for the task",
+    "claims the haiku was written before the done line",
+    "never mentions the finished work"
+  ],
+  "checks": [
+    {"file_glob": "gecko*.md", "contains_any": ["gecko", "haiku"]}
+  ],
+  "event_checks": [
+    {"type": "tool_call", "where": {"name": "dispatch_task"}, "count_min": 1},
+    {"type": "task", "where": {"status": "done"}, "count_min": 1},
+    {"type": "injection", "count_min": 1}
+  ],
+  "http_checks": [
+    {"path": "/transcript", "expect_status": 200, "expect_contains": "lighthouse"}
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 4.0
+  },
+  "timeout_s": 700
+}

@@ -1,0 +1,40 @@
+{
+  "name": "40_since_last_session",
+  "task": "Work finishing while echoecho is asleep surfaces on the next wake: dispatch a slow task, end the session immediately, let the task finish while IDLE, wake again, and echoecho should know about it — the '[since last session]' path plus a second wake in one daemon lifetime.",
+  "turns": [
+    "~wake",
+    "in the background, write a limerick about submarines into a file called submarine dot md. no need to wait for it",
+    "~end",
+    "~wait-task 300",
+    "~wake",
+    "did anything finish while I was away?",
+    "~end"
+  ],
+  "success_criteria": [
+    "the first session ends with the task still running",
+    "the task completes while echoecho is IDLE (done event between the two sessions)",
+    "on the second wake echoecho mentions the finished limerick without being told about it",
+    "two clean wake/close cycles in one daemon run (wake mic re-arm works)"
+  ],
+  "red_flags": [
+    "the daemon dies between sessions",
+    "the second wake never fires (mic re-open/re-arm broken)",
+    "echoecho denies any background work happened"
+  ],
+  "checks": [
+    {"file_glob": "submarine*.md", "contains_any": ["submarine"]}
+  ],
+  "event_checks": [
+    {"type": "wake", "where": {"via": "voice"}, "count_min": 2},
+    {"type": "session", "where": {"event": "connected"}, "count_min": 2},
+    {"type": "session", "where": {"event": "closed"}, "count_min": 2},
+    {"type": "task", "where": {"status": "done"}, "count_min": 1}
+  ],
+  "http_checks": [
+    {"path": "/transcript", "expect_status": 200, "expect_contains": "submarine"}
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 2.0
+  },
+  "timeout_s": 700
+}

@@ -211,6 +211,44 @@ rewrite of them, asserts artifacts + task log, then the full test suite):
 - `ECHOECHO_FAKE_LLM=1 python3 echoecho.py --text` — interactive keyless REPL.
 - `python3 -m pytest tests/ -q` — everything except `-m network` live-endpoint tests.
 
+## Silent voice E2E on your Mac (no speakers, real everything)
+
+`scripts/playtest.py` drives the real voice model with text turns; it can
+never catch what only the audio path breaks (wake spotting on real capture,
+chimes, playback, barge-in, AEC, the recorder taps). The **silent voice
+playtests** close that gap on a Mac without playing a sound out loud: every
+turn is synthesized with `say(1)` and piped through a virtual loopback
+device — [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole)
+(`brew install blackhole-2ch`) — that echoecho is pinned to for both mic and
+speaker. echoecho's own voice re-enters its mic through the loop, so the AEC
+runs under exactly the laptop-speaker conditions it ships for. A monitor
+records the loop the whole time; voiced audio outside the harness's own
+playback windows is device-level proof echoecho *spoke*.
+
+```bash
+# from a checkout your live daemon is NOT using (a git worktree is perfect):
+python3 scripts/voice_playtest.py --preflight     # sanity table (devices,
+                                                  # key, model, wake-vs-say,
+                                                  # silent loopback, lume)
+python3 scripts/voice_playtest.py                 # every scenario but the VM
+python3 scripts/voice_playtest.py --include-slow  # + VM/computer-use scenario
+python3 scripts/voice_playtest.py --only 10_wake_and_roundtrip
+```
+
+Scenarios live in `fixtures/voiceplaytests/*.json` (same spirit as
+`fixtures/playtests/`, plus `event_checks` / `http_checks` / `audio_checks`
+sections and `~wake`, `~end`, `~play`, `~wait-task`, `~wait-voiced`,
+`~say-nowait` turn directives). Shipped coverage: decoy-vs-wake-word +
+spoken round-trip, checklist co-writing (viewer `/doc` included),
+background-task weaving, `[since last session]` across two wakes, barge-in
+(soft), and the Lume VM computer-use + `/vnc-info` portal surface (slow,
+opt-in; pin `ECHOECHO_VM_GOLDEN` / `ECHOECHO_VM_SSH_KEY` if your image and key
+predate the echoecho rename). Results + per-scenario recordings, workspace
+snapshots, and the raw event feed land in `voice-playtest-results/<stamp>/`
+with a `report.md`. The daemon under test gets its own viewer port,
+recordings dir, and viewer token file, and the harness only ever signals the
+PID it spawned — a live daemon elsewhere on the machine is never touched.
+
 ## Wake word + Mac audio notes
 
 - `scripts/fetch_models.sh` downloads the Vosk small English model into `models/` (~40 MB, gitignored).

@@ -252,7 +252,7 @@ class AudioIO:
         if rec is not None:
             if status:  # underflow: playback glitched, alignment suspect
                 rec.note_status("output", status)
-            rec.write_echo(chunk)  # zero-fill included: timeline stays real
+            rec.write_echoecho(chunk)  # zero-fill included: timeline stays real
 
     def play_chime(self, kind):
         self.feed_pcm(wake_chime() if kind == "wake" else end_chime())
@@ -319,7 +319,7 @@ class AudioIO:
             rec = recorder.active()
             if rec is not None:
                 # session.wav alignment: streams are built but not started, so
-                # this lands before the first write_echo (see set_echoecho_delay)
+                # this lands before the first write_echoecho (see set_echoecho_delay)
                 rec.set_echoecho_delay(_latency(self._in_stream)
                                    + _latency(self._out_stream))
             self._in_stream.start()

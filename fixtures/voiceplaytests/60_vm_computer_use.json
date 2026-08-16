@@ -1,0 +1,43 @@
+{
+  "name": "60_vm_computer_use",
+  "task": "echoecho's own Mac: ask by voice for something visible on its VM. The computer.use worker boots the Lume macOS guest, drives the GUI, and screenshots land in the shared workspace; the viewer's /vnc-info hands the portal a live VNC endpoint into that Mac. Requires lume + a golden image (preflight checks); pin ECHOECHO_VM_GOLDEN / ECHOECHO_VM_SSH_KEY if yours use different names.",
+  "slow": true,
+  "env": {
+    "ECHOECHO_SANDBOX": "vm",
+    "ECHOECHO_VM_NAME": "echoecho-playtest-vm",
+    "ECHOECHO_SILENCE_TIMEOUT": "700"
+  },
+  "turns": [
+    "~wake",
+    "show me something on your own mac. open text edit on your mac, and take a screenshot for me",
+    "~wait-task 480",
+    "what did you just do on your mac?",
+    "~end"
+  ],
+  "success_criteria": [
+    "echoecho dispatches computer.use (or agent.run on the vm tier) rather than refusing",
+    "the Lume VM boots from the golden image (clone on first use)",
+    "at least one screenshot PNG from inside the guest lands in the workspace",
+    "/vnc-info (with the viewer bearer token) returns a live vnc:// URL — the orb portal's data source",
+    "echoecho narrates what it did on its Mac"
+  ],
+  "red_flags": [
+    "claims it has no computer or cannot take screenshots",
+    "task times out on VM boot (golden image missing or misnamed)",
+    "/vnc-info 503s while the VM is running"
+  ],
+  "checks": [
+    {"file_glob": "screens/**/*.png", "exists_only": true}
+  ],
+  "event_checks": [
+    {"type": "tool_call", "where": {"name": "dispatch_task"}, "count_min": 1},
+    {"type": "task", "where": {"status": "done"}, "count_min": 1}
+  ],
+  "http_checks": [
+    {"path": "/vnc-info", "auth": true, "expect_status": 200, "expect_contains": "vnc://"}
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 3.0
+  },
+  "timeout_s": 900
+}

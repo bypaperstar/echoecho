@@ -1,0 +1,33 @@
+{
+  "name": "50_barge_in",
+  "task": "Barge-in: interrupt echoecho mid-answer with a new question, spoken over its own audio on the loopback. Soft scenario — semantic VAD may legitimately let a short answer finish — but the session must survive and answer the interruption.",
+  "soft": true,
+  "turns": [
+    "~wake",
+    "~say-nowait count out loud slowly from one to twenty, one number at a time",
+    "~wait-voiced",
+    "stop counting. quick question: what is two plus two?",
+    "~end"
+  ],
+  "success_criteria": [
+    "echoecho starts speaking the count (voiced audio detected on the loop)",
+    "the interruption lands: counting stops and the new question is answered with four",
+    "no crash, no feedback loop, clean close"
+  ],
+  "red_flags": [
+    "the interruption is transcribed as part of echoecho's own speech (AEC failure)",
+    "the session wedges after the barge-in"
+  ],
+  "event_checks": [
+    {"type": "session", "where": {"event": "connected"}, "count_min": 1},
+    {"type": "session", "where": {"event": "closed"}, "count_min": 1},
+    {"type": "assistant_text", "count_min": 2}
+  ],
+  "http_checks": [
+    {"path": "/transcript", "expect_status": 200, "expect_contains": "four"}
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 2.0
+  },
+  "timeout_s": 420
+}

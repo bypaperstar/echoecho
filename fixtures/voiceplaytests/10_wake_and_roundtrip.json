@@ -1,0 +1,43 @@
+{
+  "name": "10_wake_and_roundtrip",
+  "task": "The foundational voice loop, end to end at the device level: a decoy phrase must NOT wake echoecho, the wake word must, and a spoken question must come back as audible speech — verified from the loopback capture and the session recording, never from a speaker.",
+  "turns": [
+    "~play fixtures/audio/decoy_gecko.wav",
+    "~wake",
+    "please say the word pineapple for me",
+    "what is two plus two? answer in a short sentence",
+    "~end"
+  ],
+  "success_criteria": [
+    "the decoy audio does not open a session (exactly one wake event, via=voice)",
+    "the synthesized wake phrase opens a Realtime session",
+    "echoecho audibly speaks (voiced audio on the loopback outside the harness's own playback windows)",
+    "both user turns are transcribed and answered (pineapple echoed, 'four' in the answer)",
+    "the spoken end phrase closes the session cleanly"
+  ],
+  "red_flags": [
+    "decoy wakes the daemon (false positive)",
+    "session opens but echoecho is silent (playback path broken)",
+    "echoecho's own loopback voice retriggers VAD into a feedback loop"
+  ],
+  "event_checks": [
+    {"type": "wake", "where": {"via": "voice"}, "count_min": 1, "count_max": 1},
+    {"type": "session", "where": {"event": "connected"}, "count_min": 1},
+    {"type": "user_text", "count_min": 2},
+    {"type": "assistant_text", "count_min": 2},
+    {"type": "session", "where": {"event": "closed"}, "count_min": 1}
+  ],
+  "http_checks": [
+    {"path": "/", "expect_status": 200, "expect_contains": "html"},
+    {"path": "/transcript", "expect_status": 200, "expect_contains": "pineapple"},
+    {"path": "/transcript", "expect_status": 200, "expect_contains": "four"},
+    {"path": "/vnc-info", "expect_status": 403}
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 2.0,
+    "recording_has_assistant_audio": true,
+    "meta_user_turns_min": 2,
+    "meta_assistant_turns_min": 2
+  },
+  "timeout_s": 420
+}
