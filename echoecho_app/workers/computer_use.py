@@ -57,7 +57,12 @@ async def _do_step(driver, step, shot_dir, idx):
 
 @register(KIND,
           description="drive a Mac app inside echoecho's VM by a sequence of GUI "
-                      "steps (launch/type/key), capturing screenshots",
+                      "steps, capturing screenshots; REQUIRES args.steps, a "
+                      "list like [{'action':'launch','app':'TextEdit'}, "
+                      "{'action':'type','text':'hi'}, {'action':'key',"
+                      "'combo':'cmd+s'}, {'action':'wait','seconds':1}, "
+                      "{'action':'screenshot','name':'result'}] — prose in "
+                      "instructions alone does nothing",
           arg_schema={"steps": {
               "type": "array",
               "description": "GUI steps: {action: launch|type|key|wait|"
