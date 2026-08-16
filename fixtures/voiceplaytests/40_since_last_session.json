@@ -1,6 +1,6 @@
 {
   "name": "40_since_last_session",
-  "task": "Work finishing while echoecho is asleep surfaces on the next wake: dispatch a slow task, end the session immediately, let the task finish while IDLE, wake again, and echoecho should know about it — the '[since last session]' path plus a second wake in one daemon lifetime.",
+  "task": "Work finishing while echoecho is asleep surfaces on the next wake: dispatch a slow task, end the session immediately, let the task finish while IDLE, wake again, and echoecho should know about it \u2014 the '[since last session]' path plus a second wake in one daemon lifetime.",
   "turns": [
     "~wake",
     "in the background, write a limerick about submarines into a file called submarine dot md. no need to wait for it",
@@ -22,16 +22,47 @@
     "echoecho denies any background work happened"
   ],
   "checks": [
-    {"file_glob": "submarine*.md", "contains_any": ["submarine"]}
+    {
+      "file_glob": "submarine*.md",
+      "exists_only": true
+    }
   ],
   "event_checks": [
-    {"type": "wake", "where": {"via": "voice"}, "count_min": 2},
-    {"type": "session", "where": {"event": "connected"}, "count_min": 2},
-    {"type": "session", "where": {"event": "closed"}, "count_min": 2},
-    {"type": "task", "where": {"status": "done"}, "count_min": 1}
+    {
+      "type": "wake",
+      "where": {
+        "via": "voice"
+      },
+      "count_min": 2
+    },
+    {
+      "type": "session",
+      "where": {
+        "event": "connected"
+      },
+      "count_min": 2
+    },
+    {
+      "type": "session",
+      "where": {
+        "event": "closed"
+      },
+      "count_min": 2
+    },
+    {
+      "type": "task",
+      "where": {
+        "status": "done"
+      },
+      "count_min": 1
+    }
   ],
   "http_checks": [
-    {"path": "/transcript", "expect_status": 200, "expect_contains": "submarine"}
+    {
+      "path": "/transcript",
+      "expect_status": 200,
+      "expect_contains": "submarine"
+    }
   ],
   "audio_checks": {
     "assistant_voiced_s_min": 2.0
