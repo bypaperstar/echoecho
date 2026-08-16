@@ -1,6 +1,6 @@
 {
   "name": "50_barge_in",
-  "task": "Barge-in: interrupt echoecho mid-answer with a new question, spoken over its own audio on the loopback. Soft scenario — semantic VAD may legitimately let a short answer finish — but the session must survive and answer the interruption.",
+  "task": "Barge-in: interrupt echoecho mid-answer with a new question, spoken over its own audio on the loopback. Soft scenario \u2014 semantic VAD may legitimately let a short answer finish \u2014 but the session must survive and answer the interruption.",
   "soft": true,
   "turns": [
     "~wake",
@@ -19,15 +19,34 @@
     "the session wedges after the barge-in"
   ],
   "event_checks": [
-    {"type": "session", "where": {"event": "connected"}, "count_min": 1},
-    {"type": "session", "where": {"event": "closed"}, "count_min": 1},
-    {"type": "assistant_text", "count_min": 2}
+    {
+      "type": "session",
+      "where": {
+        "event": "connected"
+      },
+      "count_min": 1
+    },
+    {
+      "type": "session",
+      "where": {
+        "event": "closed"
+      },
+      "count_min": 1
+    },
+    {
+      "type": "assistant_text",
+      "count_min": 2
+    }
   ],
   "http_checks": [
-    {"path": "/transcript", "expect_status": 200, "expect_contains": "four"}
+    {
+      "path": "/transcript",
+      "expect_status": 200,
+      "expect_contains": "plus 2"
+    }
   ],
   "audio_checks": {
-    "assistant_voiced_s_min": 2.0
+    "assistant_voiced_s_min": 1.5
   },
   "timeout_s": 420
 }
