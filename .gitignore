@@ -7,3 +7,4 @@ models/
 recordings/
 workspace/*
 !workspace/.gitkeep
+playtest-results/

@@ -1,0 +1,34 @@
+{
+  "name": "live_doc_cowrite",
+  "task": "Co-write a document live by voice — the flagship demo. The user wants echoecho to start a doc, take their dictated content into it, extend it on request, and read it back. Success means real file writes land in the workspace and echoecho narrates progress instead of refusing or stalling.",
+  "turns": [
+    "echoecho",
+    "let's write a short thank you speech together and save it in a doc called speech dot md",
+    "start with: thank you all for an incredible year, we shipped more than we ever have",
+    "~wait 75",
+    "did that get written down?",
+    "~wait 20",
+    "now add a line thanking the volunteers by name, Maya and Jordan",
+    "~wait 75",
+    "read me what we have so far",
+    "that's it"
+  ],
+  "success_criteria": [
+    "echoecho dispatches a background task (agent.run or doc.edit) to create speech.md rather than refusing",
+    "speech.md exists in the workspace and contains the dictated opening line about an incredible year",
+    "speech.md thanks Maya and Jordan after the second request",
+    "when asked to read it back, echoecho uses read_artifact and speaks the actual content of speech.md",
+    "echoecho acknowledges each request briefly before dispatching and never claims it cannot write documents"
+  ],
+  "red_flags": [
+    "claims it cannot write, save, or create documents",
+    "says the content was saved when no file write actually happened",
+    "reads back content that does not match the actual file",
+    "goes silent or stalls instead of dispatching work"
+  ],
+  "checks": [
+    {"file": "speech.md", "contains_any": ["incredible year", "Incredible year"]},
+    {"file": "speech.md", "contains_any": ["Maya"]},
+    {"file": "speech.md", "contains_any": ["Jordan"]}
+  ]
+}
