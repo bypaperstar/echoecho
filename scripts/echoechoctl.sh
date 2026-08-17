@@ -143,7 +143,9 @@ cmd_build_app() {
   # find its scripts and show what it's running
   node -e "require('fs').writeFileSync('runtime-config.json', JSON.stringify({
     repoRoot: '$REPO',
+    version: require('fs').readFileSync('$REPO/VERSION', 'utf8').trim(),
     sha: require('child_process').execSync('git rev-parse --short HEAD', {cwd: '$REPO'}).toString().trim(),
+    updatedAt: require('child_process').execSync('git log -1 --format=%cI', {cwd: '$REPO'}).toString().trim(),
     builtAt: new Date().toISOString() }, null, 2))"
   npx --yes @electron/packager . echoecho --platform=darwin --arch=arm64 \
     --app-bundle-id app.echoecho.desktop \
