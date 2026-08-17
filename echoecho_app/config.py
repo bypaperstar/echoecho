@@ -103,6 +103,13 @@ def vm_boot_timeout():
     return float(os.environ.get("ECHOECHO_VM_BOOT_TIMEOUT", "180"))
 
 
+def vm_guest_path_prepend():
+    """Dirs prepended to PATH for commands echoecho runs in the guest: sshd
+    hands non-login commands a bare PATH with no /usr/local/bin, which is
+    where vm_golden.sh installs node + the claude CLI."""
+    return os.environ.get("ECHOECHO_VM_GUEST_PATH", "/usr/local/bin").strip()
+
+
 def user_docs():
     """ECHOECHO_USER_DOCS: host folders the user shares with echoecho, separated by
     the OS path separator (':' on macOS) — e.g. ~/Documents:~/Desktop. They

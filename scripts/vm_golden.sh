@@ -40,8 +40,9 @@ for i in sorted(j for j, c in enumerate(raw) if c in "[{"):
         continue
     if isinstance(d, list):
         d = d[0] if d else {}
-    print(d.get(sys.argv[1], "") if isinstance(d, dict) else "")
-    break
+    v = d.get(sys.argv[1], "") if isinstance(d, dict) else ""
+    print("" if v is None else v)   # JSON null must NOT become "None":
+    break                           # [ -n "None" ] is true, masking failures
 ' "$1"
 }
 

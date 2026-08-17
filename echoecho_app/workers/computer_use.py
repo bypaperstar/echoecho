@@ -68,6 +68,10 @@ async def _do_step(driver, step, shot_dir, idx):
               "description": "GUI steps: {action: launch|type|key|wait|"
                              "screenshot, ...}",
               "items": {"type": "object"}}},
+          # same group as agent.run/doc.edit: both write workspace files AND
+          # share the one warm LumeVM — unserialized, an agent.run budget
+          # breach could discard() (delete!) the VM under a live GUI task
+          serialize="workspace.write",
           advertise_when=_vm_configured)
 async def run_computer_use(task, ctx):
     driver = gui_mod.for_ctx(ctx)

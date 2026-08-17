@@ -8,3 +8,4 @@ recordings/
 workspace/*
 !workspace/.gitkeep
 playtest-results/
+voice-playtest-results/
