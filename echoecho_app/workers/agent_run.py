@@ -13,6 +13,7 @@ real agent makes — real CLIs never emit them.
 import asyncio
 import json
 import os
+import posixpath
 import shutil
 import signal
 from pathlib import Path
@@ -82,15 +83,23 @@ def _staged_changes(task, ctx):
     return out
 
 
-def _user_docs_convention(task):
+def _user_docs_convention(task, sandbox=None):
     """When the user has shared folders, teach the agent the mediated-write
     rule: their documents are read-only; propose changes via the outbox so
-    the user can approve them by voice. Keyed to this task's outbox dir."""
+    the user can approve them by voice. Keyed to this task's outbox dir.
+    In the vm tier the folders are named by the virtiofs mount path the
+    agent actually sees (host paths don't exist in the guest); MANIFEST
+    targets still use the original host path, which the mapping shows."""
     docs = config.user_docs()
     if not docs:
         return ""
     box = "%s/%s" % (config.OUTBOX_DIR, task.id)
-    listing = ", ".join(str(d) for d in docs)
+    if getattr(sandbox, "name", "") == "vm":
+        root = posixpath.dirname(config.vm_guest_workspace().rstrip("/"))
+        listing = ", ".join("%s (mounted for you at %s/%s)"
+                            % (d, root, d.name) for d in docs)
+    else:
+        listing = ", ".join(str(d) for d in docs)
     return (
         "\n\nThe user's shared folders (%s) are mounted READ-ONLY: read them "
         "freely but NEVER modify a file there directly. To propose a change to "
@@ -256,8 +265,11 @@ async def run_agent(task, ctx):
     resume, refusal = _resume_session(task, ctx)
     if refusal is not None:
         return refusal  # data["error"] auto-ranks as interrupt
+    # tier picked BEFORE the prompt: the user-docs convention must name the
+    # paths the agent will actually see (guest mounts in the vm tier)
+    sandbox = vm_mod.for_task(task, ctx)
     prompt = (task.request.instructions + PROMPT_SUFFIX
-              + _user_docs_convention(task))
+              + _user_docs_convention(task, sandbox))
     try:
         argv = runtime.command(prompt, resume=resume)
     except Exception as exc:  # e.g. a directory fixture ran out of scripts
@@ -267,7 +279,6 @@ async def run_agent(task, ctx):
     # sandbox ladder (PR 12): the tier decides what host argv actually runs —
     # tier 1 spawns the CLI directly, tier 2 wraps it in ssh into echoecho's VM
     # with the workspace virtiofs-mounted; the pipeline below is identical
-    sandbox = vm_mod.for_task(task, ctx)
     try:
         await sandbox.prepare()
     except Exception as exc:
@@ -330,7 +341,12 @@ async def run_agent(task, ctx):
                 % (budget / 60),
             data=data, artifacts_touched=touched)
     if state["error"] or rc != 0:
-        data["error"] = state["error"] or "%s exited %d" % (runtime.name, rc)
+        err = state["error"] or "%s exited %d" % (runtime.name, rc)
+        if rc == 255 and sandbox.name == "vm" and not state["error"]:
+            # 255 is ssh's OWN failure code: the VM hop broke, not the agent
+            err = ("ssh into the VM failed (exit 255) — connection or key "
+                   "auth broke (ECHOECHO_VM_SSH_KEY, guest reachable?)")
+        data["error"] = err
         if state["stderr"]:
             data["stderr"] = state["stderr"][-STDERR_TAIL:]
         return TaskResult(  # data["error"] auto-ranks as interrupt

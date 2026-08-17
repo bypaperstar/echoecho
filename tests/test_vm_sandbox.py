@@ -185,7 +185,11 @@ def test_lume_vm_wraps_argv_in_ssh(monkeypatch):
     assert "-i" in argv and "/keys/echoecho" in argv
     assert any("SendEnv=ANTHROPIC_API_KEY" in a for a in argv)
     remote = argv[-1]
-    assert remote.startswith("cd '/Volumes/My Shared Files/workspace' && exec ")
+    # sshd hands non-login commands a bare PATH without /usr/local/bin —
+    # where vm_golden.sh installs node + claude — so command() prepends it
+    assert remote.startswith(
+        "cd '/Volumes/My Shared Files/workspace' && "
+        'PATH=/usr/local/bin:"$PATH" exec ')
     # the agent argv is shell-quoted into the remote command, intact
     assert "'do a thing'" in remote and "--resume" in remote
     # cwd stays the host workspace (touched-file detection runs host-side)
@@ -250,6 +254,184 @@ def test_lume_get_parses_array_output(monkeypatch):
         return 1, "not found"
     vm._lume = fake_fail
     assert asyncio.run(vm._get()) is None
+
+
+# -- boot failure visibility + self-healing (found live on the Mac) -----------
+# The "never wakes up" incident: a detached `lume run` from a dead echoecho
+# still owned the VM's aux storage days later, `lume get` said "stopped", and
+# every boot died instantly with "Failed to lock auxiliary storage" — straight
+# into DEVNULL, so the user saw only a silent 180s timeout, every time.
+
+class _Runner:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+def _vm_with_key(monkeypatch, tmp_path, name):
+    key = tmp_path / "key"
+    key.write_text("k")
+    monkeypatch.setenv("ECHOECHO_VM_SSH_KEY", str(key))
+    return LumeVM(vm_name=name)
+
+
+def test_prepare_preflights_the_ssh_key(monkeypatch, tmp_path):
+    """A missing key fails BEFORE boot, naming the file and the env knob —
+    not minutes later as an opaque ssh auth error."""
+    monkeypatch.setenv("ECHOECHO_VM_SSH_KEY", str(tmp_path / "nope_ed25519"))
+    vm = LumeVM(vm_name="smoke-nokey")
+    with pytest.raises(vm_mod.SandboxUnavailable) as err:
+        asyncio.run(vm.prepare())
+    assert "nope_ed25519" in str(err.value)
+    assert "ECHOECHO_VM_SSH_KEY" in str(err.value)
+
+
+def test_dead_boot_fails_fast_with_lume_error(monkeypatch, tmp_path):
+    """`lume run` exiting nonzero surfaces its own words immediately instead
+    of burning the whole boot timeout in silence."""
+    vm = _vm_with_key(monkeypatch, tmp_path, "smoke-deadboot")
+    vm._boot_log_path().write_text(
+        "Error: Invalid virtual machine configuration. "
+        "Failed to lock auxiliary storage.")
+    vm._runner = _Runner(returncode=1)
+
+    async def fake_get():
+        return {"status": "stopped"}
+    vm._get = fake_get
+    with pytest.raises(vm_mod.SandboxUnavailable) as err:
+        asyncio.run(vm._wait_ready(timeout=30))
+    assert "exited (rc=1)" in str(err.value)
+    assert "Failed to lock auxiliary storage" in str(err.value)
+
+
+def test_stale_lock_recovery_reaps_and_reboots(monkeypatch, tmp_path):
+    """First boot dies on the aux-storage lock -> prepare() kills the orphan
+    holders and boots again, succeeding without human help."""
+    vm = _vm_with_key(monkeypatch, tmp_path, "smoke-stalelock")
+    state = {"boots": 0, "kills": 0}
+
+    async def fake_get():
+        if state["boots"] >= 2:  # after the re-boot the VM is healthy
+            return {"status": "running", "ipAddress": "192.168.64.9"}
+        return {"status": "stopped"}
+    vm._get = fake_get
+
+    async def fake_boot():
+        state["boots"] += 1
+        if state["boots"] == 1:  # zombie holds the lock: instant death
+            vm._boot_log_path().write_text("Failed to lock auxiliary storage.")
+            vm._runner = _Runner(returncode=1)
+        else:
+            vm._boot_log_path().write_text("INFO: booting fine")
+            vm._runner = _Runner(returncode=None)
+    vm._boot = fake_boot
+
+    async def fake_kill():
+        state["kills"] += 1
+    vm._kill_stale_holders = fake_kill
+
+    async def fake_ssh_up():
+        return True
+    vm._ssh_up = fake_ssh_up
+
+    asyncio.run(vm.prepare())
+    assert state == {"boots": 2, "kills": 1}
+    assert vm.ip == "192.168.64.9"
+
+
+def test_timeout_recovery_stops_and_reboots(monkeypatch, tmp_path):
+    """lume claims "running" but SSH never answers (drifted session state,
+    e.g. a stale IP after a daemon restart): prepare() forces `lume stop`
+    and boots once more before giving up."""
+    monkeypatch.setenv("ECHOECHO_VM_BOOT_TIMEOUT", "1.5")
+    vm = _vm_with_key(monkeypatch, tmp_path, "smoke-drift")
+    vm._boot_log_path().write_text("INFO: nothing suspicious")
+    state = {"boots": 0, "lume": []}
+
+    async def fake_get():
+        return {"status": "running", "ipAddress": "192.168.64.9"}
+    vm._get = fake_get
+
+    async def fake_boot():
+        state["boots"] += 1
+        vm._runner = _Runner(returncode=None)
+    vm._boot = fake_boot
+
+    async def fake_lume(*args):
+        state["lume"].append(args)
+        return 0, ""
+    vm._lume = fake_lume
+
+    async def fake_ssh_up():  # dead address until the VM is restarted
+        return state["boots"] >= 1
+    vm._ssh_up = fake_ssh_up
+
+    asyncio.run(vm.prepare())
+    # already "running" -> prepare skips the initial boot; the recovery is
+    # what stops the drifted VM and performs the one real boot
+    assert ("stop", "smoke-drift") in state["lume"]
+    assert state["boots"] == 1
+
+
+def test_stale_mounts_trigger_a_reboot_with_fresh_shares(monkeypatch, tmp_path):
+    """virtiofs shares bind at `lume run` time (and lume get reports
+    sharedDirectories as null even while one is live — captured on a real
+    Mac): a running VM booted by an older session serves the WRONG host
+    directory, so prepare() must prove the mount and reboot if stale."""
+    vm = _vm_with_key(monkeypatch, tmp_path, "smoke-stalemount")
+    vm.workspace = tmp_path / "ws"
+    state = {"boots": 0, "lume": [], "checks": 0}
+
+    async def fake_get():
+        return {"status": "running", "ipAddress": "192.168.64.9"}
+    vm._get = fake_get
+
+    async def fake_boot():
+        state["boots"] += 1
+        vm._runner = _Runner(returncode=None)
+    vm._boot = fake_boot
+
+    async def fake_lume(*args):
+        state["lume"].append(args)
+        return 0, ""
+    vm._lume = fake_lume
+
+    async def fake_ssh_up():
+        return True
+    vm._ssh_up = fake_ssh_up
+
+    async def fake_mounts_ok():  # stale until the VM is rebooted by us
+        state["checks"] += 1
+        return state["boots"] >= 1
+    vm._mounts_ok = fake_mounts_ok
+
+    asyncio.run(vm.prepare())
+    assert ("stop", "smoke-stalemount") in state["lume"]
+    assert state["boots"] == 1 and state["checks"] == 2
+
+
+def test_clone_failure_names_the_existing_vms(monkeypatch, tmp_path):
+    """The message that would have caught the echo->echoecho rename in
+    seconds: clone failed, and here is what your Mac actually has."""
+    vm = _vm_with_key(monkeypatch, tmp_path, "smoke-clonefail")
+    calls = []
+
+    async def fake_lume(*args):
+        calls.append(args)
+        if args[0] == "clone":
+            return 1, "Error: VM not found: echoecho-golden"
+        if args[0] == "ls":
+            return 0, '[{"name": "echo-golden"}, {"name": "echo-vm"}]'
+        return 1, ""
+    vm._lume = fake_lume
+
+    async def fake_get():
+        return None
+    vm._get = fake_get
+    with pytest.raises(vm_mod.SandboxUnavailable) as err:
+        asyncio.run(vm.prepare())
+    msg = str(err.value)
+    assert "echo-golden, echo-vm" in msg
+    assert "ECHOECHO_VM_GOLDEN" in msg
 
 
 # -- forced-kill disposes the VM (guest orphans can't outlive the budget) -----

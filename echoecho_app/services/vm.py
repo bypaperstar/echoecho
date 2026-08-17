@@ -24,10 +24,14 @@ guarantees no guest orphan outlives its budget.
 """
 import asyncio
 import json
+import posixpath
+import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from echoecho_app import config
@@ -105,18 +109,154 @@ class LumeVM:
     # -- lifecycle ------------------------------------------------------------
 
     async def prepare(self):
+        self._require_ssh_key()
         info = await self._get()
         if info is None:  # first use (or after reset): clone from golden
-            rc, out = await self._lume("clone", self.golden, self.vm_name)
-            if rc != 0:
-                raise SandboxUnavailable(
-                    "could not clone %r -> %r (is the golden image built? "
-                    "scripts/vm_golden.sh): %s"
-                    % (self.golden, self.vm_name, out.strip()[-300:]))
+            await self._clone_from_golden()
             info = await self._get()
         if not self._is_running(info):
             await self._boot()
+        try:
+            await self._wait_ready()
+        except SandboxUnavailable:
+            await self._recover_once()
+        if not await self._mounts_ok():
+            # virtiofs shares bind at `lume run` time: a VM booted by an
+            # older session serves ITS workspace at the guest mount, and
+            # every write from this session silently lands in the wrong
+            # host directory — reboot with this session's mounts attached
+            await self._lume("stop", self.vm_name)
+            await self._boot()
+            await self._wait_ready()
+            if not await self._mounts_ok():
+                raise SandboxUnavailable(
+                    "workspace %s is not visible inside VM %r at %s even "
+                    "after a reboot with the share attached (virtiofs "
+                    "mount failed)" % (self.workspace, self.vm_name,
+                                       config.vm_guest_workspace()))
+
+    async def _mounts_ok(self):
+        """Prove end-to-end that the guest sees THIS session's shares (lume
+        get reports sharedDirectories as null even while one is live, so
+        metadata can't be trusted): drop a nonce file host-side and look
+        for it through the guest, and compare the mount root's listing to
+        the expected share names — a doc folder added to (or revoked from)
+        ECHOECHO_USER_DOCS only takes effect at boot time."""
+        if self.workspace is None:
+            return True
+        root = posixpath.dirname(config.vm_guest_workspace().rstrip("/"))
+        nonce = ".echoecho-mount-%s" % uuid.uuid4().hex[:8]
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        host = self.workspace / nonce
+        host.write_text("mount-check", encoding="utf-8")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self.ssh_argv("test -f %s && ls -1 %s"
+                               % (self.guest_path(nonce), shlex.quote(root))),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), 20.0)
+            if proc.returncode != 0:
+                return False
+            seen = {n for n in out.decode("utf-8", "replace").splitlines()
+                    if n and not n.startswith(".")}  # a stray .DS_Store must
+            expected = {self.workspace.name}         # not force reboot loops
+            expected.update(d.name for d in config.user_docs())
+            return seen == expected
+        except (OSError, asyncio.TimeoutError):
+            return False
+        finally:
+            try:
+                host.unlink()
+            except OSError:
+                pass
+
+    def _require_ssh_key(self):
+        """Fail before boot, with the fix in the message: a missing key
+        otherwise surfaces minutes later as an opaque ssh auth error."""
+        key = Path(config.vm_ssh_key()).expanduser()
+        if not key.exists():
+            raise SandboxUnavailable(
+                "SSH key %s not found — scripts/vm_golden.sh creates it, or "
+                "point ECHOECHO_VM_SSH_KEY at the key your golden image was "
+                "built with" % key)
+
+    async def _clone_from_golden(self):
+        rc, out = await self._lume("clone", self.golden, self.vm_name)
+        if rc == 0:
+            return
+        names = await self._vm_names()
+        raise SandboxUnavailable(
+            "could not clone %r -> %r (existing VMs: %s — is the golden "
+            "image built and named right? scripts/vm_golden.sh, or set "
+            "ECHOECHO_VM_GOLDEN): %s"
+            % (self.golden, self.vm_name, ", ".join(names) or "none",
+               out.strip()[-300:]))
+
+    async def _vm_names(self):
+        """Names of every VM lume knows about — the clone-failure message
+        shows them so a renamed golden image is obvious at a glance."""
+        rc, out = await self._lume("ls", "-f", "json")
+        if rc != 0:
+            return []
+        for i in sorted(j for j, c in enumerate(out) if c in "[{"):
+            try:
+                data = json.loads(out[i:])
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                data = [data]
+            return [str(d.get("name")) for d in data
+                    if isinstance(d, dict) and d.get("name")]
+        return []
+
+    async def _recover_once(self):
+        """One shot at self-healing the two boot failures seen in the wild
+        before giving up:
+
+        * "Failed to lock auxiliary storage" — a detached `lume run` from a
+          dead echoecho (plus its Virtualization.framework child) still owns
+          the VM while `lume get` reports "stopped"; every boot dies
+          instantly until the orphans are reaped (found live: a runner from
+          three days earlier held the lock at 27% CPU).
+        * A plain timeout with lume claiming "running" — lume's session
+          state drifted (stale IP, daemon restart); `lume stop` resets it so
+          a fresh boot hands out a live address.
+        """
+        if self._boot_log_mentions_lock():
+            await self._kill_stale_holders()
+        else:
+            await self._lume("stop", self.vm_name)
+            await asyncio.sleep(1.0)
+        await self._boot()
         await self._wait_ready()
+
+    async def _kill_stale_holders(self):
+        """Best-effort reap of orphaned owners of this (disposable, scratch)
+        VM: the detached runner by command line, then whatever still holds
+        the aux-storage file."""
+        await self._run_quiet(
+            "pkill", "-f", r"lume run %s( |$)" % re.escape(self.vm_name))
+        await asyncio.sleep(2.0)
+        nvram = Path.home() / ".lume" / self.vm_name / "nvram.bin"
+        rc, out = await self._run_quiet("lsof", "-t", str(nvram))
+        pids = [p for p in out.split() if p.strip().isdigit()]
+        if pids:
+            await self._run_quiet("kill", "-9", *pids)
+            await asyncio.sleep(1.0)
+
+    @staticmethod
+    async def _run_quiet(exe, *args):
+        """(rc, combined output) of a host command; a missing binary is
+        rc=127 — recovery paths are best-effort, never a crash."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                exe, *args, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+        except OSError:
+            return 127, ""
+        out, _ = await proc.communicate()
+        return proc.returncode, out.decode("utf-8", "replace")
 
     def _is_running(self, info):
         return bool(info) and str(info.get("status", "")).lower() == "running"
@@ -133,29 +273,68 @@ class LumeVM:
             argv += ["--shared-dir", "%s:ro" % doc]
         return argv
 
+    def _boot_log_path(self):
+        return Path(tempfile.gettempdir()) / (
+            "echoecho-lume-run-%s.log" % self.vm_name)
+
+    def _boot_log_tail(self, limit=300):
+        try:
+            text = self._boot_log_path().read_text("utf-8", "replace").strip()
+        except OSError:
+            return ""
+        errs = [line for line in text.splitlines()
+                if "ERROR" in line or line.startswith("Error")]
+        tail = " | ".join(errs[-3:]) if errs else text[-limit:]
+        return tail[-limit:]
+
+    def _boot_log_mentions_lock(self):
+        try:
+            text = self._boot_log_path().read_text("utf-8", "replace")
+        except OSError:
+            return False
+        return "failed to lock" in text.lower()
+
     async def _boot(self):
         exe = shutil.which("lume")
         if exe is None:
             raise SandboxUnavailable("lume is not installed")
         # detached: `lume run` stays alive for the VM's lifetime in some lume
-        # versions; the daemon owns the VM either way, we only poll state
-        self._runner = await asyncio.create_subprocess_exec(
-            *self._boot_argv(exe), stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        # versions; the daemon owns the VM either way, we only poll state.
+        # Its output goes to a log file, NOT devnull: when the boot dies
+        # (e.g. the aux-storage lock), _wait_ready needs its last words.
+        with open(self._boot_log_path(), "wb") as log:
+            self._runner = await asyncio.create_subprocess_exec(
+                *self._boot_argv(exe), stdout=log,
+                stderr=asyncio.subprocess.STDOUT, start_new_session=True)
 
     async def _wait_ready(self, timeout=None):
-        """Poll until the VM reports running + an IP, then until SSH answers."""
-        deadline = time.monotonic() + (timeout or config.vm_boot_timeout())
+        """Poll until the VM reports running + an IP, then until SSH answers.
+        A `lume run` that exits nonzero fails FAST with its own error text
+        instead of burning the whole timeout in silence; rc=0 keeps polling
+        (some lume versions hand the VM to the daemon and return)."""
+        budget = timeout or config.vm_boot_timeout()
+        deadline = time.monotonic() + budget
+        status = None
         while time.monotonic() < deadline:
+            runner_rc = self._runner.returncode if self._runner else None
+            if runner_rc not in (None, 0):
+                raise SandboxUnavailable(
+                    "`lume run %s` exited (rc=%s) during boot: %s"
+                    % (self.vm_name, runner_rc,
+                       self._boot_log_tail() or "no output"))
             info = await self._get()
+            status = (info or {}).get("status")
             self.ip = (info or {}).get("ipAddress") or (info or {}).get("ip")
             if self._is_running(info) and self.ip:
                 if await self._ssh_up():
                     return
             await asyncio.sleep(1.0)
+        tail = self._boot_log_tail()
         raise SandboxUnavailable(
-            "VM %r did not become reachable within the boot timeout"
-            % self.vm_name)
+            "VM %r did not become reachable within %.0fs (last lume state: "
+            "status=%s ip=%s)%s"
+            % (self.vm_name, budget, status, self.ip,
+               "; lume run said: " + tail if tail else ""))
 
     async def _ssh_up(self):
         try:
@@ -168,10 +347,23 @@ class LumeVM:
 
     async def reset(self):
         """Snapshot rollback: throw the scratch VM away; the next prepare()
-        re-clones from the golden image (APFS clone: seconds)."""
+        re-clones from the golden image (APFS clone: seconds). Loud when the
+        delete leaves the VM behind — swallowing that would hand the NEXT
+        task a dirty VM with the killed task's guest processes still alive,
+        breaking the no-orphan-outlives-its-budget guarantee."""
         await self._lume("stop", self.vm_name)
-        await self._lume("delete", self.vm_name, "--force")
+        if self._runner is not None:  # reap our detached `lume run`: a
+            try:                      # lingering one holds the aux-storage
+                self._runner.terminate()  # lock and blocks every next boot
+            except ProcessLookupError:
+                pass
+            self._runner = None
+        rc, out = await self._lume("delete", self.vm_name, "--force")
         self.ip = None
+        if rc != 0 and await self._get() is not None:
+            raise SandboxUnavailable(
+                "could not delete VM %r (a dirty scratch VM would leak into "
+                "the next task): %s" % (self.vm_name, out.strip()[-300:]))
 
     # -- ssh into the guest ---------------------------------------------------
 
@@ -200,8 +392,13 @@ class LumeVM:
     # -- the one job: wrap the agent argv ------------------------------------
 
     def command(self, argv, workspace):
-        remote = "cd %s && exec %s" % (
-            shlex.quote(config.vm_guest_workspace()),
+        # sshd gives non-login commands a bare PATH (/usr/bin:/bin:...) that
+        # misses /usr/local/bin, where vm_golden.sh installs node + the
+        # claude CLI — without the prepend, bare `claude` exits 127
+        prepend = config.vm_guest_path_prepend()
+        path = 'PATH=%s:"$PATH" ' % shlex.quote(prepend) if prepend else ""
+        remote = "cd %s && %sexec %s" % (
+            shlex.quote(config.vm_guest_workspace()), path,
             " ".join(shlex.quote(a) for a in argv))
         return self.ssh_argv(remote), Path(workspace)
 
@@ -312,8 +509,12 @@ async def discard(sandbox):
     if reset is not None:
         try:
             await reset()
-        except Exception:
-            pass
+        except Exception as exc:
+            # discard runs in kill/error paths and must not raise, but a
+            # swallowed failed delete means the next task may inherit a
+            # dirty VM — say so where the operator can see it
+            print("[vm] WARNING: discard of %s failed: %s"
+                  % (getattr(sandbox, "name", "sandbox"), exc))
     if sandbox is _shared_vm:
         _shared_vm = None
 
