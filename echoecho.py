@@ -255,6 +255,58 @@ def end_session_audio(mic, audio, detector):
     detector.resume()
 
 
+def start_tether_watchdog(pid=None, interval=2.0, on_dead=None):
+    """Tie this daemon's life to the echoecho.app process.
+
+    The app and the wake word live and die together: echoechoctl/the orb pass
+    the app's pid as ECHOECHO_TETHER_PID, and when that process disappears —
+    Cmd-Q or a force quit alike — the daemon must not keep the mic open. Poll
+    (a non-child pid can't be waited on); on death send ourselves SIGINT so
+    voice_main's finally runs, with a hard-exit backstop in case the loop is
+    wedged mid-session. Returns the watcher thread, or None if untethered
+    (e.g. a bare `python echoecho.py --voice` in a terminal).
+    """
+    import signal
+    import threading
+    import time
+
+    if pid is None:
+        try:
+            pid = int(os.environ.get("ECHOECHO_TETHER_PID", "") or 0)
+        except ValueError:
+            pid = 0
+    if not pid:
+        return None
+
+    # echoechoctl starts us as `( nohup ... & )` from a non-interactive shell,
+    # which hands SIGINT down as SIG_IGN — and CPython leaves ignored signals
+    # ignored, so the watchdog's self-SIGINT below would be discarded and
+    # every managed shutdown would take the hard-exit backstop instead of the
+    # clean finally path. Restore the KeyboardInterrupt handler.
+    if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    def default_on_dead():
+        print("[tether] app (pid %d) is gone — shutting down with it" % pid)
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(10)
+        os._exit(0)
+
+    def watch():
+        while True:
+            time.sleep(interval)
+            try:
+                os.kill(pid, 0)  # existence probe, no signal delivered
+            except ProcessLookupError:  # not OSError: EPERM means it EXISTS
+                (on_dead or default_on_dead)()
+                return
+
+    t = threading.Thread(target=watch, daemon=True, name="tether")
+    t.start()
+    print("[tether] tied to app pid %d — daemon exits when it does" % pid)
+    return t
+
+
 async def voice_main(args):
     """Mac-only always-on daemon: wake loop -> Realtime session -> back to
     IDLE. The Vosk feed is paused while ACTIVE (Session's wake_pause hook) so
@@ -426,6 +478,7 @@ def main(argv=None):
                      "Try --text or --script fixtures/smoke.txt here.")
         if not os.environ.get("OPENAI_API_KEY"):
             sys.exit("--voice needs OPENAI_API_KEY set.")
+        start_tether_watchdog()
         try:
             asyncio.run(voice_main(args))
         except KeyboardInterrupt:

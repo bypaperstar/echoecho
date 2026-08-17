@@ -181,6 +181,15 @@ work from a terminal: `scripts/echoctl.sh {status|start-daemon|stop-daemon|
 boot-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
 `ECHOECHO_INPUT_DEVICE`) live in `~/.echo/daemon.env`.
 
+**The app and the wake word live and die together.** Launching echoecho.app
+starts the wake-word daemon; quitting — or force-quitting — the app takes the
+daemon down with it (the daemon tethers to the app's pid via
+`ECHOECHO_TETHER_PID` and exits when that process disappears). The reverse
+holds too: `start-daemon` from a terminal launches the app first if needed, so
+whenever echoecho is listening there's a Dock icon saying so, and killing that
+Dock icon always silences the mic. A bare `python echoecho.py --voice` in a
+terminal stays untethered for debugging.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.

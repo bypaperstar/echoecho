@@ -1,9 +1,11 @@
 // echoecho Orb — menu-bar shell.
 //
 // Owns: the tray, the transparent frameless scene window, the reveal/dismiss
-// lifecycle, and all HTTP to the Python viewer server (see lib/backend.js for
-// why HTTP lives here and not in the renderer). The VNC bridge is lazy-loaded
-// from vnc-proxy.js only when the renderer asks for echoecho's Mac.
+// lifecycle, the wake-word daemon's lifecycle (started on launch, tethered to
+// this process so even a force quit takes it down, stopped on quit), and all
+// HTTP to the Python viewer server (see lib/backend.js for why HTTP lives
+// here and not in the renderer). The VNC bridge is lazy-loaded from
+// vnc-proxy.js only when the renderer asks for echoecho's Mac.
 'use strict';
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, globalShortcut, nativeImage } = require('electron');
@@ -17,6 +19,10 @@ const { iconPng } = require('./lib/icon');
 const SMOKE = process.env.ECHOECHO_ORB_SMOKE === '1';
 const SMOKE_CONTROL = process.env.ECHOECHO_ORB_SMOKE_CONTROL === '1';
 const DEMO = process.env.ECHOECHO_ORB_DEMO === '1';
+// The app owns the wake word: launching the app starts the daemon (tethered
+// to our pid, so even a force quit takes it down), quitting stops it. Off in
+// smoke/demo runs and off macOS, where there is no daemon to own.
+const MANAGED = process.platform === 'darwin' && !SMOKE && !SMOKE_CONTROL && !DEMO;
 const VIEWER_PORT = process.env.ECHOECHO_VIEWER_PORT || '8765';
 const VIEWER_BASE = `http://127.0.0.1:${VIEWER_PORT}`;
 
@@ -180,16 +186,36 @@ function openControl() {
   });
 }
 
+// The wake word runs iff the app runs. start-daemon no-ops when the daemon is
+// already up, so this is safe to call on every launch and second-instance.
+function ensureDaemon() {
+  if (!MANAGED || !ownsLifecycle) return;
+  runEchoechoctl('start-daemon').then((r) => {
+    // The Dock icon promises "echoecho is listening" — a silent start failure
+    // (missing .venv, stale repoRoot, no API key) would make it lie.
+    if (!r.ok) console.error('[daemon] start-daemon failed:', r.output);
+  });
+}
+
+// Only the instance holding the single-instance lock may manage the daemon:
+// a losing duplicate still fires will-quit on its way out, and must not kill
+// the daemon the primary instance owns.
+let ownsLifecycle = false;
+
 app.whenReady().then(() => {
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
   }
-  app.on('second-instance', () => openControl());
+  ownsLifecycle = true;
+  // echoechoctl start-daemon relaunches the app when it isn't running; that
+  // arrives here as a second instance, so make sure the daemon comes up too.
+  app.on('second-instance', () => { openControl(); ensureDaemon(); });
   if (process.platform === 'darwin' && app.dock) {
-    // Visible in the Dock on purpose: "is echoecho running?" should be answerable
-    // at a glance. The packaged bundle carries its icns; a dev checkout gets
-    // the same icon rendered at runtime.
+    // Visible in the Dock on purpose: app running ⇔ wake word listening
+    // (ensureDaemon on launch, tether + stop-daemon on exit), so the Dock
+    // icon answers "is echoecho listening?" at a glance. The packaged bundle
+    // carries its icns; a dev checkout gets the same icon rendered at runtime.
     if (!app.isPackaged) {
       app.dock.setIcon(nativeImage.createFromBuffer(iconPng(512)));
     }
@@ -230,6 +256,8 @@ app.whenReady().then(() => {
   viewer.on('connected', () => sendToScene('viewer:status', { connected: true }));
   viewer.on('disconnected', () => sendToScene('viewer:status', { connected: false }));
   viewer.start();
+
+  ensureDaemon();
 
   globalShortcut.register('CommandOrControl+Shift+E', toggle);
 
@@ -294,6 +322,10 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   if (viewer) viewer.stop();
   if (vncProxy) vncProxy.stop();
+  // Quitting the app quits the wake word: detached so it outlives us. This
+  // also covers daemons we didn't start; force quit (no will-quit) is handled
+  // by the daemon's own tether to our pid.
+  if (MANAGED && ownsLifecycle) runEchoechoctl('stop-daemon', true);
 });
 
 // Keep running with no windows: we live in the menu bar.
@@ -348,6 +380,9 @@ function runEchoechoctl(cmd, detached) {
   return new Promise((resolve) => {
     const child = spawn('bash', [ECHOECHOCTL, cmd], {
       cwd: RUNTIME.repoRoot,
+      // start-daemon tethers the daemon to this pid: it exits when we do,
+      // force quit included. Other commands ignore the variable.
+      env: { ...process.env, ECHOECHO_TETHER_PID: String(process.pid) },
       detached: !!detached,
       stdio: detached ? 'ignore' : ['ignore', 'pipe', 'pipe'],
     });
