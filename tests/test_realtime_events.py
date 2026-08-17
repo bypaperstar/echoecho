@@ -3,10 +3,13 @@ FakeTransport, asserting every client event name/payload against the GA docs.
 No key, no audio, no network — sync tests calling asyncio.run internally."""
 import asyncio
 import copy
+import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from echoecho_app import config
 from echoecho_app.bus import Injection
@@ -438,6 +441,9 @@ def test_full_session_dispatch_then_result_then_end():
 # -- echoecho.py --voice wiring -----------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("sounddevice") is not None,
+    reason="asserts the no-sounddevice fallback; sounddevice is installed")
 def test_echo_voice_fails_politely_without_audio_deps():
     # PR 5 note: --voice is fully wired now, but on Linux CI (no sounddevice)
     # it must still fail politely and point at a working fallback.

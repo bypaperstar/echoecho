@@ -57,7 +57,12 @@ async def _do_step(driver, step, shot_dir, idx):
 
 @register(KIND,
           description="drive a Mac app inside echoecho's VM by a sequence of GUI "
-                      "steps (launch/type/key), capturing screenshots",
+                      "steps, capturing screenshots; REQUIRES args.steps, a "
+                      "list like [{'action':'launch','app':'TextEdit'}, "
+                      "{'action':'type','text':'hi'}, {'action':'key',"
+                      "'combo':'cmd+s'}, {'action':'wait','seconds':1}, "
+                      "{'action':'screenshot','name':'result'}] — prose in "
+                      "instructions alone does nothing",
           arg_schema={"steps": {
               "type": "array",
               "description": "GUI steps: {action: launch|type|key|wait|"
@@ -74,13 +79,33 @@ async def run_computer_use(task, ctx):
 
     steps = task.request.args.get("steps") or []
     if not isinstance(steps, list) or not steps:
-        return TaskResult(say="I need a list of steps to run on screen.",
-                          data={"error": "no steps"})
+        # the say text is a steering message TO THE MODEL (it arrives as a
+        # task-result injection): playtests showed a vague version being
+        # relayed to the user as on-screen advice, so spell out the retry
+        return TaskResult(
+            say="That needs a re-dispatch: call dispatch_task again with "
+                "kind computer.use and args {\"steps\": [{\"action\": "
+                "\"launch\", \"app\": \"TextEdit\"}, {\"action\": "
+                "\"screenshot\", \"name\": \"result\"}]} adjusted to the "
+                "goal — prose instructions can't drive the screen.",
+            priority="interrupt", data={"error": "no steps"})
     if len(steps) > MAX_STEPS:
         return TaskResult(
             say="That's more than %d GUI steps — break it into smaller tasks."
                 % MAX_STEPS,
             priority="interrupt", data={"error": "too many steps"})
+
+    # agent.run's worker prepares its sandbox before every task; the GUI tier
+    # must do the same, or computer.use on a cold daemon (no prior vm task to
+    # warm the shared VM) dies on ssh_argv's "VM not prepared"
+    prepare = getattr(getattr(driver, "vm", None), "prepare", None)
+    if prepare is not None:
+        try:
+            await prepare()  # idempotent: clone from golden, boot, wait for ssh
+        except Exception as exc:
+            return TaskResult(
+                say="I couldn't start my Mac VM: %s" % exc,
+                priority="interrupt", data={"error": str(exc)})
 
     shot_dir = "%s/%s" % (SHOT_DIR, task.id)
     done, shots = [], []

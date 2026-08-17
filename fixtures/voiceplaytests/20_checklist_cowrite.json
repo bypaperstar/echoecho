@@ -1,0 +1,101 @@
+{
+  "name": "20_checklist_cowrite",
+  "task": "Co-write a bulleted checklist by voice: echoecho dispatches a worker to create a markdown checklist in the live workspace, extends it on request (the co-writing loop), and reads it back \u2014 the flagship 'write a doc with you' feature, plus the viewer's workspace-docs surface.",
+  "env": {
+    "ECHOECHO_SILENCE_TIMEOUT": "420"
+  },
+  "turns": [
+    "~wake",
+    "let's make a packing checklist together. create a doc called packing checklist with bullet points for tent, sleeping bag, and water",
+    "~wait-task 180",
+    "did that get written?",
+    "now add sunscreen to the checklist",
+    "~wait-task 180",
+    "read me the checklist so far",
+    "~end"
+  ],
+  "success_criteria": [
+    "echoecho dispatches a background task instead of refusing or stalling",
+    "a markdown file with at least 4 bullet lines lands in the workspace",
+    "the second request updates the same checklist (sunscreen appears)",
+    "the finished doc is served by the live viewer",
+    "task completion is woven back into the conversation as an injection"
+  ],
+  "red_flags": [
+    "claims it cannot write or save documents",
+    "says the checklist was written before the task's done line",
+    "creates a new file instead of extending the checklist"
+  ],
+  "checks": [
+    {
+      "file_glob": [
+        "*.md",
+        "*acking*",
+        "*hecklist*"
+      ],
+      "contains_any": [
+        "tent"
+      ],
+      "min_bullets": 4
+    },
+    {
+      "file_glob": [
+        "*.md",
+        "*acking*",
+        "*hecklist*"
+      ],
+      "contains_any": [
+        "sunscreen"
+      ]
+    },
+    {
+      "file_glob": [
+        "*.md",
+        "*acking*",
+        "*hecklist*"
+      ],
+      "contains_any": [
+        "sleeping bag"
+      ]
+    }
+  ],
+  "event_checks": [
+    {
+      "type": "tool_call",
+      "where": {
+        "name": "dispatch_task"
+      },
+      "count_min": 1
+    },
+    {
+      "type": "task",
+      "where": {
+        "status": "done"
+      },
+      "count_min": 1
+    },
+    {
+      "type": "injection",
+      "count_min": 1
+    },
+    {
+      "type": "session",
+      "where": {
+        "event": "closed"
+      },
+      "count_min": 1
+    }
+  ],
+  "http_checks": [
+    {
+      "path": "/transcript",
+      "expect_status": 200,
+      "expect_contains": "checklist"
+    }
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 4.0,
+    "meta_assistant_turns_min": 3
+  },
+  "timeout_s": 700
+}

@@ -8,6 +8,7 @@ can assert the CRITICAL invariant: refresh_devices() (sounddevice._terminate
 voice_main session-boundary sequence (echoecho.start_session_audio /
 echoecho.end_session_audio).
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -153,6 +154,14 @@ def test_resolve_no_match_lists_available_names(fake_sd):
 # -- refresh_devices ----------------------------------------------------------
 
 
+# These assert the no-sounddevice fallbacks; on a Mac with the real package
+# installed the fallbacks never trigger, so they skip themselves there.
+without_sounddevice = pytest.mark.skipif(
+    importlib.util.find_spec("sounddevice") is not None,
+    reason="asserts the no-sounddevice fallback; sounddevice is installed")
+
+
+@without_sounddevice
 def test_refresh_devices_is_noop_without_sounddevice():
     assert refresh_devices() is False  # ImportError swallowed, Linux-safe
 
@@ -373,6 +382,7 @@ def test_audio_default_labels_name_the_actual_defaults(fake_sd, feed_dir):
     assert rec["output"] == "MacBook Pro Speakers (system default)"
 
 
+@without_sounddevice
 def test_device_label_without_sounddevice_stays_polite():
     assert device_label(None, "input") == "system default"
     assert device_label(2, "output") == "device 2"
@@ -414,6 +424,7 @@ def test_device_flags_override_env(monkeypatch):
     assert os.environ["ECHOECHO_INPUT_DEVICE"] == "from-env-in"
 
 
+@without_sounddevice
 def test_list_devices_exits_politely_without_sounddevice():
     # Linux sandbox: no sounddevice installed -> nonzero + a helpful pointer
     proc = subprocess.run(
