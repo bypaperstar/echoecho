@@ -59,7 +59,8 @@
                 border: 1px solid var(--border); border-radius: 999px;
                 padding: 3px 12px; font-size: 12px; }
   #proto-link:hover { color: var(--accent); border-color: var(--accent); }
-  #model:empty, #taskcount:empty { display: none; }
+  #model:empty, #taskcount:empty, #version:empty { display: none; }
+  #version { font-size: 11.5px; color: var(--faint); }
   #model { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   #taskcount.busy { color: var(--accent); }
 
@@ -196,7 +197,7 @@
 <div id="header">
   <div id="wordmark">echoecho<span class="dot">.</span></div>
   <span class="badge" id="state-badge"><span class="pip"></span><span id="state-label">IDLE</span></span>
-  <div id="meta"><span id="taskcount"></span><span id="model"></span><a id="proto-link" href="/proto" target="_blank" title="repo-shipped design mockups">prototypes</a></div>
+  <div id="meta"><span id="taskcount"></span><span id="model"></span><span id="version"></span><a id="proto-link" href="/proto" target="_blank" title="repo-shipped design mockups">prototypes</a></div>
 </div>
 <div id="conn" role="status">Connection lost — reconnecting…</div>
 
@@ -568,6 +569,15 @@ function updateHeader(events) {
     (running ? ' · ' + running + ' task' + (running > 1 ? 's' : '') : '') +
     ' — echoecho';
 }
+
+/* -------- version: fetched once — what build of echoecho this is -------- */
+fetch('/version').then(r => r.json()).then(v => {
+  const el = document.getElementById('version');
+  el.textContent = 'v' + v.version + (v.updatedAt
+    ? ' · updated ' + new Date(v.updatedAt).toLocaleDateString() : '');
+  el.title = (v.sha ? 'commit ' + v.sha : '') + (v.updatedAt
+    ? ' · ' + new Date(v.updatedAt).toLocaleString() : '');
+}).catch(() => {});
 
 /* -------- auto-scroll: pinned to bottom unless the user scrolled up -------- */
 const pane = document.getElementById('transcript');

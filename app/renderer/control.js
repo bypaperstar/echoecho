@@ -63,9 +63,17 @@
     }
     daemonUp = st.viewer;
     vmUp = st.vm;
-    $('version').textContent = st.builtAt
-      ? `${st.version} · built ${new Date(st.builtAt).toLocaleString()}`
-      : `${st.version} checkout`;
+    // "v0.1.0 · a1b2c3d · updated 8/12/2026" — plus build time when packaged,
+    // "dev checkout" otherwise; tooltip carries the full timestamps
+    const bits = [`v${st.version || '?'}`];
+    if (st.sha) bits.push(st.sha);
+    if (st.updatedAt) bits.push(`updated ${new Date(st.updatedAt).toLocaleDateString()}`);
+    bits.push(st.builtAt ? `built ${new Date(st.builtAt).toLocaleDateString()}` : 'dev checkout');
+    $('version').textContent = bits.join(' · ');
+    $('version').title = [
+      st.updatedAt && `last change: ${new Date(st.updatedAt).toLocaleString()}`,
+      st.builtAt && `built: ${new Date(st.builtAt).toLocaleString()}`,
+    ].filter(Boolean).join('\n');
     setDot('d-daemon', daemonUp);
     $('v-daemon').textContent = daemonUp ? `listening · last event ${fmtAgo(st.lastEventTs)}` : 'stopped';
     setDot('d-vm', vmUp);

@@ -49,6 +49,19 @@ def test_index_served(server):
     assert b"marked" in body and b"EventSource" in body
 
 
+def test_version_reported(server):
+    """/version: VERSION-file semver plus git sha + last-commit date — this
+    repo is a checkout, so all three must be real."""
+    import echoecho_app
+    status, body = get(server, "/version")
+    assert status == 200
+    info = json.loads(body)
+    assert info["version"] == echoecho_app.__version__
+    assert info["version"] != "0.0.0"  # the VERSION file was found
+    assert info["sha"]
+    assert info["updatedAt"]
+
+
 def test_doc_returns_file_content(server, tmp_path):
     content = "# Plan\n\n## Goals\n- ship the demo\n"
     artifacts.write_atomic(tmp_path, "doc.md", content)

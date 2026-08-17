@@ -9,7 +9,7 @@
 'use strict';
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, globalShortcut, nativeImage } = require('electron');
-const { spawn, execFile } = require('child_process');
+const { spawn, execFile, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { trayIcon } = require('./lib/trayicon');
@@ -27,12 +27,21 @@ const VIEWER_PORT = process.env.ECHOECHO_VIEWER_PORT || '8765';
 const VIEWER_BASE = `http://127.0.0.1:${VIEWER_PORT}`;
 
 // Packaged builds carry runtime-config.json (repo location + version, baked
-// by echoechoctl build-app); a dev checkout derives the repo from its own path.
+// by echoechoctl build-app); a dev checkout derives the repo from its own
+// path and asks git live, so "Update & relaunch" is reflected on next start.
 function loadRuntimeConfig() {
   try {
     return JSON.parse(fs.readFileSync(path.join(__dirname, 'runtime-config.json'), 'utf8'));
   } catch {
-    return { repoRoot: path.resolve(__dirname, '..'), sha: 'dev', builtAt: null };
+    const repoRoot = path.resolve(__dirname, '..');
+    const cfg = { repoRoot, version: null, sha: 'dev', updatedAt: null, builtAt: null };
+    try { cfg.version = fs.readFileSync(path.join(repoRoot, 'VERSION'), 'utf8').trim(); } catch { /* shown as v? */ }
+    try {
+      const line = execSync('git log -1 "--format=%h %cI"', { cwd: repoRoot }).toString().trim().split(' ');
+      cfg.sha = line[0];
+      cfg.updatedAt = line[1];
+    } catch { /* not a git checkout: version alone still shows */ }
+    return cfg;
   }
 }
 const RUNTIME = loadRuntimeConfig();
@@ -401,7 +410,9 @@ function runEchoechoctl(cmd, detached) {
 
 ipcMain.handle('ctl:status', async () => {
   const status = {
-    version: RUNTIME.sha,
+    version: RUNTIME.version,
+    sha: RUNTIME.sha,
+    updatedAt: RUNTIME.updatedAt,
     builtAt: RUNTIME.builtAt,
     orbVisible: visible,
     viewer: false,

@@ -16,6 +16,9 @@ GET /proto/name  -> mockups/<name>.html served as a real page. These are
                     output), which is why they may run as text/html while
                     /doc never does. Names are a single [A-Za-z0-9._-] token
                     resolved strictly inside mockups/, so traversal 404s.
+GET /version     -> {"version", "sha", "updatedAt"}: version from the
+                    repo-root VERSION file, short sha + last-commit date from
+                    git (null when git is unavailable, e.g. a bare export)
 GET /transcript  -> JSON array: last 400 events from workspace/.events.jsonl
 GET /events      -> SSE stream: a 'reload' event (JSON file list) on connect
                     and whenever a 250ms poll sees any visible file change
@@ -39,16 +42,19 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import echoecho_app
 from echoecho_app import config
 from echoecho_app.services import artifacts, vm
 
 POLL_INTERVAL = 0.25
 INDEX = Path(__file__).with_name("index.html")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 # Repo-shipped design prototypes (e.g. the live-writer vision mockup). Repo
 # files are trusted the same way index.html is; agent-written files are not.
 MOCKUPS = Path(__file__).resolve().parents[2] / "mockups"
@@ -113,6 +119,30 @@ def read_transcript(workspace, limit=TRANSCRIPT_LIMIT):
     return out
 
 
+_VERSION_INFO = None
+
+
+def version_info():
+    """What echoecho is running: VERSION file + git's short sha and
+    last-commit date. Computed once per process — the daemon restarts on
+    update, so it can never go stale within a run."""
+    global _VERSION_INFO
+    if _VERSION_INFO is None:
+        info = {"version": echoecho_app.__version__,
+                "sha": None, "updatedAt": None}
+        try:
+            out = subprocess.run(
+                ["git", "log", "-1", "--format=%h %cI"],
+                cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=5, check=True,
+            ).stdout.decode("utf-8").split()
+            info["sha"], info["updatedAt"] = out[0], out[1]
+        except Exception:  # no git / not a checkout: version alone is fine
+            pass
+        _VERSION_INFO = info
+    return _VERSION_INFO
+
+
 def token_path():
     """Where the per-run viewer token lives — the Electron portal reads the
     same path, so the two sides must agree byte-for-byte."""
@@ -152,6 +182,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(200, "text/html; charset=utf-8", INDEX.read_bytes())
         elif parsed.path == "/doc":
             self._doc(parsed)
+        elif parsed.path == "/version":
+            self._json(200, version_info())
         elif parsed.path == "/transcript":
             body = json.dumps(read_transcript(self.workspace)).encode("utf-8")
             self._respond(200, "application/json; charset=utf-8", body)
