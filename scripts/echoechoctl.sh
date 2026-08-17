@@ -9,6 +9,11 @@
 # Daemon env pins (audio device etc.) live in ~/.echoecho/daemon.env — one
 # KEY=VALUE per line, sourced at daemon start so the app's buttons launch the
 # daemon exactly like you would.
+#
+# Lifecycle: the app and the wake-word daemon are tied. start-daemon tethers
+# the daemon to the app process (starting the app first if needed); closing or
+# force-quitting the app takes the daemon down with it. A bare
+# `python echoecho.py --voice` in a terminal stays untethered for debugging.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,6 +23,7 @@ GOLDEN="${ECHOECHO_VM_GOLDEN:-echoecho-golden}"
 DAEMON_ENV="$HOME/.echoecho/daemon.env"
 DAEMON_LOG="/tmp/echoecho-daemon.log"
 APP_LOG="/tmp/echoecho-orb.log"
+START_LOCK="/tmp/echoecho-start-daemon.lock"
 
 # tools live in per-user places (nvm node, ~/.local/bin lume); resolve here so
 # double-clicked app buttons (no shell profile) still find them
@@ -29,6 +35,10 @@ fi
 export PATH
 
 daemon_pid() { pgrep -f "echoecho\.py --voice" | head -1 || true; }
+# The packaged app's main process only — helpers live under Contents/Frameworks
+# so this pattern can't match them. Empty for a dev `electron .` orb: that orb
+# starts its own daemon and passes ECHOECHO_TETHER_PID itself.
+app_pid() { pgrep -f "echoecho\.app/Contents/MacOS/echoecho" | head -1 || true; }
 app_bundle() {
   if [ -d "/Applications/echoecho.app" ]; then echo "/Applications/echoecho.app";
   elif [ -d "$HOME/Applications/echoecho.app" ]; then echo "$HOME/Applications/echoecho.app";
@@ -50,6 +60,37 @@ cmd_status() {
 
 cmd_start_daemon() {
   [ -n "$(daemon_pid)" ] && { echo "daemon already running (pid $(daemon_pid))"; return 0; }
+  # The app and the wake word live and die together: the daemon tethers to the
+  # app process (ECHOECHO_TETHER_PID) and exits when it disappears — quit or
+  # force quit alike — so a listening wake word always means a Dock icon. The
+  # orb passes its own pid; from a terminal we tether to the running app, or
+  # start the app and let its launch sequence bring up its own tethered daemon.
+  if [ -z "${ECHOECHO_TETHER_PID:-}" ]; then
+    ECHOECHO_TETHER_PID="$(app_pid)"
+    if [ -z "$ECHOECHO_TETHER_PID" ]; then
+      echo "app not running — starting it (the app launches the daemon tethered to itself)"
+      cmd_start_app
+      for _ in $(seq 1 30); do sleep 1; [ -n "$(daemon_pid)" ] && break; done
+      [ -n "$(daemon_pid)" ] && { echo "daemon started (pid $(daemon_pid)) via the app"; return 0; }
+      echo "daemon did not come up via the app — tails of $APP_LOG and $DAEMON_LOG:"
+      tail -5 "$APP_LOG" "$DAEMON_LOG" 2>/dev/null || true
+      exit 1
+    fi
+  fi
+  export ECHOECHO_TETHER_PID
+  # Serialize the check->spawn window: app launch, second-instance, and a
+  # terminal start-daemon can race, and two daemons means two open mics.
+  # mkdir is atomic; the EXIT trap releases it on every path out.
+  if ! mkdir "$START_LOCK" 2>/dev/null; then
+    echo "another start-daemon is in flight — waiting for its daemon"
+    for _ in $(seq 1 15); do sleep 1; [ -n "$(daemon_pid)" ] && break; done
+    [ -n "$(daemon_pid)" ] && { echo "daemon started (pid $(daemon_pid))"; return 0; }
+    echo "no daemon appeared — stealing stale lock $START_LOCK"
+    rmdir "$START_LOCK" 2>/dev/null || true
+    mkdir "$START_LOCK" 2>/dev/null || { echo "could not take start lock"; exit 1; }
+  fi
+  trap 'rmdir "$START_LOCK" 2>/dev/null || true' EXIT
+  [ -n "$(daemon_pid)" ] && { echo "daemon already running (pid $(daemon_pid))"; return 0; }
   cd "$REPO"
   # shellcheck disable=SC1090
   [ -f "$DAEMON_ENV" ] && set -a && . "$DAEMON_ENV" && set +a
@@ -65,7 +106,9 @@ cmd_stop_daemon() {
   [ -z "$pid" ] && { echo "daemon not running"; return 0; }
   kill "$pid" 2>/dev/null || true
   sleep 2
-  [ -n "$(daemon_pid)" ] && kill -9 "$(daemon_pid)" 2>/dev/null || true
+  # escalate on the SAME pid only: a detached stop (app quit) must never 9-kill
+  # a fresh daemon that a relaunched app started inside our 2s grace window
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
   echo "daemon stopped"
 }
 
@@ -120,7 +163,9 @@ cmd_install_app() {
   # dev orb: its cmdline is relative, so match the stable node_modules paths
   pkill -f "node_modules/\.bin/electron" 2>/dev/null || true
   pkill -f "node_modules/electron/dist/Electron\.app" 2>/dev/null || true
-  sleep 1
+  # wait for the old instance to actually exit: `open` on a bundle id whose
+  # process is still dying gets coalesced into it and no new app launches
+  for _ in $(seq 1 10); do [ -z "$(app_pid)" ] && break; sleep 1; done
   rm -rf "$target"
   ditto "$APP_DIR/dist/echoecho-darwin-arm64/echoecho.app" "$target"
   echo "installed $target"
@@ -149,7 +194,9 @@ cmd_update() {
   git pull --ff-only origin main
   ( cd app && npm install --no-audit --no-fund >/dev/null )
   .venv/bin/pip install -q -r requirements-mac.txt || true
-  if [ -n "$was_daemon" ]; then cmd_stop_daemon; cmd_start_daemon; fi
+  # stop only: install-app reopens the new bundle, and the app launch starts a
+  # fresh daemon tethered to the new app process (never to the dying old one)
+  if [ -n "$was_daemon" ]; then cmd_stop_daemon; fi
   cmd_install_app
   echo "update complete: $(git rev-parse --short HEAD)"
 }
