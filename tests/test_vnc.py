@@ -271,9 +271,12 @@ def test_capture_png_over_fake_server(tmp_path):
                 conn.sendall(struct.pack(">I", 0))  # SecurityResult ok
                 self._recvn(conn, 1)  # ClientInit
                 name = b"cap"
-                conn.sendall(struct.pack(">HH", 2, 2) + b"\x00" * 16
+                # ServerInit: 2x2, native 32bpp BGRx (LE, R<<16 G<<8 B<<0)
+                pf = (struct.pack(">BBBBHHHBBB", 32, 24, 0, 1, 255, 255, 255,
+                                  16, 8, 0) + b"\x00\x00\x00")
+                conn.sendall(struct.pack(">HH", 2, 2) + pf
                              + struct.pack(">I", len(name)) + name)
-                self._recvn(conn, 20)  # SetPixelFormat (4 + 16)
+                # client decodes in the native format now, so NO SetPixelFormat
                 # SetEncodings: 4-byte header + n*4
                 hdr = self._recvn(conn, 4)
                 n = struct.unpack(">H", hdr[2:4])[0]
