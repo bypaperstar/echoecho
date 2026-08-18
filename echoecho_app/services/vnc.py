@@ -20,9 +20,11 @@ a plain, unit-testable protocol implementation with no event loop.
 Python 3.9, stdlib only (the in-process no-new-deps rule): the VNC challenge
 uses DES, which the stdlib lacks, so a compact DES lives here too.
 """
+import binascii
 import socket
 import struct
 import time
+import zlib
 from urllib.parse import urlparse
 
 # X11 keysyms for the keys we actually send. Printable ASCII maps to its own
@@ -184,6 +186,26 @@ def vnc_challenge_response(password, challenge16):
 
 
 # -- vncUrl parsing ----------------------------------------------------------
+
+def _write_png(path, width, height, rgb):
+    """Write a truecolour PNG from packed RGB bytes — stdlib only (zlib), so
+    no Pillow dependency (the in-process no-new-deps rule)."""
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", binascii.crc32(tag + data) & 0xFFFFFFFF))
+    stride = width * 3
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type 0 (None) per scanline
+        raw += rgb[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", ihdr))
+        f.write(chunk(b"IDAT", zlib.compress(bytes(raw), 6)))
+        f.write(chunk(b"IEND", b""))
+    return path
+
 
 def parse_vnc_url(url):
     """(host, port, password) from a vnc://[:password@]host:port URL. Lume
@@ -366,6 +388,77 @@ class VncClient:
                 if cp <= 0xFF:
                     self.tap(cp)
             time.sleep(delay)
+
+    # -- framebuffer capture (what a VNC viewer actually sees) --------------
+    # On a headless (--no-display) guest, app windows composite for a
+    # connected VNC client but not always for `screencapture` over SSH, so
+    # this is the faithful "what's on screen" grab.
+    def set_pixel_format(self):
+        """Pin a known 32bpp true-colour format so decoding is unambiguous:
+        little-endian, R<<16 G<<8 B<<0 -> bytes come out [B, G, R, x]."""
+        pf = struct.pack(">BBBBHHHBBB", 32, 24, 0, 1, 255, 255, 255,
+                         16, 8, 0) + b"\x00\x00\x00"
+        self._send(b"\x00\x00\x00\x00" + pf)  # SetPixelFormat: type 0 + 3 pad
+
+    def set_encodings(self, encodings):
+        msg = struct.pack(">BBH", 2, 0, len(encodings))
+        for e in encodings:
+            msg += struct.pack(">i", e)
+        self._send(msg)
+
+    def _fb_update_request(self, incremental=0):
+        self._send(struct.pack(">BBHHHH", 3, incremental, 0, 0,
+                               self.width, self.height))
+
+    def capture_png(self, path, timeout=None):
+        """Request the whole framebuffer (raw encoding) and write it to a PNG.
+        Blocks until one FramebufferUpdate covering the screen arrives."""
+        if timeout:
+            self.sock.settimeout(timeout)
+        self.set_pixel_format()
+        self.set_encodings([0])  # raw only — no decoder zoo to maintain
+        self._fb_update_request(0)
+        buf = bytearray(self.width * self.height * 3)
+        got = 0
+        while got == 0:
+            msg_type = self._recv(1)[0]
+            if msg_type == 0:  # FramebufferUpdate
+                self._recv(1)  # padding
+                nrects = struct.unpack(">H", self._recv(2))[0]
+                for _ in range(nrects):
+                    x, y, w, h, enc = struct.unpack(">HHHHi", self._recv(12))
+                    if enc != 0:
+                        raise VncError("server used non-raw encoding %d" % enc)
+                    data = self._recv(w * h * 4)
+                    self._blit(buf, data, x, y, w, h)
+                    got += w * h
+            elif msg_type == 1:  # SetColourMapEntries
+                self._recv(5)
+                n = struct.unpack(">H", self._recv(2))[0]
+                self._recv(n * 6)
+            elif msg_type == 2:  # Bell
+                pass
+            elif msg_type == 3:  # ServerCutText
+                self._recv(3)
+                n = struct.unpack(">I", self._recv(4))[0]
+                self._recv(n)
+            else:
+                raise VncError("unexpected server message %d" % msg_type)
+        _write_png(path, self.width, self.height, bytes(buf))
+        return path
+
+    def _blit(self, buf, data, x, y, w, h):
+        """Copy a raw BGRx rectangle into the RGB framebuffer, row by row via
+        C-level slicing (a per-pixel Python loop over 1080p is too slow)."""
+        line = w * 4
+        for row in range(h):
+            seg = data[row * line:(row + 1) * line]
+            rowrgb = bytearray(w * 3)
+            rowrgb[0::3] = seg[2::4]  # R
+            rowrgb[1::3] = seg[1::4]  # G
+            rowrgb[2::3] = seg[0::4]  # B
+            dst = ((y + row) * self.width + x) * 3
+            buf[dst:dst + w * 3] = rowrgb
 
     def pointer(self, x, y, button_mask=0):
         # RFB §7.5.5 PointerEvent: type=5, button-mask, x, y

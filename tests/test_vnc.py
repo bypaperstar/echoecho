@@ -5,6 +5,7 @@ No real VM, no network beyond a localhost socket."""
 import socket
 import struct
 import threading
+import time
 
 import pytest
 
@@ -241,6 +242,64 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     assert any(c[0] == "chord" for c in calls)  # cmd+s -> chord
     assert ("click", 5, 6, 1) in calls
     assert ssh_argvs[0] == ["open", "-a", "TextEdit"]  # launch stayed on SSH
+
+
+def test_write_png_roundtrip(tmp_path):
+    from echoecho_app.services.vnc import _write_png
+    # 2x1 image: red, green -> a valid PNG the stdlib can't decode without
+    # zlib inflate, so just check the signature + that IEND is present
+    png = _write_png(str(tmp_path / "x.png"), 2, 1,
+                     bytes([255, 0, 0, 0, 255, 0]))
+    data = open(png, "rb").read()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[-8:-4] == b"IEND"
+    # IHDR width/height are big-endian right after the 8-byte sig + len+tag
+    assert struct.unpack(">II", data[16:24]) == (2, 1)
+
+
+def test_capture_png_over_fake_server(tmp_path):
+    """A fake server that answers a FramebufferUpdateRequest with one raw
+    full-screen rect; the client must assemble and write a PNG."""
+    class CapServer(FakeRfbServer):
+        def _serve(self):
+            conn, _ = self.sock.accept()
+            try:
+                conn.sendall(b"RFB 003.008\n")
+                self._recvn(conn, 12)
+                conn.sendall(bytes([1, 1]))  # security: None
+                self._recvn(conn, 1)
+                conn.sendall(struct.pack(">I", 0))  # SecurityResult ok
+                self._recvn(conn, 1)  # ClientInit
+                name = b"cap"
+                conn.sendall(struct.pack(">HH", 2, 2) + b"\x00" * 16
+                             + struct.pack(">I", len(name)) + name)
+                self._recvn(conn, 20)  # SetPixelFormat (4 + 16)
+                # SetEncodings: 4-byte header + n*4
+                hdr = self._recvn(conn, 4)
+                n = struct.unpack(">H", hdr[2:4])[0]
+                self._recvn(conn, n * 4)
+                self._recvn(conn, 10)  # FramebufferUpdateRequest
+                # one raw rect covering the 2x2 screen; BGRx pixels
+                px = bytes([0, 0, 255, 0,   0, 255, 0, 0,     # red, green
+                            255, 0, 0, 0,   255, 255, 255, 0])  # blue, white
+                msg = struct.pack(">BBH", 0, 0, 1)
+                msg += struct.pack(">HHHHi", 0, 0, 2, 2, 0) + px
+                conn.sendall(msg)
+                time.sleep(0.2)
+            except (EOFError, OSError):
+                pass
+            finally:
+                conn.close()
+
+    server = CapServer(password="").start()
+    try:
+        with VncClient("127.0.0.1", server.port, "", timeout=5) as c:
+            out = c.capture_png(str(tmp_path / "screen.png"))
+        data = open(out, "rb").read()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+        assert struct.unpack(">II", data[16:24]) == (2, 2)
+    finally:
+        server.stop()
 
 
 def test_client_auth_failure_raises():
