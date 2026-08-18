@@ -203,6 +203,35 @@ def test_scripted_smoke_session(tmp_path):
     assert text.index("queued") < text.index("[task t1 done]")
 
 
+def test_dispatch_task_lifts_instructions_nested_in_args():
+    """Voice models sometimes nest instructions inside args instead of the
+    top-level field; the worker must still see them (live playtest: doc.edit
+    fell back to its 'start a draft' default and wrote an empty draft)."""
+    import echoecho
+
+    class FakeOrch:
+        def submit(self, request):
+            self.request = request
+
+            class T:
+                id = "t1"
+            return T()
+
+    orch = FakeOrch()
+    handle = echoecho.make_tool_handler(orch, port=None)
+
+    handle("dispatch_task", {"kind": "doc.edit",
+                             "args": {"file": "grocery.md",
+                                      "instructions": "add eggs"}})
+    assert orch.request.instructions == "add eggs"
+    assert orch.request.args == {"file": "grocery.md"}
+
+    # the top-level field still wins when both are present
+    handle("dispatch_task", {"kind": "doc.edit", "instructions": "top",
+                             "args": {"instructions": "nested"}})
+    assert orch.request.instructions == "top"
+
+
 def test_env_flags_case_insensitive(monkeypatch):
     from echoecho_app import config
     monkeypatch.setenv("ECHOECHO_TEXT", "False")
