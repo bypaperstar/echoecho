@@ -12,10 +12,11 @@ REPL extras: "~wait N" sleeps N real seconds so background workers can land
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
-from echoecho_app import config, events
-from echoecho_app.conversation.port import ConversationPort
+from echoecho_app import config, diagnostics, events
+from echoecho_app.conversation.port import ConversationPort, TOOL_NAMES
 from echoecho_app.conversation.session import Session
 
 def build_tools():
@@ -55,12 +56,24 @@ class RealConversationLLM:
         self._client = None
 
     async def turn(self, history):
-        if self._client is None:
-            from openai import AsyncOpenAI  # lazy: keyless paths never import
-            self._client = AsyncOpenAI()
-        resp = await self._client.responses.create(
-            model=self.model, instructions=config.system_prompt(),
-            input=history, tools=build_tools())
+        started = time.monotonic()
+        diagnostics.info("text_llm.request.started", model=self.model,
+                         history_items=len(history))
+        phase = "client_init"
+        try:
+            if self._client is None:
+                from openai import AsyncOpenAI  # lazy: keyless paths never import
+                self._client = AsyncOpenAI()
+            phase = "request"
+            resp = await self._client.responses.create(
+                model=self.model, instructions=config.system_prompt(),
+                input=history, tools=build_tools())
+        except Exception as exc:
+            diagnostics.exception(
+                "text_llm.request.failed", exc=exc, model=self.model,
+                history_items=len(history), phase=phase,
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
+            raise
         items = []
         for item in resp.output:
             if item.type == "function_call":
@@ -71,6 +84,15 @@ class RealConversationLLM:
                 text = "".join(c.text for c in item.content
                                if getattr(c, "type", "") == "output_text")
                 items.append({"type": "message", "text": text})
+        usage = getattr(resp, "usage", None)
+        diagnostics.info(
+            "text_llm.request.finished", model=self.model,
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+            output_items=len(items),
+            tool_calls=sum(1 for i in items if i["type"] == "function_call"),
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+            response_id=getattr(resp, "id", None))
         return items
 
 
@@ -85,6 +107,9 @@ class FakeConversationLLM:
 
     async def turn(self, history):
         if not self._rounds:
+            diagnostics.warning("text_llm.fixture.exhausted",
+                                calls=self._calls,
+                                history_items=len(history))
             return [{"type": "message", "text": "(fake LLM: script exhausted)"}]
         out = []
         for item in self._rounds.pop(0):
@@ -95,6 +120,10 @@ class FakeConversationLLM:
                 if isinstance(item.get("arguments"), dict):
                     item["arguments"] = json.dumps(item["arguments"])
             out.append(item)
+        diagnostics.info("text_llm.fixture.turn",
+                         output_items=len(out), history_items=len(history),
+                         tool_calls=sum(1 for i in out
+                                        if i["type"] == "function_call"))
         return out
 
 
@@ -135,6 +164,7 @@ class TextRepl(ConversationPort):
         if self.llm is None:
             self.llm = default_llm()
         self.out('echoecho text REPL — type "echoecho" to wake, /quit to exit.')
+        diagnostics.info("text_repl.started", llm_type=type(self.llm).__name__)
         loop = asyncio.get_event_loop()
         while not self._stop:
             try:
@@ -162,11 +192,16 @@ class TextRepl(ConversationPort):
             self.session.begin_ending("quit")
         if self.session.state == "ENDING":
             self.session.finish()
+        diagnostics.info("text_repl.finished", history_items=len(self.history),
+                         state=self.session.state)
 
     # -- one user turn --------------------------------------------------------
 
     async def _handle(self, line):
         session = self.session
+        diagnostics.info("text_repl.input", state=session.state,
+                         input_chars=len(line), wake_phrase_present=(
+                             config.WAKE_PHRASE in line.lower()))
         if session.state == "IDLE":
             if config.WAKE_PHRASE in line.lower():
                 session.wake()
@@ -192,7 +227,7 @@ class TextRepl(ConversationPort):
             session.finish()
 
     async def _tool_loop(self):
-        for _ in range(8):  # sanity bound on rounds per user turn
+        for round_index in range(8):  # sanity bound on rounds per user turn
             items = await self.llm.turn(self.history)
             calls = []
             for item in items:
@@ -209,7 +244,16 @@ class TextRepl(ConversationPort):
             for call in calls:
                 args = call.get("arguments") or {}
                 if isinstance(args, str):
-                    args = json.loads(args) if args.strip() else {}
+                    try:
+                        args = json.loads(args) if args.strip() else {}
+                    except ValueError as exc:
+                        safe_tool = (call.get("name") if call.get("name") in
+                                     TOOL_NAMES else "unknown")
+                        diagnostics.exception(
+                            "text_repl.tool_arguments_invalid", exc=exc,
+                            tool=safe_tool, argument_bytes=len(args),
+                            round=round_index + 1)
+                        args = {}
                 self.out("[tool] %s %s" % (call["name"], json.dumps(args)))
                 events.emit("tool_call", name=call["name"], args=args)
                 result = self._tool_cb(call["name"], args) if self._tool_cb else {}
@@ -220,6 +264,7 @@ class TextRepl(ConversationPort):
                 if call["name"] == "end_session":
                     self.session.begin_ending("end_session_tool")
                     return
+        diagnostics.warning("text_repl.tool_round_limit", max_rounds=8)
 
     def _drain(self):
         for inj in self.session.drain_injections():

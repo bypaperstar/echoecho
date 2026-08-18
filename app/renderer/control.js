@@ -5,9 +5,19 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
+  const report = (event, fields) => {
+    try { if (window.echoDiagnostics) window.echoDiagnostics.report(event, fields); } catch { /* diagnostics never break controls */ }
+  };
+  const errorMeta = (err) => ({
+    error_name: (err && err.name) || 'Error', error_code: (err && err.code) || '',
+    message: (err && err.message) || String(err || ''), stack: (err && err.stack) || '',
+  });
   let busy = false;
   let daemonUp = false;
   let vmUp = false;
+  let refreshFailures = 0;
+  let refreshFailureStarted = 0;
+  let lastStatus = null;
 
   // tiny animated orb in the header — same organism, 52px
   const cv = $('icon');
@@ -55,14 +65,38 @@
   }
 
   async function refresh() {
+    const started = performance.now();
     let st;
     try {
       st = await window.ctl.status();
-    } catch {
+    } catch (err) {
+      refreshFailures++;
+      if (!refreshFailureStarted) refreshFailureStarted = Date.now();
+      if (refreshFailures === 1 || (refreshFailures & (refreshFailures - 1)) === 0) {
+        report('control.refresh_failed', {
+          consecutive: refreshFailures, duration_ms: Math.round(performance.now() - started),
+          ...errorMeta(err),
+        });
+      }
       return;
+    }
+    if (refreshFailures) {
+      report('control.refresh_recovered', {
+        failed_attempts: refreshFailures,
+        downtime_ms: refreshFailureStarted ? Date.now() - refreshFailureStarted : null,
+      });
+      refreshFailures = 0;
+      refreshFailureStarted = 0;
     }
     daemonUp = st.viewer;
     vmUp = st.vm;
+    const nextStatus = {
+      daemon: !!st.viewer, vm: !!st.vm, orb_visible: !!st.orbVisible,
+    };
+    if (!lastStatus || Object.keys(nextStatus).some((k) => nextStatus[k] !== lastStatus[k])) {
+      report('control.status_transition', nextStatus);
+      lastStatus = nextStatus;
+    }
     // "v0.1.0 · a1b2c3d · updated 8/12/2026" — plus build time when packaged,
     // "dev checkout" otherwise; tooltip carries the full timestamps
     const bits = [`v${st.version || '?'}`];
@@ -94,13 +128,25 @@
 
   async function act(name, noteText) {
     if (busy) return;
+    const started = performance.now();
     busy = true;
+    report('control.action_start', { action: name });
     setActionsDisabled(true);
     $('note').textContent = noteText || '';
     try {
       const res = await window.ctl.action(name);
       if (res && res.output) $('note').textContent = res.output.split('\n').pop();
       else if (res && res.ok && !noteText) $('note').textContent = '';
+      report('control.action_done', {
+        action: name, ok: !res || res.ok !== false, detached: !!(res && res.detached),
+        duration_ms: Math.round(performance.now() - started),
+      });
+    } catch (err) {
+      report('control.action_failed', {
+        action: name, duration_ms: Math.round(performance.now() - started),
+        ...errorMeta(err),
+      });
+      $('note').textContent = 'action failed — see diagnostics';
     } finally {
       busy = false;
       setActionsDisabled(false);
@@ -116,16 +162,35 @@
   $('b-reset').addEventListener('click', () => {
     if (confirm("Reset echoecho's Mac? The VM is deleted and re-cloned fresh from the golden image. Workspace files on your Mac are untouched.")) {
       act('vm-reset', 'resetting: delete + fresh clone + boot…');
-    }
+    } else report('control.action_cancelled', { action: 'vm-reset' });
   });
   $('b-update').addEventListener('click', () => {
     if (confirm('Update echoecho? Pulls the latest main, reinstalls, rebuilds the app, restarts the daemon, and relaunches. echoecho will quit now and reopen when done.')) {
       $('note').textContent = 'updating — echoecho will reopen itself…';
-      window.ctl.action('update');
-    }
+      const started = performance.now();
+      report('control.action_start', { action: 'update' });
+      window.ctl.action('update').then((res) => report('control.action_done', {
+        action: 'update', ok: !res || res.ok !== false, detached: !!(res && res.detached),
+        duration_ms: Math.round(performance.now() - started),
+      })).catch((err) => report('control.action_failed', {
+        action: 'update', duration_ms: Math.round(performance.now() - started),
+        ...errorMeta(err),
+      }));
+    } else report('control.action_cancelled', { action: 'update' });
   });
-  $('b-quit').addEventListener('click', () => window.ctl.action('quit-app'));
-  $('login').addEventListener('change', (e) => window.ctl.setLoginItem(e.target.checked));
+  $('b-quit').addEventListener('click', () => {
+    report('control.action_start', { action: 'quit-app' });
+    window.ctl.action('quit-app').catch((err) => report('control.action_failed', {
+      action: 'quit-app', ...errorMeta(err),
+    }));
+  });
+  $('login').addEventListener('change', (e) => {
+    const enabled = e.target.checked;
+    window.ctl.setLoginItem(enabled).catch((err) => {
+      e.target.checked = !enabled;
+      report('control.login_item_failed', { enabled, ...errorMeta(err) });
+    });
+  });
 
   refresh();
   setInterval(refresh, 3000);

@@ -434,6 +434,59 @@ def test_clone_failure_names_the_existing_vms(monkeypatch, tmp_path):
     assert "ECHOECHO_VM_GOLDEN" in msg
 
 
+def test_reset_defers_diagnostics_until_cleanup_boundary(monkeypatch):
+    """Logging must not delay reaping the runner, deleting the VM, or the
+    post-delete existence check.  The one reset event is emitted afterward."""
+    events = []
+
+    class Proc:
+        def __init__(self, operation):
+            self.operation = operation
+            # Exercise the existence-check branch: delete reports failure,
+            # but `get` confirms that the disposable VM is already gone.
+            self.returncode = 1 if operation in {"delete", "get"} else 0
+
+        async def communicate(self):
+            events.append(("communicated", self.operation))
+            return b"not found", None
+
+    class Runner:
+        def terminate(self):
+            events.append(("runner", "terminated"))
+
+    async def fake_create_subprocess(exe, *args, **kwargs):
+        operation = args[0]
+        events.append(("spawned", operation))
+        return Proc(operation)
+
+    def record_diagnostic(event, **fields):
+        events.append(("diagnostic", event))
+
+    monkeypatch.setattr(vm_mod.shutil, "which", lambda name: "/bin/lume")
+    monkeypatch.setattr(vm_mod.asyncio, "create_subprocess_exec",
+                        fake_create_subprocess)
+    monkeypatch.setattr(vm_mod.diagnostics, "info", record_diagnostic)
+    monkeypatch.setattr(vm_mod.diagnostics, "warning", record_diagnostic)
+    monkeypatch.setattr(vm_mod.diagnostics, "exception", record_diagnostic)
+
+    vm = LumeVM(vm_name="smoke-reset-order")
+    vm._runner = Runner()
+    asyncio.run(vm.reset())
+
+    assert events == [
+        ("spawned", "stop"),
+        ("communicated", "stop"),
+        ("runner", "terminated"),
+        ("spawned", "delete"),
+        ("communicated", "delete"),
+        ("spawned", "get"),
+        ("communicated", "get"),
+        ("diagnostic", "vm.reset.finished"),
+    ]
+    assert vm._cleanup_lume_depth == 0
+    assert vm._runner is None
+
+
 # -- forced-kill disposes the VM (guest orphans can't outlive the budget) -----
 
 def test_budget_kill_discards_the_vm_via_reset(tmp_path, monkeypatch):

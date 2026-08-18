@@ -171,13 +171,13 @@ caveat). Run it with `cd app && npm install && npm start`; the blob look-lab
 lives in `app/prototypes/`. The web viewer at :8765 is unchanged.
 
 The Orb installs as a real **echoecho.app** (Dock icon, Launchpad, Spotlight):
-`bash scripts/echoctl.sh install-app` generates the icon procedurally (a
+`bash scripts/echoechoctl.sh install-app` generates the icon procedurally (a
 zero-dependency PNG encoder in `app/lib/icon.js`, `iconutil` → icns), packages
 with `@electron/packager`, and drops it in `/Applications`. Opening echoecho.app
 shows a **control panel** — daemon / VM / orb status plus Summon, Start/Stop
 daemon, Wake / Reset echoecho's Mac, Update & relaunch (git pull → reinstall →
 rebuild → reopen), and a start-at-login toggle. The same lifecycle commands
-work from a terminal: `scripts/echoctl.sh {status|start-daemon|stop-daemon|
+work from a terminal: `scripts/echoechoctl.sh {status|start-daemon|stop-daemon|
 boot-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
 `ECHOECHO_INPUT_DEVICE`) live in `~/.echo/daemon.env`.
 
@@ -224,6 +224,30 @@ in [`livewriter/TESTING.md`](livewriter/TESTING.md). Keyless unit tests:
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.
+
+### Developer diagnostics
+
+Every daemon, Live Writer, and Orb run writes private structured JSONL
+diagnostics under `~/.echoecho/diagnostics/` (override with
+`ECHOECHO_DIAGNOSTICS_DIR`). After a
+reproduction, get a bounded, re-redacted summary of recent errors, slow spans,
+components, and correlation IDs with:
+
+```bash
+bash scripts/echoechoctl.sh diagnostics --latest 3 --level warn --tail 100
+bash scripts/echoechoctl.sh doctor                 # environment/preflight
+bash scripts/echoechoctl.sh logs daemon 200        # terminal-safe launch tail
+```
+
+The lifecycle script retains separate console logs for detached daemon, Orb
+development, VM, Live Writer, and update runs. Launch logs rotate in a bounded
+ring (five 5 MiB parts and 10 roots per component by default), and `logs` reads
+across retained parts. Raw console output has a weaker privacy boundary than
+the structured stream; `logs` escapes terminal controls by default, while
+`logs daemon 200 --raw` is an explicit local-only opt-in. Review either form
+before sharing. See
+[`DIAGNOSTICS.md`](DIAGNOSTICS.md) for schema, locations, retention, filters,
+privacy rules, configuration, and the reproduce/inspect/fix workflow.
 
 ### Troubleshooting
 

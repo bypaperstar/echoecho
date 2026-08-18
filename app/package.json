@@ -7,6 +7,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "node --test test/*.test.js",
     "demo": "ECHOECHO_ORB_DEMO=1 electron .",
     "smoke": "ECHOECHO_ORB_SMOKE=1 xvfb-run -a electron --no-sandbox .",
     "smoke:demo": "ECHOECHO_ORB_SMOKE=1 ECHOECHO_ORB_DEMO=1 xvfb-run -a electron --no-sandbox .",

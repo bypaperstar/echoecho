@@ -15,6 +15,9 @@ const path = require('path');
 const { trayIcon } = require('./lib/trayicon');
 const { ViewerClient } = require('./lib/backend');
 const { iconPng } = require('./lib/icon');
+const {
+  createDiagnostics, errorFields, fingerprint, boundedFingerprint,
+} = require('./lib/diagnostics');
 
 const SMOKE = process.env.ECHOECHO_ORB_SMOKE === '1';
 const SMOKE_CONTROL = process.env.ECHOECHO_ORB_SMOKE_CONTROL === '1';
@@ -51,13 +54,168 @@ function loadRuntimeConfig() {
 }
 const RUNTIME = loadRuntimeConfig();
 const ECHOECHOCTL = path.join(RUNTIME.repoRoot, 'scripts', 'echoechoctl.sh');
+// Claim primary ownership before creating a latest pointer. A losing
+// duplicate must not overwrite the live Orb's diagnostics pointer or prune
+// its history while it exits.
+const primaryInstance = app.requestSingleInstanceLock();
+let ownsLifecycle = false;
+const diagnostics = createDiagnostics({
+  enabled: primaryInstance ? undefined : false,
+  build: {
+    version: RUNTIME.version,
+    sha: RUNTIME.sha,
+    packaged: app.isPackaged,
+    electron: process.versions.electron,
+    node: process.versions.node,
+  },
+});
+const mainDiag = diagnostics.child('electron-main');
+const viewerDiag = diagnostics.child('viewer-client');
+const noisyDiagnosticCounts = new Map();
+let noisyDiagnosticReceived = 0;
+let noisyDiagnosticEmitted = 0;
+const NOISY_WINDOW_MS = 10000;
+const NOISY_WINDOW_BURST = 20;
+const NOISY_FINGERPRINTS = 32;
+
+function sampleNoisyDiagnostic(key, valueFingerprint = '') {
+  const now = Date.now();
+  let state = noisyDiagnosticCounts.get(key);
+  if (!state || now - state.startedAt >= NOISY_WINDOW_MS) {
+    state = { startedAt: now, count: 0, fingerprints: new Map() };
+    noisyDiagnosticCounts.set(key, state);
+  }
+  state.count++;
+  let firstSeenFingerprint = false;
+  if (valueFingerprint) {
+    const prior = state.fingerprints.get(valueFingerprint);
+    if (prior !== undefined) {
+      state.fingerprints.set(valueFingerprint, prior + 1);
+    } else if (state.fingerprints.size < NOISY_FINGERPRINTS) {
+      // Preserve a bounded allowance for a novel failure/state even after an
+      // unrelated renderer flood has exhausted the ordinary category burst.
+      // Do not evict within the window: otherwise attacker-controlled unique
+      // values could continually regain this first-seen allowance.
+      state.fingerprints.set(valueFingerprint, 1);
+      firstSeenFingerprint = true;
+    }
+  }
+  noisyDiagnosticReceived++;
+  const overflow = state.count - NOISY_WINDOW_BURST;
+  const emit = overflow <= 0 || firstSeenFingerprint || overflow <= 3 ||
+    (overflow & (overflow - 1)) === 0;
+  if (emit) noisyDiagnosticEmitted++;
+  return { emit, count: state.count };
+}
+
+function flushNoisyDiagnosticSummary() {
+  if (!noisyDiagnosticReceived) return;
+  mainDiag.info('renderer.diagnostic_summary', {
+    source_count: noisyDiagnosticCounts.size,
+    received: noisyDiagnosticReceived,
+    emitted: noisyDiagnosticEmitted,
+    suppressed: noisyDiagnosticReceived - noisyDiagnosticEmitted,
+  });
+  noisyDiagnosticCounts.clear();
+  noisyDiagnosticReceived = 0;
+  noisyDiagnosticEmitted = 0;
+}
+
+// Observe fatal errors without suppressing Node's normal uncaught-exception
+// behavior. Under Node's default rejection policy, an unhandled rejection is
+// promoted to an uncaught exception and arrives here too. Do not install an
+// ``unhandledRejection`` listener: its mere presence changes the default from
+// fatal to handled and could keep a corrupted Electron process alive.
+process.on('uncaughtExceptionMonitor', (err, origin) => {
+  mainDiag.error('process.uncaught_exception', { origin, error: errorFields(err) });
+});
+mainDiag.info('app.process_start', {
+  platform: process.platform, arch: process.arch,
+  smoke: SMOKE, smoke_control: SMOKE_CONTROL, demo: DEMO, managed: MANAGED,
+});
 
 let tray = null;
 let win = null;
 let controlWin = null;
 let viewer = null;
+let viewerConnectionState = null;
 let vncProxy = null; // lazy require, holds { start, stop }
 let visible = false;
+
+function attachWindowDiagnostics(browserWindow, surface) {
+  const log = diagnostics.child(surface);
+  const wc = browserWindow.webContents;
+  let loadStartedAt = 0;
+  let unresponsiveAt = 0;
+  log.info('window.created', {});
+  wc.on('did-start-loading', () => {
+    loadStartedAt = Date.now();
+    log.info('window.load_started', {});
+  });
+  wc.on('did-finish-load', () => {
+    log.info('window.load_finished', {
+      duration_ms: loadStartedAt ? Date.now() - loadStartedAt : null,
+    });
+  });
+  wc.on('did-fail-load', (_event, code, description, _validatedUrl, isMainFrame) => {
+    log.error('window.load_failed', {
+      code, is_main_frame: !!isMainFrame,
+      description_fingerprint: fingerprint(description),
+    });
+  });
+  wc.on('preload-error', (_event, _preloadPath, err) => {
+    log.error('window.preload_failed', { error: errorFields(err) });
+  });
+  wc.on('render-process-gone', (_event, details) => {
+    log.error('window.renderer_gone', {
+      reason: details && details.reason,
+      exit_code: details && details.exitCode,
+    });
+  });
+  wc.on('console-message', (_event, ...args) => {
+    const details = args.length === 1 && args[0] && typeof args[0] === 'object' ? args[0] : {
+      level: args[0], message: args[1], lineNumber: args[2],
+    };
+    const levelMap = { verbose: 0, info: 1, warning: 2, error: 3 };
+    const numeric = typeof details.level === 'string' ? levelMap[details.level] : Number(details.level);
+    if (!(numeric >= 2)) return; // warnings/errors only; never retain console text
+    // Renderer console text is untrusted and can contain an entire response or
+    // document. Hash a bounded prefix plus its original length so one warning
+    // cannot synchronously pin the Electron main thread.
+    const message = boundedFingerprint(details.message);
+    const messageFingerprint = message.fingerprint;
+    const sample = sampleNoisyDiagnostic(
+      `console:${surface}:${numeric}`, messageFingerprint);
+    if (!sample.emit) return;
+    log[numeric >= 3 ? 'error' : 'warn']('window.console_message', {
+      console_level: numeric,
+      message_fingerprint: messageFingerprint,
+      message_length: message.length,
+      line: Number(details.lineNumber) || null,
+      occurrences: sample.count,
+    });
+  });
+  browserWindow.on('unresponsive', () => {
+    unresponsiveAt = Date.now();
+    log.error('window.unresponsive', {});
+  });
+  browserWindow.on('responsive', () => {
+    log.info('window.responsive', {
+      unresponsive_ms: unresponsiveAt ? Date.now() - unresponsiveAt : null,
+    });
+    unresponsiveAt = 0;
+  });
+  browserWindow.on('closed', () => log.info('window.closed', {}));
+}
+
+function loadWindowFile(browserWindow, file, options, surface) {
+  const started = Date.now();
+  browserWindow.loadFile(file, options).catch((err) => {
+    diagnostics.error('window.load_promise_rejected', {
+      duration_ms: Date.now() - started, error: errorFields(err),
+    }, surface);
+  });
+}
 
 function sceneBounds() {
   // The whole work area: the scene is click-through everywhere except the
@@ -99,14 +257,15 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  attachWindowDiagnostics(win, 'orb-renderer');
   win.setAlwaysOnTop(true, 'floating');
   // The window spans most of the screen but only the blob and its items may
   // eat clicks. Start click-through; the renderer toggles it from hover
   // (forward:true keeps mousemove flowing while ignored, so hover works).
   win.setIgnoreMouseEvents(true, { forward: true });
   // demo mode reaches the renderer as a query param — the clean channel
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'),
-               DEMO ? { query: { demo: '1' } } : undefined);
+  loadWindowFile(win, path.join(__dirname, 'renderer', 'index.html'),
+                 DEMO ? { query: { demo: '1' } } : undefined, 'orb-renderer');
   win.webContents.on('did-finish-load', () => {
     const queued = pendingSends;
     pendingSends = [];
@@ -130,7 +289,10 @@ const LIFECYCLE = new Set(['orb:reveal', 'orb:dismiss']);
 let pendingSends = [];
 
 function sendToScene(channel, payload) {
-  if (!win) return;
+  if (!win) {
+    mainDiag.warn('orb.send_dropped', { channel });
+    return;
+  }
   const wc = win.webContents;
   if (wc.isLoadingMainFrame()) {
     if (LIFECYCLE.has(channel)) {
@@ -145,9 +307,11 @@ function sendToScene(channel, payload) {
 // Only an orb:hidden that answers our own orb:dismiss may hide the window;
 // stale ones (from a dismissal superseded by a summon) must not.
 let dismissing = false;
+let dismissStartedAt = 0;
 
 function summon(reason) {
-  if (!win) createWindow();
+  const recreated = !win;
+  if (recreated) createWindow();
   // re-cover the work area every summon: displays change, docks move
   const bounds = win.getBounds();
   const fresh = sceneBounds();
@@ -157,13 +321,20 @@ function summon(reason) {
   }
   visible = true;
   dismissing = false;
+  dismissStartedAt = 0;
   win.show();
+  mainDiag.info('orb.summon', { reason, recreated });
   sendToScene('orb:reveal', { anchor: anchorPoint(win.getBounds()), reason });
 }
 
 function dismiss() {
-  if (!win || !visible) return;
+  if (!win || !visible) {
+    mainDiag.debug('orb.dismiss_skipped', { has_window: !!win, visible });
+    return;
+  }
   dismissing = true;
+  dismissStartedAt = Date.now();
+  mainDiag.info('orb.dismiss_requested', {});
   sendToScene('orb:dismiss');
 }
 
@@ -177,6 +348,7 @@ function toggle() {
 // dock shows the app is running and Cmd-W behaves as expected.
 function openControl() {
   if (controlWin) {
+    mainDiag.info('control.shown', { reused: true });
     controlWin.show();
     controlWin.focus();
     return;
@@ -194,7 +366,10 @@ function openControl() {
       nodeIntegration: false,
     },
   });
-  controlWin.loadFile(path.join(__dirname, 'renderer', 'control.html'));
+  mainDiag.info('control.shown', { reused: false });
+  attachWindowDiagnostics(controlWin, 'control-renderer');
+  loadWindowFile(controlWin, path.join(__dirname, 'renderer', 'control.html'),
+                 undefined, 'control-renderer');
   controlWin.on('closed', () => {
     controlWin = null;
   });
@@ -203,28 +378,30 @@ function openControl() {
 // The wake word runs iff the app runs. start-daemon no-ops when the daemon is
 // already up, so this is safe to call on every launch and second-instance.
 function ensureDaemon() {
-  if (!MANAGED || !ownsLifecycle) return;
+  if (!MANAGED || !ownsLifecycle) {
+    mainDiag.debug('daemon.start_skipped', { managed: MANAGED, owns_lifecycle: ownsLifecycle });
+    return;
+  }
   runEchoechoctl('start-daemon').then((r) => {
     // The Dock icon promises "echoecho is listening" — a silent start failure
     // (missing .venv, stale repoRoot, no API key) would make it lie.
-    if (!r.ok) console.error('[daemon] start-daemon failed:', r.output);
+    if (!r.ok) console.error('[daemon] start-daemon failed; see diagnostics/control panel');
   });
 }
 
-// Only the instance holding the single-instance lock may manage the daemon:
-// a losing duplicate still fires will-quit on its way out, and must not kill
-// the daemon the primary instance owns.
-let ownsLifecycle = false;
-
 app.whenReady().then(() => {
-  if (!app.requestSingleInstanceLock()) {
+  mainDiag.info('app.ready', {});
+  if (!primaryInstance) {
     app.quit();
     return;
   }
   ownsLifecycle = true;
   // echoechoctl start-daemon relaunches the app when it isn't running; that
   // arrives here as a second instance, so make sure the daemon comes up too.
-  app.on('second-instance', () => { openControl(); ensureDaemon(); });
+  app.on('second-instance', () => {
+    mainDiag.info('app.second_instance', {});
+    openControl(); ensureDaemon();
+  });
   if (process.platform === 'darwin' && app.dock) {
     // Visible in the Dock on purpose: app running ⇔ wake word listening
     // (ensureDaemon on launch, tether + stop-daemon on exit), so the Dock
@@ -243,6 +420,7 @@ app.whenReady().then(() => {
 
   try {
     tray = new Tray(trayIcon());
+    mainDiag.info('tray.ready', {});
     tray.setToolTip('echoecho');
     tray.on('click', toggle);
     const menu = Menu.buildFromTemplate([
@@ -260,20 +438,32 @@ app.whenReady().then(() => {
   } catch (err) {
     // Headless CI has no tray; the window + shortcuts still work.
     console.error('[orb] tray unavailable:', err.message);
+    mainDiag.warn('tray.unavailable', { error: errorFields(err) });
   }
 
   createWindow();
 
-  viewer = new ViewerClient(VIEWER_BASE);
+  viewer = new ViewerClient(VIEWER_BASE, { diagnostics: viewerDiag });
   viewer.on('events', (evts) => sendToScene('viewer:events', evts));
   viewer.on('wake', () => summon('wake'));
-  viewer.on('connected', () => sendToScene('viewer:status', { connected: true }));
-  viewer.on('disconnected', () => sendToScene('viewer:status', { connected: false }));
+  viewer.on('connected', () => {
+    if (viewerConnectionState !== true) mainDiag.info('viewer.connected', {});
+    viewerConnectionState = true;
+    sendToScene('viewer:status', { connected: true });
+  });
+  viewer.on('disconnected', () => {
+    if (viewerConnectionState !== false) mainDiag.warn('viewer.disconnected', {});
+    viewerConnectionState = false;
+    sendToScene('viewer:status', { connected: false });
+  });
   viewer.start();
 
   ensureDaemon();
 
-  globalShortcut.register('CommandOrControl+Shift+E', toggle);
+  const shortcutRegistered = globalShortcut.register('CommandOrControl+Shift+E', toggle);
+  mainDiag[shortcutRegistered ? 'info' : 'warn']('shortcut.registration', {
+    registered: shortcutRegistered,
+  });
 
   if (SMOKE && DEMO) {
     // series capture of the scripted demo, aligned to the scene's own clock
@@ -330,9 +520,26 @@ app.whenReady().then(() => {
     // Opened like a normal app (double-click echoecho.app): show the panel.
     openControl();
   }
+}).catch((err) => {
+  mainDiag.error('app.startup_failed', { error: errorFields(err) });
+  throw err;
 });
 
+app.on('child-process-gone', (_event, details) => {
+  mainDiag.error('app.child_process_gone', {
+    type: details && details.type,
+    reason: details && details.reason,
+    exit_code: details && details.exitCode,
+    service_name_fingerprint: fingerprint(details && details.serviceName),
+  });
+});
+
+app.on('before-quit', () => mainDiag.info('app.before_quit', {}));
 app.on('will-quit', () => {
+  flushNoisyDiagnosticSummary();
+  mainDiag.info('app.will_quit', {
+    owns_lifecycle: ownsLifecycle, managed: MANAGED,
+  });
   globalShortcut.unregisterAll();
   if (viewer) viewer.stop();
   if (vncProxy) vncProxy.stop();
@@ -340,20 +547,184 @@ app.on('will-quit', () => {
   // also covers daemons we didn't start; force quit (no will-quit) is handled
   // by the daemon's own tether to our pid.
   if (MANAGED && ownsLifecycle) runEchoechoctl('stop-daemon', true);
+  diagnostics.close('app-quit');
 });
+
+process.on('exit', () => diagnostics.close('process-exit'));
 
 // Keep running with no windows: we live in the menu bar.
 app.on('window-all-closed', () => {});
 
 // ---- IPC ----------------------------------------------------------------
 
+const RENDERER_DIAGNOSTIC_SCHEMA = {
+  'client.error': { level: 'error', fields: { line: 'number', column: 'number', error_name: 'token', error_code: 'token' }, error: true },
+  'client.unhandled_rejection': { level: 'error', fields: { error_name: 'token', error_code: 'token' }, error: true },
+  'control.refresh_failed': { level: 'warn', fields: { consecutive: 'number', duration_ms: 'number', error_name: 'token', error_code: 'token' }, error: true },
+  'control.refresh_recovered': { level: 'info', fields: { failed_attempts: 'number', downtime_ms: 'number' } },
+  'control.status_transition': { level: 'info', fields: { daemon: 'boolean', vm: 'boolean', orb_visible: 'boolean' } },
+  'control.action_start': { level: 'info', fields: { action: 'token' } },
+  'control.action_done': { level: 'info', fields: { action: 'token', ok: 'boolean', detached: 'boolean', duration_ms: 'number' } },
+  'control.action_failed': { level: 'warn', fields: { action: 'token', duration_ms: 'number', error_name: 'token', error_code: 'token' }, error: true },
+  'control.action_cancelled': { level: 'info', fields: { action: 'token' } },
+  'control.login_item_failed': { level: 'warn', fields: { enabled: 'boolean', error_name: 'token', error_code: 'token' }, error: true },
+  'scene.storage_failed': { level: 'warn', fields: { operation: 'token', error_name: 'token', error_code: 'token' }, error: true },
+  'scene.vnc_open_failed': { level: 'warn', fields: { error_name: 'token', error_code: 'token' }, error: true },
+  'scene.doc_fetch_failed': { level: 'warn', fields: { error_name: 'token', error_code: 'token' }, error: true },
+  'scene.lifecycle': { level: 'info', fields: { transition: 'token', reason: 'token', duration_ms: 'number' } },
+  'scene.viewer_status': { level: 'info', fields: { connected: 'boolean' } },
+  'scene.task_state': { level: 'info', fields: { status: 'token', running: 'number' } },
+  'vnc.stage': { level: 'info', fields: { stage: 'token', outcome: 'token', attempt: 'number', duration_ms: 'number', error_name: 'token', error_code: 'token' }, error: true },
+  'vnc.disconnect': { level: 'info', fields: { clean: 'boolean', was_connected: 'boolean', connected_ms: 'number' } },
+  'vnc.credentials_required': { level: 'warn', fields: { has_password: 'boolean' } },
+  'vnc.security_failure': { level: 'warn', fields: { has_reason: 'boolean' } },
+  'vnc.view_only': { level: 'info', fields: { enabled: 'boolean' } },
+  'vnc.cleanup_failed': { level: 'warn', fields: { stage: 'token', error_name: 'token', error_code: 'token' }, error: true },
+};
+
+function rendererSurface(sender) {
+  if (win && sender === win.webContents) return 'orb-renderer';
+  if (controlWin && sender === controlWin.webContents) return 'control-renderer';
+  return 'unknown-renderer';
+}
+
+const RENDERER_TOKEN_VALUES = {
+  action: new Set(['summon', 'live-writer', 'daemon-start', 'daemon-stop', 'daemon-restart',
+                   'vm-boot', 'vm-reset', 'update', 'quit-app']),
+  operation: new Set(['pose-read', 'pose-write']),
+  transition: new Set(['reveal-received', 'dismiss-received', 'hidden-ack', 'revealed']),
+  reason: new Set(['wake', 'tray', 'dock', 'menu', 'control', 'smoke', 'demo', 'unknown']),
+  status: new Set(['queued', 'running', 'progress', 'done', 'error', 'unknown']),
+  stage: new Set(['module-import', 'module-ready', 'proxy-connect', 'rfb-create', 'rfb-connect',
+                  'scene-remove', 'close', 'open-replace', 'proxy-disconnect']),
+  outcome: new Set(['ready', 'failed', 'superseded']),
+};
+const SAFE_ERROR_NAMES = new Set([
+  'Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'DOMException',
+  'AbortError', 'NotAllowedError', 'NotFoundError', 'SecurityError', 'NetworkError',
+  'InvalidStateError', 'OperationError',
+]);
+const MAX_RENDERER_DIAGNOSTIC_EVENT_CHARS = 80;
+const MAX_RENDERER_DIAGNOSTIC_TOKEN_CHARS = 256;
+const MAX_RENDERER_DIAGNOSTIC_SCHEMA_FIELDS = 16;
+
+function rendererPrimitive(value) {
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return null;
+}
+
+function rendererLength(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value : null;
+}
+
+function safeToken(key, value) {
+  value = rendererPrimitive(value);
+  if (value === null) return null;
+  const raw = typeof value === 'string' ? value : String(value);
+  if (raw.length > MAX_RENDERER_DIAGNOSTIC_TOKEN_CHARS) {
+    return `fingerprint:${boundedFingerprint(raw).fingerprint}`;
+  }
+  if (RENDERER_TOKEN_VALUES[key]) {
+    return RENDERER_TOKEN_VALUES[key].has(raw) ? raw : `fingerprint:${fingerprint(raw)}`;
+  }
+  if (key === 'error_name') {
+    return SAFE_ERROR_NAMES.has(raw) ? raw : `fingerprint:${fingerprint(raw)}`;
+  }
+  if (key === 'error_code') {
+    return /^[A-Z0-9_.-]{0,40}$/.test(raw) ? raw : `fingerprint:${fingerprint(raw)}`;
+  }
+  return /^[a-z0-9_.:-]{0,80}$/i.test(raw) ? raw : `fingerprint:${fingerprint(raw)}`;
+}
+
+function normalizeRendererDiagnostic(schema, raw) {
+  const fields = {};
+  raw = raw && typeof raw === 'object' ? raw : {};
+  let processed = 0;
+  for (const [key, type] of Object.entries(schema.fields)) {
+    if (++processed > MAX_RENDERER_DIAGNOSTIC_SCHEMA_FIELDS) break;
+    const value = raw[key];
+    if (value === undefined || value === null) continue;
+    if (type === 'number' && typeof value === 'number' && Number.isFinite(value)) {
+      fields[key] = value;
+    } else if (type === 'boolean' && typeof value === 'boolean') {
+      fields[key] = value;
+    } else if (type === 'token') {
+      const token = safeToken(key, value);
+      if (token !== null) fields[key] = token;
+    }
+  }
+  if (schema.error) {
+    const message = raw.message || raw.error_message || '';
+    const stack = raw.stack || '';
+    if (typeof raw.message_fingerprint === 'string' &&
+        /^[a-f0-9]{16}$/.test(raw.message_fingerprint)) {
+      fields.message_fingerprint = raw.message_fingerprint;
+      const length = rendererLength(raw.message_length);
+      if (length !== null) fields.message_length = length;
+    } else if (message !== '' && rendererPrimitive(message) !== null) {
+      const meta = boundedFingerprint(message);
+      fields.message_fingerprint = meta.fingerprint;
+      fields.message_length = meta.length;
+    }
+    if (typeof raw.stack_fingerprint === 'string' &&
+        /^[a-f0-9]{16}$/.test(raw.stack_fingerprint)) {
+      fields.stack_fingerprint = raw.stack_fingerprint;
+      const length = rendererLength(raw.stack_length);
+      if (length !== null) fields.stack_length = length;
+    } else if (stack !== '' && rendererPrimitive(stack) !== null) {
+      const meta = boundedFingerprint(stack);
+      fields.stack_fingerprint = meta.fingerprint;
+      fields.stack_length = meta.length;
+    }
+  }
+  return fields;
+}
+
+ipcMain.on('diagnostics:event', (ipcEvent, payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  const surface = rendererSurface(ipcEvent.sender);
+  if (surface === 'unknown-renderer') return;
+  const rawEvent = typeof payload.event === 'string' ? payload.event : '';
+  const event = rawEvent.length <= MAX_RENDERER_DIAGNOSTIC_EVENT_CHARS ? rawEvent : '';
+  const schema = RENDERER_DIAGNOSTIC_SCHEMA[event];
+  if (!schema) {
+    const eventFingerprint = boundedFingerprint(rawEvent).fingerprint;
+    const sample = sampleNoisyDiagnostic(
+      `rejected:${surface}`, eventFingerprint);
+    if (sample.emit) {
+      mainDiag.warn('renderer.report_rejected', {
+        event_fingerprint: eventFingerprint, source: surface,
+        occurrences: sample.count,
+      });
+    }
+    return;
+  }
+  const fields = normalizeRendererDiagnostic(schema, payload.fields);
+  const level = event === 'vnc.stage' && fields.outcome === 'failed' ? 'warn' : schema.level;
+  const fieldsFingerprint = fingerprint(JSON.stringify(fields));
+  const sample = sampleNoisyDiagnostic(
+    `report:${surface}:${event}`, fieldsFingerprint);
+  if (sample.emit) {
+    diagnostics.log(level, event, { ...fields, occurrences: sample.count }, surface);
+  }
+});
+
 ipcMain.handle('viewer:transcript', () => viewer.transcript());
 ipcMain.handle('viewer:doc', (_e, relpath) => viewer.doc(String(relpath)));
 
 ipcMain.on('orb:hidden', () => {
-  if (!dismissing) return;
+  if (!dismissing) {
+    mainDiag.warn('orb.hidden_stale', {});
+    return;
+  }
   dismissing = false;
   visible = false;
+  mainDiag.info('orb.hidden', {
+    dismiss_ms: dismissStartedAt ? Date.now() - dismissStartedAt : null,
+  });
+  dismissStartedAt = 0;
   if (win) win.hide();
 });
 ipcMain.on('orb:dismiss-request', () => dismiss());
@@ -371,45 +742,128 @@ ipcMain.on('orb:passthrough', (_e, on) => {
 // Mac is expected degradation, not an error. preload rethrows it, so the
 // renderer still sees a rejected promise.
 ipcMain.handle('vnc:connect', async () => {
+  const started = Date.now();
+  const source = process.env.ECHOECHO_VNC_URL ? 'environment' : 'viewer';
+  mainDiag.info('vnc.connect_started', { source });
   try {
     let target = process.env.ECHOECHO_VNC_URL || null;
     if (!target) {
       const info = await viewer.vncInfo(); // throws -> renderer shows "asleep"
       target = info.url;
     }
-    if (!vncProxy) vncProxy = require('./vnc-proxy');
-    return await vncProxy.start(target);
+    if (!vncProxy) {
+      vncProxy = require('./vnc-proxy');
+      if (vncProxy.setDiagnostics) vncProxy.setDiagnostics(diagnostics.child('vnc-proxy'));
+    }
+    const info = await vncProxy.start(target);
+    mainDiag.info('vnc.connect_ready', {
+      source, duration_ms: Date.now() - started,
+    });
+    return info;
   } catch (err) {
+    mainDiag.warn('vnc.connect_failed', {
+      source, duration_ms: Date.now() - started, error: errorFields(err),
+    });
     return { error: String((err && err.message) || err) };
   }
 });
 
 ipcMain.handle('vnc:disconnect', () => {
-  if (vncProxy) vncProxy.stop();
+  const started = Date.now();
+  if (!vncProxy) {
+    mainDiag.debug('vnc.disconnect_skipped', {});
+    return;
+  }
+  return vncProxy.stop().then(() => {
+    mainDiag.info('vnc.disconnected', { duration_ms: Date.now() - started });
+  }).catch((err) => {
+    mainDiag.warn('vnc.disconnect_failed', {
+      duration_ms: Date.now() - started, error: errorFields(err),
+    });
+    throw err;
+  });
 });
 
 // ---- control panel IPC ----------------------------------------------------
 
 function runEchoechoctl(cmd, detached) {
   return new Promise((resolve) => {
-    const child = spawn('bash', [ECHOECHOCTL, cmd], {
-      cwd: RUNTIME.repoRoot,
-      // start-daemon tethers the daemon to this pid: it exits when we do,
-      // force quit included. Other commands ignore the variable.
-      env: { ...process.env, ECHOECHO_TETHER_PID: String(process.pid) },
-      detached: !!detached,
-      stdio: detached ? 'ignore' : ['ignore', 'pipe', 'pipe'],
+    const started = Date.now();
+    const MAX_CAPTURE = 64 * 1024;
+    mainDiag.info('ctl.command_started', {
+      command: cmd, detached: !!detached, parent_run_id: diagnostics.runId,
     });
+    let child;
+    try {
+      child = spawn('bash', [ECHOECHOCTL, cmd], {
+        cwd: RUNTIME.repoRoot,
+        // start-daemon tethers the daemon to this pid: it exits when we do,
+        // force quit included. Other commands ignore the variable.
+        env: {
+          ...process.env,
+          ECHOECHO_TETHER_PID: String(process.pid),
+          ECHOECHO_PARENT_RUN_ID: diagnostics.runId,
+        },
+        detached: !!detached,
+        stdio: detached ? 'ignore' : ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      mainDiag.error('ctl.command_failed', {
+        command: cmd, duration_ms: Date.now() - started,
+        parent_run_id: diagnostics.runId, error: errorFields(err),
+      });
+      resolve({ ok: false, output: String((err && err.message) || err) });
+      return;
+    }
     if (detached) {
+      child.once('error', (err) => {
+        mainDiag.error('ctl.detached_command_failed', {
+          command: cmd, duration_ms: Date.now() - started,
+          parent_run_id: diagnostics.runId, error: errorFields(err),
+        });
+      });
       child.unref();
+      mainDiag.info('ctl.command_detached', {
+        command: cmd, duration_ms: Date.now() - started,
+        parent_run_id: diagnostics.runId,
+      });
       resolve({ ok: true, detached: true });
       return;
     }
     let out = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (out += d));
-    child.on('close', (code) => resolve({ ok: code === 0, output: out.trim() }));
-    child.on('error', (err) => resolve({ ok: false, output: err.message }));
+    let capturedBytes = 0;
+    let totalBytes = 0;
+    let truncated = false;
+    let settled = false;
+    const capture = (d) => {
+      const buf = Buffer.from(d);
+      totalBytes += buf.length;
+      if (capturedBytes < MAX_CAPTURE) {
+        const take = buf.subarray(0, MAX_CAPTURE - capturedBytes);
+        out += take.toString('utf8');
+        capturedBytes += take.length;
+      }
+      if (totalBytes > MAX_CAPTURE) truncated = true;
+    };
+    const finish = (result, err) => {
+      if (settled) return;
+      settled = true;
+      const fields = {
+        command: cmd, ok: !!result.ok, duration_ms: Date.now() - started,
+        parent_run_id: diagnostics.runId,
+        exit_code: result.code === undefined ? null : result.code,
+        stdout_stderr_bytes: totalBytes, capture_truncated: truncated,
+      };
+      if (err) fields.error = errorFields(err);
+      mainDiag[result.ok ? 'info' : 'warn']('ctl.command_finished', fields);
+      resolve({ ok: result.ok, output: result.output });
+    };
+    child.stdout.on('data', capture);
+    child.stderr.on('data', capture);
+    child.on('close', (code) => finish({
+      ok: code === 0, code, output: out.trim() + (truncated ? '\n[output truncated]' : ''),
+    }));
+    child.on('error', (err) => finish({ ok: false, output: String(err.message || err) }, err));
   });
 }
 
@@ -461,13 +915,42 @@ const CTL_ACTIONS = {
   },
 };
 
-ipcMain.handle('ctl:action', (_e, name) => {
-  const fn = CTL_ACTIONS[String(name)];
-  if (!fn) return { ok: false, output: `unknown action ${name}` };
-  return fn();
+ipcMain.handle('ctl:action', async (_e, name) => {
+  const action = String(name);
+  const fn = CTL_ACTIONS[action];
+  const started = Date.now();
+  if (!fn) {
+    mainDiag.warn('ctl.action_rejected', {
+      action_fingerprint: fingerprint(action),
+    });
+    return { ok: false, output: `unknown action ${name}` };
+  }
+  mainDiag.info('ctl.action_started', { action });
+  try {
+    const result = await fn();
+    mainDiag[result && result.ok === false ? 'warn' : 'info']('ctl.action_finished', {
+      action, ok: !result || result.ok !== false, detached: !!(result && result.detached),
+      duration_ms: Date.now() - started,
+    });
+    return result;
+  } catch (err) {
+    mainDiag.error('ctl.action_failed', {
+      action, duration_ms: Date.now() - started, error: errorFields(err),
+    });
+    throw err;
+  }
 });
 
 ipcMain.handle('ctl:login-item', (_e, enable) => {
-  app.setLoginItemSettings({ openAtLogin: !!enable });
-  return { ok: true };
+  const requested = !!enable;
+  try {
+    app.setLoginItemSettings({ openAtLogin: requested });
+    mainDiag.info('ctl.login_item_changed', { enabled: requested });
+    return { ok: true };
+  } catch (err) {
+    mainDiag.error('ctl.login_item_failed', {
+      enabled: requested, error: errorFields(err),
+    });
+    throw err;
+  }
 });

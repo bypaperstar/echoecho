@@ -2,13 +2,17 @@
 vector, the VNC challenge-response quirk, vnc:// parsing, combo->keysym, and a
 full handshake + input-event exchange against a fake in-process RFB server.
 No real VM, no network beyond a localhost socket."""
+import asyncio
+import json
 import socket
 import struct
 import threading
 import time
+import zlib
 
 import pytest
 
+from echoecho_app import diagnostics
 from echoecho_app.services import vnc as vnc_mod
 from echoecho_app.services.vnc import (
     VncClient, VncError, combo_to_events, des_encrypt_block, parse_vnc_url,
@@ -54,6 +58,17 @@ def test_parse_vnc_url():
     assert parse_vnc_url("vnc://host") == ("host", 5900, "")
     with pytest.raises(VncError):
         parse_vnc_url("http://nope")
+
+
+@pytest.mark.parametrize("raw", [
+    "https://:URL-SECRET-CANARY@example.test:5900",
+    "vnc://:URL-SECRET-CANARY@",
+    "vnc://:URL-SECRET-CANARY@example.test:not-a-port",
+])
+def test_parse_vnc_url_errors_never_echo_credentials(raw):
+    with pytest.raises(VncError) as caught:
+        parse_vnc_url(raw)
+    assert "URL-SECRET-CANARY" not in str(caught.value)
 
 
 def test_combo_to_events():
@@ -153,6 +168,65 @@ class FakeRfbServer:
             pass
 
 
+class NoneOnlyRfbServer(FakeRfbServer):
+    """Offer only unauthenticated access, then wait for the client to close."""
+
+    def _serve(self):
+        conn, _ = self.sock.accept()
+        try:
+            conn.sendall(b"RFB 003.008\n")
+            self._recvn(conn, 12)
+            conn.sendall(bytes([1, 1]))  # one offered type: None
+            # A password-configured client must reject before choosing it.
+            conn.settimeout(2)
+            self.chosen = conn.recv(1)
+        except (EOFError, OSError):
+            self.chosen = b""
+        finally:
+            conn.close()
+
+
+class OversizedNameRfbServer(FakeRfbServer):
+    def _serve(self):
+        conn, _ = self.sock.accept()
+        try:
+            conn.sendall(b"RFB 003.008\n")
+            self._recvn(conn, 12)
+            conn.sendall(bytes([1, 1]))
+            self._recvn(conn, 1)
+            conn.sendall(struct.pack(">I", 0))
+            self._recvn(conn, 1)
+            conn.sendall(
+                struct.pack(">HH", 800, 600) + b"\x00" * 16 +
+                struct.pack(">I", vnc_mod.MAX_SERVER_NAME_BYTES + 1))
+        except (EOFError, OSError):
+            pass
+        finally:
+            conn.close()
+
+
+class UnknownVersionRfbServer(FakeRfbServer):
+    def _serve(self):
+        conn, _ = self.sock.accept()
+        try:
+            conn.sendall(b"RFB 003.889\n")
+            self.client_version = self._recvn(conn, 12)
+            conn.sendall(struct.pack(">I", 1))  # 3.3 server-selected None
+            self._recvn(conn, 1)
+            name = b"unknown-version"
+            pf = (struct.pack(">BBBBHHHBBB", 32, 24, 0, 1,
+                              255, 255, 255, 16, 8, 0) + b"\x00\x00\x00")
+            conn.sendall(struct.pack(">HH", 20, 10) + pf
+                         + struct.pack(">I", len(name)) + name)
+            # Drain both KeyEvent messages (down + up) before closing so the
+            # kernel does not reset a client that still has unread bytes.
+            self._recvn(conn, 16)
+        except (EOFError, OSError):
+            pass
+        finally:
+            conn.close()
+
+
 def test_client_handshake_and_input():
     server = FakeRfbServer(password="hunter2").start()
     try:
@@ -176,6 +250,81 @@ def test_client_handshake_and_input():
     assert vnc_mod.MODIFIER_KEYSYMS["cmd"] in downs
     pointers = [e for e in server.events if e[0] == "pointer"]
     assert ("pointer", 1, 10, 20) in pointers  # button-1 press at (10,20)
+
+
+def test_password_client_rejects_unauthenticated_downgrade():
+    server = NoneOnlyRfbServer().start()
+    try:
+        with pytest.raises(VncError, match="password authentication"):
+            VncClient("127.0.0.1", server.port,
+                      "PASSWORD-DOWNGRADE-CANARY", timeout=2).connect()
+    finally:
+        server.stop()
+        server.thread.join(timeout=2)
+    assert getattr(server, "chosen", b"") == b""
+
+
+def test_server_name_length_is_bounded_before_reading_payload():
+    server = OversizedNameRfbServer(password="").start()
+    try:
+        with pytest.raises(VncError, match="name is too large"):
+            VncClient("127.0.0.1", server.port, "", timeout=2).connect()
+    finally:
+        server.stop()
+        server.thread.join(timeout=2)
+
+
+def test_unknown_protocol_version_falls_back_to_rfb_33():
+    server = UnknownVersionRfbServer(password="").start()
+    try:
+        with VncClient("127.0.0.1", server.port, "", timeout=2) as client:
+            assert (client.width, client.height) == (20, 10)
+            client.tap(ord("x"), hold=0)
+    finally:
+        server.stop()
+        server.thread.join(timeout=2)
+    assert server.client_version == b"RFB 003.003\n"
+
+
+def test_client_diagnostics_are_metadata_only(tmp_path):
+    diag_dir = tmp_path / "diagnostics"
+    password = "DIAG-PASSWORD-CANARY"
+    typed = "DIAG-TEXT-CANARY"
+    server = FakeRfbServer(password=password).start()
+    diagnostics.configure("vnc-test", log_dir=diag_dir)
+    try:
+        with VncClient("127.0.0.1", server.port, password, timeout=2) as client:
+            client.type_text(typed, delay=0)
+    finally:
+        diagnostics.shutdown(outcome="test")
+        server.stop()
+        server.thread.join(timeout=2)
+
+    raw = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in diag_dir.glob("*.jsonl"))
+    assert password not in raw
+    assert typed not in raw
+    records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    events = {record["event"] for record in records}
+    assert "gui.vnc.connect.started" in events
+    assert "gui.vnc.server.ready" in events
+    assert "gui.vnc.input.finished" in events
+    closed = next(record for record in records
+                  if record["event"] == "gui.vnc.connection.closed")
+    assert closed["fields"]["text_chars"] == len(typed)
+    assert closed["fields"]["key_event_count"] > 0
+
+
+def test_vnc_input_bounds_text_coordinates_and_buttons():
+    client = VncClient("127.0.0.1", 5900)
+    client.width, client.height = 100, 50
+    with pytest.raises(ValueError, match="too long"):
+        client.type_text("x" * (vnc_mod.MAX_TYPE_CHARS + 1), delay=0)
+    with pytest.raises(ValueError, match="outside"):
+        client.pointer(100, 2)
+    with pytest.raises(ValueError, match="between 1 and 8"):
+        client.click(1, 2, button=9)
 
 
 def test_vnc_gui_driver_selected_by_default(monkeypatch, tmp_path):
@@ -244,6 +393,49 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     assert ssh_argvs[0] == ["open", "-a", "TextEdit"]  # launch stayed on SSH
 
 
+def test_vnc_gui_driver_never_echoes_credential_url(monkeypatch, tmp_path):
+    from echoecho_app.services import gui as gui_mod
+    from echoecho_app.services.vm import LumeVM
+
+    secret = "GUI-URL-SECRET-CANARY"
+    monkeypatch.setenv(
+        "ECHOECHO_VNC_URL", "vnc://:%s@127.0.0.1:1" % secret)
+    driver = gui_mod.VncGuiDriver(
+        LumeVM(vm_name="echoecho-vm"), tmp_path)
+
+    with pytest.raises(gui_mod.GuiError) as caught:
+        asyncio.run(driver._vnc())
+
+    assert secret not in str(caught.value)
+    assert "vnc://" not in str(caught.value)
+
+
+def test_vnc_gui_driver_discards_cached_client_after_input_failure(tmp_path):
+    from echoecho_app.services import gui as gui_mod
+    from echoecho_app.services.vm import LumeVM
+
+    class BrokenClient:
+        def __init__(self):
+            self.closed = False
+
+        def type_text(self, _text):
+            raise OSError("wire failed")
+
+        def close(self, outcome="closed"):
+            self.closed = True
+
+    driver = gui_mod.VncGuiDriver(
+        LumeVM(vm_name="echoecho-vm"), tmp_path)
+    client = BrokenClient()
+    driver._client = client
+
+    with pytest.raises(gui_mod.GuiError, match="input failed"):
+        asyncio.run(driver.type_text("private content"))
+
+    assert client.closed is True
+    assert driver._client is None
+
+
 def test_write_png_roundtrip(tmp_path):
     from echoecho_app.services.vnc import _write_png
     # 2x1 image: red, green -> a valid PNG the stdlib can't decode without
@@ -255,6 +447,30 @@ def test_write_png_roundtrip(tmp_path):
     assert data[-8:-4] == b"IEND"
     # IHDR width/height are big-endian right after the 8-byte sig + len+tag
     assert struct.unpack(">II", data[16:24]) == (2, 1)
+    offset = 8
+    idat = []
+    while offset < len(data):
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        tag = data[offset + 4:offset + 8]
+        payload = data[offset + 8:offset + 8 + length]
+        if tag == b"IDAT":
+            idat.append(payload)
+        offset += 12 + length
+    assert zlib.decompress(b"".join(idat)) == bytes(
+        [0, 255, 0, 0, 0, 255, 0])
+
+
+def test_write_png_atomically_replaces_symlink_without_touching_target(tmp_path):
+    victim = tmp_path / "private.txt"
+    victim.write_text("must survive")
+    output = tmp_path / "screen.png"
+    output.symlink_to(victim)
+
+    vnc_mod._write_png(str(output), 1, 1, bytes([1, 2, 3]))
+
+    assert victim.read_text() == "must survive"
+    assert output.is_file() and not output.is_symlink()
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_capture_png_over_fake_server(tmp_path):
@@ -303,6 +519,138 @@ def test_capture_png_over_fake_server(tmp_path):
         assert struct.unpack(">II", data[16:24]) == (2, 2)
     finally:
         server.stop()
+
+
+def test_capture_rejects_partial_framebuffer_without_writing_png(tmp_path):
+    class PartialServer(FakeRfbServer):
+        def _serve(self):
+            conn, _ = self.sock.accept()
+            try:
+                conn.sendall(b"RFB 003.008\n")
+                self._recvn(conn, 12)
+                conn.sendall(bytes([1, 1]))
+                self._recvn(conn, 1)
+                conn.sendall(struct.pack(">I", 0))
+                self._recvn(conn, 1)
+                name = b"partial"
+                pf = (struct.pack(">BBBBHHHBBB", 32, 24, 0, 1,
+                                  255, 255, 255, 16, 8, 0) + b"\x00\x00\x00")
+                conn.sendall(struct.pack(">HH", 2, 2) + pf
+                             + struct.pack(">I", len(name)) + name)
+                hdr = self._recvn(conn, 4)
+                self._recvn(conn, struct.unpack(">H", hdr[2:4])[0] * 4)
+                self._recvn(conn, 10)
+                pixel = bytes([0, 0, 255, 0])
+                conn.sendall(
+                    struct.pack(">BBH", 0, 0, 1) +
+                    struct.pack(">HHHHi", 0, 0, 1, 1, 0) + pixel)
+                self._recvn(conn, 10)  # client's bounded full retry
+            except (EOFError, OSError):
+                pass
+            finally:
+                conn.close()
+
+    server = PartialServer(password="").start()
+    output = tmp_path / "partial.png"
+    try:
+        with VncClient("127.0.0.1", server.port, "", timeout=2) as client:
+            with pytest.raises(VncError, match="closed"):
+                client.capture_png(str(output))
+    finally:
+        server.stop()
+        server.thread.join(timeout=2)
+    assert not output.exists()
+
+
+def test_capture_has_total_deadline_for_endless_non_framebuffer_messages(
+        tmp_path):
+    class BellServer(FakeRfbServer):
+        def _serve(self):
+            conn, _ = self.sock.accept()
+            try:
+                conn.sendall(b"RFB 003.008\n")
+                self._recvn(conn, 12)
+                conn.sendall(bytes([1, 1]))
+                self._recvn(conn, 1)
+                conn.sendall(struct.pack(">I", 0))
+                self._recvn(conn, 1)
+                name = b"bell"
+                pf = (struct.pack(">BBBBHHHBBB", 32, 24, 0, 1,
+                                  255, 255, 255, 16, 8, 0) + b"\x00\x00\x00")
+                conn.sendall(struct.pack(">HH", 2, 2) + pf
+                             + struct.pack(">I", len(name)) + name)
+                hdr = self._recvn(conn, 4)
+                self._recvn(conn, struct.unpack(">H", hdr[2:4])[0] * 4)
+                self._recvn(conn, 10)
+                while True:
+                    conn.sendall(b"\x02" * 1024)  # Bell forever
+            except (EOFError, OSError):
+                pass
+            finally:
+                conn.close()
+
+    server = BellServer(password="").start()
+    output = tmp_path / "never.png"
+    started = time.monotonic()
+    try:
+        with VncClient("127.0.0.1", server.port, "", timeout=2) as client:
+            with pytest.raises((TimeoutError, VncError), match=(
+                    "deadline|message limit")):
+                client.capture_png(str(output), timeout=0.05)
+    finally:
+        server.stop()
+        server.thread.join(timeout=2)
+    assert time.monotonic() - started < 1
+    assert not output.exists()
+
+
+def test_capture_deadline_cannot_be_bypassed_by_slow_drip_payload(tmp_path):
+    class SlowDripServer(FakeRfbServer):
+        def _serve(self):
+            conn, _ = self.sock.accept()
+            try:
+                conn.sendall(b"RFB 003.008\n")
+                self._recvn(conn, 12)
+                conn.sendall(bytes([1, 1]))
+                self._recvn(conn, 1)
+                conn.sendall(struct.pack(">I", 0))
+                self._recvn(conn, 1)
+                name = b"slow-drip"
+                pf = (struct.pack(">BBBBHHHBBB", 32, 24, 0, 1,
+                                  255, 255, 255, 16, 8, 0) + b"\x00\x00\x00")
+                conn.sendall(struct.pack(">HH", 2, 1) + pf
+                             + struct.pack(">I", len(name)) + name)
+                hdr = self._recvn(conn, 4)
+                self._recvn(conn, struct.unpack(">H", hdr[2:4])[0] * 4)
+                self._recvn(conn, 10)
+                conn.sendall(
+                    struct.pack(">BBH", 0, 0, 1) +
+                    struct.pack(">HHHHi", 0, 0, 2, 1, 0))
+                # Each byte arrives inside the per-read timeout, but the full
+                # row cannot fit inside the capture's absolute deadline.
+                for byte in bytes([0, 0, 255, 0, 0, 255, 0, 0]):
+                    conn.sendall(bytes([byte]))
+                    time.sleep(0.04)
+            except (EOFError, OSError):
+                pass
+            finally:
+                conn.close()
+
+    server = SlowDripServer(password="").start()
+    output = tmp_path / "slow.png"
+    started = time.monotonic()
+    try:
+        with VncClient("127.0.0.1", server.port, "", timeout=2) as client:
+            original_timeout = client.sock.gettimeout()
+            with pytest.raises((TimeoutError, socket.timeout), match=(
+                    "deadline|timed out")):
+                client.capture_png(str(output), timeout=0.1)
+            assert client.sock.gettimeout() == original_timeout
+    finally:
+        server.stop()
+        server.thread.join(timeout=2)
+    assert time.monotonic() - started < 1
+    assert not output.exists()
 
 
 def test_client_auth_failure_raises():

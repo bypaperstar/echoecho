@@ -5,13 +5,14 @@ follow_ups[] list on TaskResult, re-enqueued verbatim.
 """
 import asyncio
 import dataclasses
+import hashlib
 import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from echoecho_app import config, events
+from echoecho_app import config, diagnostics, events
 from echoecho_app.bus import Injection, Task, TaskRequest, TaskResult
 from echoecho_app.orchestrator import log as tasklog
 from echoecho_app.orchestrator.ranker import rank
@@ -21,6 +22,36 @@ from echoecho_app.services import artifacts
 SNAPSHOT_CAP = 5  # ambient [workspace] injections per finished task
 TITLE_WORDS = 5  # spoken-handle length
 RECENT_SUMMARIES = 10  # finished tasks check_tasks shows without an id
+
+
+def _diagnostic_label_fields(value, allowed, name):
+    """Return a known label or only correlation metadata for unknown input."""
+    try:
+        if isinstance(value, str) and value in allowed:
+            return {name: value}
+    except Exception:
+        pass
+    try:
+        raw = value if isinstance(value, str) else str(value)
+    except Exception:
+        raw = "<unprintable %s>" % type(value).__name__
+    return {
+        name: "unknown",
+        name + "_length": len(raw),
+        name + "_fingerprint": hashlib.sha256(
+            raw.encode("utf-8", "replace")).hexdigest()[:16],
+    }
+
+
+def _diagnostic_kind_fields(kind, registry, name="kind"):
+    """Return privacy-safe diagnostic metadata for a task kind.
+
+    Registry keys are the only task-kind labels diagnostics may record
+    verbatim.  Requests and replayed task logs are input boundaries, so an
+    unknown kind may itself contain user-authored text; retain only enough
+    metadata to correlate repeated bad values without reproducing them.
+    """
+    return _diagnostic_label_fields(kind, registry, name)
 
 
 def _compact(text, limit=500):
@@ -102,6 +133,12 @@ class Orchestrator:
                              kind=task.kind, instructions=request.instructions,
                              source=request.source)
         events.emit("task", task_id=task.id, kind=task.kind, status="queued")
+        diagnostics.info(
+            "task.queued", task_id=task.id,
+            queue_depth=self.inbox.qsize() + 1,
+            **_diagnostic_kind_fields(task.kind, self.registry),
+            **_diagnostic_label_fields(
+                request.source, {"user", "follow_up"}, "source"))
         self.inbox.put_nowait(task)
         return task
 
@@ -222,6 +259,9 @@ class Orchestrator:
                                  kind=task.kind, say=task.result.say,
                                  priority="interrupt", artifacts_touched=[],
                                  follow_ups=[], session_id=task.session_id)
+        diagnostics.info("task_log.rehydrated", task_count=len(self.tasks),
+                         interrupted_count=len(interrupted),
+                         announced_count=len(self._announced))
         return interrupted
 
     # -- main loop ----------------------------------------------------------
@@ -229,27 +269,54 @@ class Orchestrator:
     async def run(self):
         while True:
             task = await self.inbox.get()
-            handle = asyncio.ensure_future(self._run_task(task))
+            handle = asyncio.create_task(self._run_task(task),
+                                         name="worker-%s" % task.id)
             self._running.add(handle)
-            handle.add_done_callback(self._running.discard)
+            handle.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, handle):
+        """Retrieve every spawned task exception. Worker exceptions are
+        converted into TaskResult inside _run_task, but post-processing bugs
+        must not become an unobserved ``Task exception was never retrieved``."""
+        self._running.discard(handle)
+        if handle.cancelled():
+            return
+        try:
+            exc = handle.exception()
+        except (asyncio.CancelledError, Exception) as exc:
+            diagnostics.exception("task.runner.exception_read_failed", exc=exc)
+            return
+        if exc is not None:
+            diagnostics.exception("task.runner.crashed", exc=exc,
+                                  asyncio_task=handle.get_name())
 
     def _reporter(self, task):
         """Per-task progress channel (ctx.report): text lines throttle into
         ambient injections; session ids checkpoint into the log so the task
         stays resumable across a restart."""
         state = {"last_inject": 0.0}
+        diagnostic_kind = _diagnostic_kind_fields(task.kind, self.registry)
 
         def report(text=None, session_id=None):
             if session_id and session_id != task.session_id:
                 task.session_id = session_id
                 tasklog.append_event(self.log_path, "session", task_id=task.id,
                                      session_id=session_id)
+                diagnostics.info("task.agent_session.checkpointed",
+                                 task_id=task.id, **diagnostic_kind)
             if not text:
                 return
             task.progress = text
             events.emit("task", task_id=task.id, kind=task.kind,
                         status="progress", say=text)
             now = time.time()
+            progress_count = getattr(task, "_diagnostic_progress_count", 0) + 1
+            task._diagnostic_progress_count = progress_count
+            if (progress_count <= 3 or
+                    progress_count & (progress_count - 1) == 0):
+                diagnostics.metric(
+                    "task.progress.count", progress_count,
+                    task_id=task.id, **diagnostic_kind)
             if now - state["last_inject"] >= config.progress_interval():
                 state["last_inject"] = now
                 self.on_injection(Injection(
@@ -259,34 +326,54 @@ class Orchestrator:
         return report
 
     async def _run_task(self, task):  # type: (Task) -> None
-        worker = self.registry.get(task.kind)
-        lock = None
-        serialize = getattr(worker, "serialize", False)
-        if serialize:
-            # serialized kinds run one at a time, in dispatch order: two
-            # live-dispatched edits of the same doc must not race (the later
-            # dispatch carries the later intent and must win). A string
-            # names a lock group shared across kinds (workspace writers).
-            key = serialize if isinstance(serialize, str) else task.kind
-            lock = self._serial_locks.setdefault(key, asyncio.Lock())
-            await lock.acquire()
-        task.status = "running"
-        events.emit("task", task_id=task.id, kind=task.kind, status="running")
-        ctx = dataclasses.replace(self.ctx, report=self._reporter(task))
-        try:
-            if worker is None:
-                raise KeyError("no worker registered for kind %r" % task.kind)
-            result = await worker(task, ctx)
-        except Exception as exc:
-            result = TaskResult(say="Task %s (%s) failed: %s" % (task.id, task.kind, exc),
-                                data={"error": str(exc),
-                                      "traceback": traceback.format_exc()})
-            task.status = "error"
-        else:
-            task.status = "done"
-        finally:
-            if lock is not None:
-                lock.release()
+        total_started = time.monotonic()
+        queue_wait_ms = max(0.0, (time.time() - task.created_at) * 1000)
+        diagnostic_kind = _diagnostic_kind_fields(task.kind, self.registry)
+        diagnostic_context_kind = _diagnostic_kind_fields(
+            task.kind, self.registry, name="task_kind")
+        with diagnostics.context(task_id=task.id, **diagnostic_context_kind):
+            worker = self.registry.get(task.kind)
+            lock = None
+            lock_wait_ms = 0.0
+            serialize = getattr(worker, "serialize", False)
+            if serialize:
+                # Serialized kinds run in dispatch order; capture contention
+                # because it otherwise looks like a hung worker.
+                key = serialize if isinstance(serialize, str) else task.kind
+                lock = self._serial_locks.setdefault(key, asyncio.Lock())
+                lock_started = time.monotonic()
+                await lock.acquire()
+                lock_wait_ms = (time.monotonic() - lock_started) * 1000
+            task.status = "running"
+            events.emit("task", task_id=task.id, kind=task.kind,
+                        status="running")
+            diagnostics.info(
+                "task.started",
+                queue_wait_ms=round(queue_wait_ms, 1),
+                lock_wait_ms=round(lock_wait_ms, 1), serialized=bool(serialize),
+                **diagnostic_kind)
+            ctx = dataclasses.replace(self.ctx, report=self._reporter(task))
+            worker_started = time.monotonic()
+            try:
+                if worker is None:
+                    raise KeyError("no worker registered for kind %r" % task.kind)
+                result = await worker(task, ctx)
+            except Exception as exc:
+                diagnostics.exception(
+                    "task.worker.failed", exc=exc,
+                    worker_ms=round((time.monotonic() - worker_started) * 1000,
+                                    1), **diagnostic_kind)
+                result = TaskResult(
+                    say="Task %s (%s) failed: %s" % (task.id, task.kind, exc),
+                    data={"error": str(exc),
+                          "traceback": traceback.format_exc()})
+                task.status = "error"
+            else:
+                task.status = "done"
+            finally:
+                if lock is not None:
+                    lock.release()
+            worker_ms = (time.monotonic() - worker_started) * 1000
         task.result = result
         task.finished_at = time.time()
         task.session_id = result.data.get("session_id") or task.session_id
@@ -299,6 +386,16 @@ class Orchestrator:
         events.emit("task", task_id=task.id, kind=task.kind,
                     status=task.status, say=result.say, priority=priority,
                     artifacts_touched=result.artifacts_touched)
+        diagnostics.info(
+            "task.finished", task_id=task.id,
+            status=task.status, priority=priority,
+            result_error=bool(result.data.get("error")),
+            worker_ms=round(worker_ms, 1),
+            total_ms=round((time.monotonic() - total_started) * 1000, 1),
+            artifact_count=len(result.artifacts_touched),
+            follow_up_count=len(result.follow_ups), live=self.live,
+            progress_count=getattr(task, "_diagnostic_progress_count", 0),
+            **diagnostic_kind)
         for follow in result.follow_ups:  # generic chaining
             follow.source = "follow_up"
             self.submit(follow)

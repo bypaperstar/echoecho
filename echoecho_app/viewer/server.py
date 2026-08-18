@@ -44,12 +44,13 @@ import secrets
 import shutil
 import subprocess
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import echoecho_app
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 from echoecho_app.services import artifacts, vm
 
 POLL_INTERVAL = 0.25
@@ -177,26 +178,89 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        started = time.monotonic()
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/":
-            self._respond(200, "text/html; charset=utf-8", INDEX.read_bytes())
-        elif parsed.path == "/doc":
-            self._doc(parsed)
-        elif parsed.path == "/version":
-            self._json(200, version_info())
-        elif parsed.path == "/transcript":
-            body = json.dumps(read_transcript(self.workspace)).encode("utf-8")
-            self._respond(200, "application/json; charset=utf-8", body)
-        elif parsed.path == "/events":
-            self._events()
-        elif parsed.path == "/vnc-info":
-            self._vnc_info()
-        elif parsed.path == "/proto" or parsed.path == "/proto/":
-            self._proto_index()
-        elif parsed.path.startswith("/proto/"):
-            self._proto(parsed.path[len("/proto/"):])
-        else:
-            self._respond(404, "text/plain", b"not found")
+        known_routes = {
+            "/", "/healthz", "/doc", "/version", "/transcript",
+            "/events", "/vnc-info", "/proto", "/proto/",
+        }
+        route = ("/proto/*" if parsed.path.startswith("/proto/") else
+                 parsed.path if parsed.path in known_routes else "/unknown")
+        self._diag_status = None
+        self._diag_bytes = 0
+        try:
+            if parsed.path == "/":
+                self._respond(200, "text/html; charset=utf-8",
+                              INDEX.read_bytes())
+            elif parsed.path == "/healthz":
+                self._json(200, {"ok": True,
+                                 "run_id": diagnostics.get_run_id()})
+            elif parsed.path == "/doc":
+                self._doc(parsed)
+            elif parsed.path == "/version":
+                self._json(200, version_info())
+            elif parsed.path == "/transcript":
+                body = json.dumps(read_transcript(self.workspace)).encode("utf-8")
+                self._respond(200, "application/json; charset=utf-8", body)
+            elif parsed.path == "/events":
+                self._events()
+            elif parsed.path == "/vnc-info":
+                self._vnc_info()
+            elif parsed.path == "/proto" or parsed.path == "/proto/":
+                self._proto_index()
+            elif parsed.path.startswith("/proto/"):
+                self._proto(parsed.path[len("/proto/"):])
+            else:
+                self._respond(404, "text/plain", b"not found")
+        except (BrokenPipeError, ConnectionResetError):
+            count, sampled = self._diag_sample("disconnected:%s" % route)
+            if sampled:
+                diagnostics.info("viewer.request.disconnected", route=route,
+                                 occurrences=count)
+        except Exception as exc:
+            diagnostics.exception("viewer.request.failed", exc=exc,
+                                  route=route,
+                                  status=self._diag_status)
+            if self._diag_status is None:
+                try:
+                    self._respond(500, "text/plain", b"internal error")
+                except Exception:
+                    pass
+        finally:
+            duration_ms = (time.monotonic() - started) * 1000
+            should_sample = False
+            sample_count = None
+            if self._diag_status is not None and self._diag_status >= 400:
+                sample_count, should_sample = self._diag_sample(
+                    "request:%s:%s" % (route, self._diag_status))
+            elif parsed.path == "/events":
+                sample_count, should_sample = self._diag_sample(
+                    "request:/events:finished")
+            if (should_sample or
+                    (duration_ms >= 250 and parsed.path != "/events")):
+                diagnostics.info(
+                    "viewer.request.finished", route=route,
+                    status=self._diag_status, response_bytes=self._diag_bytes,
+                    duration_ms=round(duration_ms, 1),
+                    sse_updates=getattr(self, "_diag_sse_updates", None),
+                    occurrences=sample_count)
+
+    def _diag_sample(self, key):
+        """Power-of-two sampling for client-amplifiable request failures."""
+        with self.diag_lock:
+            count = self.diag_counts.get(key, 0) + 1
+            self.diag_counts[key] = count
+        return count, count <= 3 or count & (count - 1) == 0
+
+    def _diag_vnc_state(self, state, source):
+        """Track polling health and report only transitions plus stop totals."""
+        with self.diag_lock:
+            self.diag_counts["vnc_requests"] = \
+                self.diag_counts.get("vnc_requests", 0) + 1
+            current = (state, source)
+            previous = self.diag_state.get("vnc")
+            self.diag_state["vnc"] = current
+            return previous != current, previous
 
     def _proto_index(self):
         """List every mockups/*.html by stem — a home for design prototypes
@@ -241,13 +305,26 @@ class _Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(
                 auth.encode("utf-8", "replace"),
                 ("Bearer %s" % self.token).encode("utf-8")):
+            count, sampled = self._diag_sample("vnc_denied")
+            if sampled:
+                diagnostics.warning("viewer.vnc_info.denied", occurrences=count)
             self._json(403, {"error": "missing or bad viewer token"})
             return
         override = os.environ.get("ECHOECHO_VNC_URL", "").strip()
         if override:
+            changed, previous = self._diag_vnc_state("resolved", "override")
+            if changed:
+                diagnostics.info("viewer.vnc_info.resolved", source="override",
+                                 previous_state=previous[0] if previous else None)
             self._json(200, {"url": override})
             return
         if config.sandbox_tier() != "vm" and shutil.which("lume") is None:
+            changed, previous = self._diag_vnc_state(
+                "unavailable", "configuration")
+            if changed:
+                diagnostics.info("viewer.vnc_info.unavailable",
+                                 reason="vm_not_configured",
+                                 previous_state=previous[0] if previous else None)
             self._json(503, {"error": (
                 "no VM configured: set ECHOECHO_SANDBOX=vm, or point "
                 "ECHOECHO_VNC_URL at any VNC server")})
@@ -255,8 +332,17 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             url = vm.vnc_url()
         except Exception as exc:  # lume missing/failed: human-readable 503
+            changed, previous = self._diag_vnc_state("failed", "lume")
+            if changed:
+                diagnostics.exception("viewer.vnc_info.failed", exc=exc,
+                                      source="lume",
+                                      previous_state=previous[0] if previous else None)
             self._json(503, {"error": str(exc) or type(exc).__name__})
             return
+        changed, previous = self._diag_vnc_state("resolved", "lume")
+        if changed:
+            diagnostics.info("viewer.vnc_info.resolved", source="lume",
+                             previous_state=previous[0] if previous else None)
         self._json(200, {"url": url})
 
     def _json(self, status, obj):
@@ -264,6 +350,8 @@ class _Handler(BaseHTTPRequestHandler):
                       json.dumps(obj).encode("utf-8"))
 
     def _respond(self, status, ctype, body, csp=None):
+        self._diag_status = status
+        self._diag_bytes = len(body)
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -285,7 +373,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not path.is_file():
             self._respond(404, "text/plain", b"no such file")
             return
-        body = path.read_bytes()
+        try:
+            body = path.read_bytes()
+        except OSError as exc:
+            diagnostics.exception("viewer.document.read_failed", exc=exc,
+                                  **artifacts.diagnostic_suffix_fields(path))
+            self._respond(500, "text/plain", b"could not read file")
+            return
         ctype = NATIVE_TYPES.get(path.suffix.lower())
         if ctype is None:
             try:
@@ -300,7 +394,12 @@ class _Handler(BaseHTTPRequestHandler):
                           "style-src 'unsafe-inline'; object-src 'self'")
 
     def _events(self):
+        self._diag_sse_updates = 0
+        count, sampled = self._diag_sample("sse_connected")
+        if sampled:
+            diagnostics.info("viewer.sse.connected", occurrences=count)
         self.send_response(200)
+        self._diag_status = 200
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
@@ -319,9 +418,20 @@ class _Handler(BaseHTTPRequestHandler):
                     self.wfile.write(
                         ("event: reload\ndata: %s\n\n" % data).encode("utf-8"))
                     self.wfile.flush()
+                    self._diag_sse_updates += 1
                 self.stopping.wait(POLL_INTERVAL)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # client went away
+        finally:
+            with self.diag_lock:
+                self.diag_counts["sse_updates"] = \
+                    self.diag_counts.get("sse_updates", 0) + \
+                    self._diag_sse_updates
+            count, sampled = self._diag_sample("sse_disconnected")
+            if sampled:
+                diagnostics.info("viewer.sse.disconnected",
+                                 updates=self._diag_sse_updates,
+                                 occurrences=count)
 
 
 class ViewerServer:
@@ -333,12 +443,22 @@ class ViewerServer:
         # request) and written where the portal expects to read it
         self.token = secrets.token_hex(16)
         _write_token(self.token)
+        self._diag_counts = {}
+        self._diag_state = {}
+        self._diag_lock = threading.Lock()
         handler = type("Handler", (_Handler,), {
             "workspace": Path(workspace), "stopping": self._stopping,
-            "token": self.token})
+            "token": self.token, "diag_counts": self._diag_counts,
+            "diag_state": self._diag_state, "diag_lock": self._diag_lock})
         self.httpd = ThreadingHTTPServer((host, port), handler)
         self.httpd.daemon_threads = True
         self._thread = None
+        self._host_scope = (
+            "loopback" if host in ("127.0.0.1", "localhost", "::1")
+            else "non_loopback")
+        if self._host_scope == "non_loopback":
+            diagnostics.warning(
+                "viewer.non_loopback_bind", host_scope=self._host_scope)
 
     @property
     def url(self):
@@ -350,6 +470,9 @@ class ViewerServer:
             target=self.httpd.serve_forever, kwargs={"poll_interval": 0.1},
             daemon=True)
         self._thread.start()
+        diagnostics.info("viewer.server.started",
+                         host_scope=self._host_scope,
+                         port=self.httpd.server_address[1])
         return self
 
     def stop(self):
@@ -358,3 +481,8 @@ class ViewerServer:
         self.httpd.server_close()
         if self._thread:
             self._thread.join(timeout=2)
+        with self._diag_lock:
+            request_counts = dict(self._diag_counts)
+        diagnostics.info("viewer.server.stopped",
+                         thread_alive=bool(self._thread and self._thread.is_alive()),
+                         request_counts=request_counts)

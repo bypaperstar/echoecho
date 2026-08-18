@@ -264,6 +264,18 @@ def test_artifacts_read_list_mtime(tmp_path):
 
 # -- web: wp_search resilience -------------------------------------------------
 
+def test_web_diagnostics_allowlist_public_hosts_and_fingerprint_unknown_ones():
+    from echoecho_app.services import web
+
+    assert web._diagnostic_host_fields("en.wikipedia.org") == {
+        "host": "en.wikipedia.org"}
+    fields = web._diagnostic_host_fields("private-customer-canary.example")
+    assert fields["host"] == "unknown"
+    assert fields["host_length"] == len("private-customer-canary.example")
+    assert len(fields["host_fingerprint"]) == 16
+    assert "private-customer-canary" not in repr(fields)
+
+
 def test_wp_search_skips_site_returning_json_error(monkeypatch):
     from echoecho_app.services import web
 

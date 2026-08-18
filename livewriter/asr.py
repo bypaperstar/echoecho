@@ -24,6 +24,9 @@ import base64
 import json
 import os
 import time
+from collections import Counter
+
+from echoecho_app import diagnostics
 
 LIVE_MODEL_DEFAULT = "gpt-live-transcribe"
 
@@ -63,14 +66,35 @@ class Transcriber(object):
         self._q = asyncio.Queue()
         self._task = None
         self._closed = False
+        self._audio_chunks = 0
+        self._audio_bytes = 0
+        self._queue_high_water = 0
+        self._events = 0
+        self._deltas = 0
+        self._reconnects = 0
+        self._protocol_errors = Counter()
+        self._started = time.monotonic()
+
+    def _protocol_issue(self, kind, **fields):
+        self._protocol_errors[kind] += 1
+        count = self._protocol_errors[kind]
+        if count <= 3 or count & (count - 1) == 0:
+            diagnostics.warning(
+                "livewriter.asr.protocol_%s" % kind,
+                occurrences=count, **fields)
 
     def start(self):
         self._task = asyncio.get_event_loop().create_task(self._run())
+        diagnostics.info("livewriter.asr.started", model=self.model)
         return self._task
 
     def feed_audio(self, pcm_bytes):
         if not self._closed:
             self._q.put_nowait(pcm_bytes)
+            self._audio_chunks += 1
+            self._audio_bytes += len(pcm_bytes)
+            self._queue_high_water = max(self._queue_high_water,
+                                          self._q.qsize())
 
     async def close(self):
         self._closed = True
@@ -78,8 +102,24 @@ class Transcriber(object):
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError:
+                diagnostics.warning("livewriter.asr.close_timed_out")
                 self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+            except asyncio.CancelledError:
+                diagnostics.warning("livewriter.asr.close_cancelled")
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+            except Exception as exc:
+                diagnostics.exception("livewriter.asr.close_failed", exc=exc)
+        diagnostics.info(
+            "livewriter.asr.finished", model=self.model,
+            duration_ms=round((time.monotonic() - self._started) * 1000, 1),
+            audio_chunks=self._audio_chunks, audio_bytes=self._audio_bytes,
+            queue_high_water=self._queue_high_water,
+            received_events=self._events, deltas=self._deltas,
+            reconnects=self._reconnects,
+            protocol_error_counts=dict(self._protocol_errors))
 
     # -- internals ----------------------------------------------------------
     async def _run(self):
@@ -87,6 +127,7 @@ class Transcriber(object):
         import websockets.exceptions
         attempt = 0
         while not self._closed and attempt < 4:
+            connect_started = time.monotonic()
             try:
                 url = "wss://api.openai.com/v1/realtime?intent=transcription"
                 ws = await websockets.connect(
@@ -96,10 +137,20 @@ class Transcriber(object):
                 )
             except Exception as e:
                 attempt += 1
+                self._reconnects += 1
+                diagnostics.exception(
+                    "livewriter.asr.connect_failed", exc=e, model=self.model,
+                    attempt=attempt,
+                    duration_ms=round(
+                        (time.monotonic() - connect_started) * 1000, 1))
                 self.on_status("asr connect failed (%d/3): %s" % (attempt, e))
                 await asyncio.sleep(attempt)
                 continue
             attempt = 0
+            diagnostics.info(
+                "livewriter.asr.connected", model=self.model,
+                duration_ms=round(
+                    (time.monotonic() - connect_started) * 1000, 1))
             self.on_status("asr connected (%s)" % self.model)
             try:
                 await ws.send(json.dumps(session_update(self.model)))
@@ -108,9 +159,12 @@ class Transcriber(object):
                     await self._recv_loop(ws)
                 finally:
                     sender.cancel()
+                    await asyncio.gather(sender, return_exceptions=True)
             except websockets.exceptions.ConnectionClosed:
-                pass
+                diagnostics.warning("livewriter.asr.transport_lost")
             except Exception as e:
+                diagnostics.exception("livewriter.asr.failed", exc=e,
+                                      model=self.model)
                 self.on_status("asr error: %s" % e)
             finally:
                 try:
@@ -119,6 +173,7 @@ class Transcriber(object):
                     pass
             if not self._closed:
                 attempt += 1
+                self._reconnects += 1
                 self.on_status("asr transport lost — reconnect %d/3" % attempt)
         self.on_status("asr closed")
 
@@ -139,14 +194,39 @@ class Transcriber(object):
                 raw = await asyncio.wait_for(ws.recv(), timeout=90)
             except asyncio.TimeoutError:
                 continue  # idle mic is fine; keep listening
-            ev = json.loads(raw)
+            try:
+                ev = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                try:
+                    message_bytes = len(raw)
+                except Exception:
+                    message_bytes = None
+                self._protocol_issue(
+                    "invalid_json", error_type=exc.__class__.__name__,
+                    message_bytes=message_bytes)
+                continue
+            if not isinstance(ev, dict):
+                self._protocol_issue(
+                    "invalid_event", value_type=type(ev).__name__)
+                continue
+            self._events += 1
             t = ev.get("type", "")
             now = time.monotonic()
             if t == "conversation.item.input_audio_transcription.delta":
-                self.on_delta(ev.get("delta", ""), now)
+                delta = ev.get("delta", "")
+                if not isinstance(delta, str):
+                    self._protocol_issue(
+                        "invalid_delta", value_type=type(delta).__name__)
+                    continue
+                self._deltas += 1
+                self.on_delta(delta, now)
             elif t == "conversation.item.input_audio_transcription.completed":
                 # VAD-model path: .completed is authoritative for the segment,
                 # but deltas already carried the text; nothing extra to do.
                 pass
             elif t == "error":
+                err = ev.get("error") if isinstance(ev.get("error"), dict) else {}
+                diagnostics.error("livewriter.asr.api_error",
+                                  error_type=err.get("type"),
+                                  error_code=err.get("code"))
                 self.on_status("asr api error: %s" % json.dumps(ev.get("error", {}))[:200])

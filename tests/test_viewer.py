@@ -4,10 +4,11 @@ import http.client
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from echoecho_app import config, events
+from echoecho_app import config, diagnostics, events
 from echoecho_app.services import artifacts
 from echoecho_app.viewer.server import ViewerServer
 
@@ -49,6 +50,19 @@ def test_index_served(server):
     assert b"marked" in body and b"EventSource" in body
 
 
+def test_unknown_request_path_is_not_copied_into_diagnostics(server, tmp_path):
+    diagnostics.configure("viewer-test", log_dir=tmp_path / "diagnostics")
+    path = diagnostics.get_log_path()
+    try:
+        status, _ = get(server, "/private-canary-path")
+        assert status == 404
+    finally:
+        diagnostics.shutdown()
+    raw = path.read_text(encoding="utf-8")
+    assert "private-canary-path" not in raw
+    assert '"route":"/unknown"' in raw
+
+
 def test_version_reported(server):
     """/version: MAJOR.MINOR from the VERSION file + patch = git commit count
     (every deploy of new commits gets a new number), plus git sha and
@@ -79,6 +93,35 @@ def test_doc_returns_file_content(server, tmp_path):
     status, body = get(server, "/doc?f=doc.md")
     assert status == 200
     assert body.decode("utf-8") == content
+
+
+def test_doc_read_failure_sanitizes_unknown_suffix(server, tmp_path,
+                                                    monkeypatch):
+    target = tmp_path / "report.private-canary"
+    target.write_bytes(b"contents")
+    records = []
+    monkeypatch.setattr(
+        diagnostics, "exception",
+        lambda event, exc=None, **fields: records.append((event, fields)))
+
+    original_read_bytes = Path.read_bytes
+
+    def fail_target(path):
+        if path == target:
+            raise OSError("read failed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_target)
+    status, body = get(server, "/doc?f=report.private-canary")
+
+    assert status == 500
+    assert body == b"could not read file"
+    event, fields = records[-1]
+    assert event == "viewer.document.read_failed"
+    assert fields["suffix"] == "unknown"
+    assert fields["suffix_length"] == len(".private-canary")
+    assert len(fields["suffix_fingerprint"]) == 16
+    assert "private-canary" not in repr(records)
 
 
 def test_doc_refuses_non_workspace_paths(server, tmp_path):

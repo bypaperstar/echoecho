@@ -11,6 +11,13 @@
 'use strict';
 
 (() => {
+  const report = (event, fields) => {
+    try { if (window.echoDiagnostics) window.echoDiagnostics.report(event, fields); } catch { /* diagnostics never break VNC */ }
+  };
+  const errorMeta = (err) => ({
+    error_name: (err && err.name) || 'Error', error_code: (err && err.code) || '',
+    message: (err && err.message) || String(err || ''), stack: (err && err.stack) || '',
+  });
   // 1.7.x ships ESM under core/; 1.5.x-era builds compiled to lib/.
   const RFB_PATHS = [
     '../node_modules/@novnc/novnc/core/rfb.js',
@@ -28,10 +35,19 @@
       if (attempt) await new Promise((r) => setTimeout(r, 300 * attempt));
       for (const path of RFB_PATHS) {
         const spec = attempt ? `${path}?attempt=${attempt}` : path;
+        const started = performance.now();
         try {
           RFBClass = (await import(spec)).default;
+          report('vnc.stage', {
+            stage: 'module-import', outcome: 'ready', attempt: attempt + 1,
+            duration_ms: Math.round(performance.now() - started),
+          });
           return RFBClass;
         } catch (err) {
+          report('vnc.stage', {
+            stage: 'module-import', outcome: 'failed', attempt: attempt + 1,
+            duration_ms: Math.round(performance.now() - started), ...errorMeta(err),
+          });
           failures.push(`${spec}: ${(err && err.message) || err}`);
         }
       }
@@ -45,6 +61,7 @@
   let statusEl = null;
   let connected = false;
   let viewOnly = false;
+  let connectedAt = 0;
   // Bumped by teardown(): an in-flight open() whose captured gen falls behind
   // is superseded and must not touch module state or the (rebuilt) DOM.
   let openGen = 0;
@@ -73,13 +90,16 @@
     container.appendChild(root);
   }
 
-  function teardown() {
+  function teardown(reason = 'teardown') {
     openGen++;
     if (rfb) {
-      try { rfb.disconnect(); } catch {}
+      try { rfb.disconnect(); } catch (err) {
+        report('vnc.cleanup_failed', { stage: reason, ...errorMeta(err) });
+      }
       rfb = null;
     }
     connected = false;
+    connectedAt = 0;
     if (root && root.parentNode) root.parentNode.removeChild(root);
     root = screenEl = statusEl = null;
   }
@@ -88,22 +108,32 @@
     // Resolves once the RFB session is up; rejects (with a state message
     // already rendered into the container) when the Mac is unreachable.
     async open(container, opts = {}) {
-      teardown();
+      teardown('open-replace');
       buildDom(container);
       const gen = openGen; // superseded once a later teardown() bumps past us
       viewOnly = !!opts.viewOnly;
       setStatus("Waking echoecho's Mac…");
 
       let info;
+      const proxyStarted = performance.now();
       try {
         info = await window.orb.vncConnect();
       } catch (err) {
         if (gen !== openGen) throw new Error('superseded');
         setStatus("echoecho's Mac is asleep");
+        report('vnc.stage', {
+          stage: 'proxy-connect', outcome: 'failed',
+          duration_ms: Math.round(performance.now() - proxyStarted), ...errorMeta(err),
+        });
         throw err;
       }
+      report('vnc.stage', {
+        stage: 'proxy-connect', outcome: 'ready',
+        duration_ms: Math.round(performance.now() - proxyStarted),
+      });
       if (gen !== openGen) throw new Error('superseded');
       let RFB;
+      const importStarted = performance.now();
       try {
         RFB = await loadRFB();
       } catch (err) {
@@ -111,6 +141,12 @@
         setStatus("echoecho's Mac view failed to load");
         throw err;
       }
+      // Cached imports do not enter the attempt loop above, so retain an
+      // aggregate stage duration for every open as well.
+      report('vnc.stage', {
+        stage: 'module-ready', outcome: 'ready',
+        duration_ms: Math.round(performance.now() - importStarted),
+      });
       if (gen !== openGen) throw new Error('superseded');
 
       return new Promise((resolve, reject) => {
@@ -119,8 +155,22 @@
           return;
         }
         let settled = false;
-        rfb = new RFB(screenEl, info.wsUrl, {
-          credentials: { password: info.password || '' },
+        const rfbStarted = performance.now();
+        try {
+          rfb = new RFB(screenEl, info.wsUrl, {
+            credentials: { password: info.password || '' },
+          });
+        } catch (err) {
+          report('vnc.stage', {
+            stage: 'rfb-create', outcome: 'failed',
+            duration_ms: Math.round(performance.now() - rfbStarted), ...errorMeta(err),
+          });
+          reject(err);
+          return;
+        }
+        report('vnc.stage', {
+          stage: 'rfb-create', outcome: 'ready',
+          duration_ms: Math.round(performance.now() - rfbStarted),
         });
         // Fit the remote desktop to the item; RFB's own ResizeObserver keeps
         // the scale fresh as the scene resizes the container.
@@ -135,8 +185,13 @@
             return;
           }
           connected = true;
+          connectedAt = performance.now();
           setStatus('');
           try { rfb.focus(); } catch {}
+          report('vnc.stage', {
+            stage: 'rfb-connect', outcome: 'ready',
+            duration_ms: Math.round(performance.now() - rfbStarted),
+          });
           if (!settled) { settled = true; resolve(); }
         });
         rfb.addEventListener('disconnect', (e) => {
@@ -146,6 +201,11 @@
           }
           connected = false;
           const clean = !!(e.detail && e.detail.clean);
+          report('vnc.disconnect', {
+            clean, was_connected: !!connectedAt,
+            connected_ms: connectedAt ? Math.round(performance.now() - connectedAt) : 0,
+          });
+          connectedAt = 0;
           setStatus(clean ? "echoecho's Mac closed the session" : "echoecho's Mac is asleep");
           if (!settled) {
             settled = true;
@@ -154,20 +214,26 @@
         });
         rfb.addEventListener('credentialsrequired', () => {
           if (gen !== openGen) return;
+          report('vnc.credentials_required', { has_password: !!info.password });
           if (info.password) rfb.sendCredentials({ password: info.password });
           else setStatus("echoecho's Mac wants a password echoecho doesn't have");
         });
         rfb.addEventListener('securityfailure', (e) => {
           if (gen !== openGen) return;
           const reason = e.detail && e.detail.reason;
+          report('vnc.security_failure', { has_reason: !!reason });
           setStatus("echoecho's Mac refused the connection" + (reason ? `: ${reason}` : ''));
         });
       });
     },
 
     close() {
-      teardown();
-      if (window.orb && window.orb.vncDisconnect) window.orb.vncDisconnect();
+      teardown('close');
+      if (window.orb && window.orb.vncDisconnect) {
+        Promise.resolve(window.orb.vncDisconnect()).catch((err) => {
+          report('vnc.cleanup_failed', { stage: 'proxy-disconnect', ...errorMeta(err) });
+        });
+      }
     },
 
     setViewOnly(v) {

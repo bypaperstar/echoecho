@@ -1,6 +1,7 @@
 """events.py UI feed: parseable JSONL, reset semantics, and the hard rule
 that emit()/reset() NEVER raise — a broken feed must never crash the app."""
 import json
+import threading
 
 import pytest
 
@@ -66,6 +67,64 @@ def test_reset_truncates_and_writes_run_marker(workspace):
     assert recs[0]["type"] == "run" and recs[0]["mode"] == "script"
     events.emit("user_text", text="fresh")  # feed keeps working after reset
     assert [r["type"] for r in read_feed(workspace)] == ["run", "user_text"]
+
+
+def test_correlated_sequence_matches_disk_and_tee_order_under_concurrency(
+        workspace):
+    events.reset(mode="test", run_id="run-test")
+    mirrored = []
+    events.TEE = lambda rec, line: mirrored.append(json.loads(line))
+    try:
+        threads = [threading.Thread(
+            target=events.emit, args=("concurrent",), kwargs={"worker": i})
+                   for i in range(40)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        events.TEE = None
+
+    disk = read_feed(workspace)
+    # Disk order is the viewer's reload contract. The recording tee is outside
+    # that lock and may finish out of order without hiding UI events.
+    assert [item["seq"] for item in disk] == list(range(1, 42))
+    assert sorted(item["seq"] for item in mirrored) == list(range(2, 42))
+
+
+def test_blocked_tee_does_not_convoy_other_event_producers(workspace):
+    events.reset(mode="test", run_id="run-no-convoy")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def tee(rec, _line):
+        if rec.get("worker") == "blocked":
+            entered.set()
+            release.wait(timeout=5)
+
+    events.TEE = tee
+    blocked = threading.Thread(
+        target=events.emit, args=("concurrent",),
+        kwargs={"worker": "blocked"})
+    independent = threading.Thread(
+        target=events.emit, args=("concurrent",),
+        kwargs={"worker": "independent"})
+    try:
+        blocked.start()
+        assert entered.wait(timeout=2)
+        independent.start()
+        independent.join(timeout=1)
+        assert not independent.is_alive()
+    finally:
+        release.set()
+        blocked.join(timeout=2)
+        independent.join(timeout=2)
+        events.TEE = None
+
+    assert not blocked.is_alive()
+    assert {item.get("worker") for item in read_feed(workspace)} >= {
+        "blocked", "independent",
+    }
 
 
 # -- end-to-end: the PR1 smoke script populates the feed --------------------

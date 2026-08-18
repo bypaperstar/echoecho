@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 from echoecho_app.bus import Injection
 from echoecho_app.conversation.port import TOOL_NAMES
 from echoecho_app.conversation.realtime import (FakeTransport, PlaybackTracker,
@@ -303,6 +303,29 @@ def test_playback_tracker_math():
     # nothing appended
     assert tr.truncate() is None
     assert pcm16_ms(2400) == 50.0  # 24kHz mono pcm16: 48 bytes/ms
+
+
+@pytest.mark.parametrize("event", [
+    None,
+    {"type": []},
+    {"type": "response.output_audio.delta", "delta": None},
+    {"type": "response.output_audio.delta", "delta": "not base64!"},
+])
+def test_malformed_upstream_events_are_ignored_without_telemetry_crashes(event):
+    client = RealtimeClient(FakeTransport([]))
+    asyncio.run(client._handle_event(event))
+
+
+def test_malformed_upstream_logging_is_power_of_two_sampled(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        diagnostics, "error",
+        lambda event, **fields: emitted.append((event, fields)))
+    client = RealtimeClient(FakeTransport([]))
+    for _ in range(9):
+        asyncio.run(client._handle_event(None))
+    assert [fields["occurrences"] for _event, fields in emitted] == [1, 2, 3, 4, 8]
+    assert client._protocol_errors["invalid_event"] == 9
 
 
 # -- session closes: end phrase, end_session tool, silence timeout ---------------------

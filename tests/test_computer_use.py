@@ -99,7 +99,8 @@ def test_computer_use_opens_only_workspace_relative_files(tmp_path):
 
     rejected, _ = run_task({"steps": [{"action": "open", "path": "../private.md"}]},
                            tmp_path, extra={"gui_driver": FakeGuiDriver(tmp_path / "ws")})
-    assert "workspace-relative" in rejected.result.data["error"]
+    assert rejected.result.data["error"] == "gui step failed"
+    assert rejected.result.data["error_type"] == "ValueError"
 
 
 def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
@@ -113,6 +114,39 @@ def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
     assert "Stopped on step 2" in task.result.say
     # the first step's shot was still captured
     assert task.result.data["screens"] == ["screens/t1/step00.png"]
+
+
+@pytest.mark.parametrize("step,canary", [
+    ({"action": "private-action-canary"}, "private-action-canary"),
+    ({"action": "key", "combo": "private-key-canary"},
+     "private-key-canary"),
+    ({"action": "wait", "seconds": "PRIVATE-WAIT-CANARY"},
+     "PRIVATE-WAIT-CANARY"),
+])
+def test_computer_use_validation_errors_do_not_echo_prompt_payload(
+        tmp_path, step, canary):
+    task, _ = run_task(
+        {"steps": [step]}, tmp_path,
+        extra={"gui_driver": FakeGuiDriver(tmp_path / "ws")})
+
+    rendered = task.result.say + repr(task.result.data)
+    assert canary not in rendered
+    assert task.result.data["error"] == "gui step failed"
+    assert task.result.data["action"] in {"unknown", "key", "wait"}
+
+
+def test_driver_close_failure_does_not_mask_completed_result(tmp_path):
+    class CloseBrokenFake(FakeGuiDriver):
+        def close(self):
+            raise OSError("socket close failed")
+
+    fake = CloseBrokenFake(tmp_path / "ws")
+    task, _ = run_task(
+        {"steps": [{"action": "launch", "app": "TextEdit"}]},
+        tmp_path, extra={"gui_driver": fake})
+
+    assert task.status == "done"
+    assert task.result.data["completed"] == ["launched TextEdit"]
 
 
 def test_computer_use_no_driver_is_clean_error(tmp_path, monkeypatch):
@@ -205,6 +239,38 @@ def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
     assert "Accessibility" in str(ei.value)
 
 
+def test_ssh_gui_driver_failure_never_returns_guest_stderr(
+        monkeypatch, tmp_path):
+    """AppleScript stderr can contain the typed payload; task errors must
+    expose only bounded operation metadata."""
+    from echoecho_app.services import gui as gm
+    from echoecho_app.services.vm import LumeVM
+
+    secret = "PRIVATE-GUEST-STDERR-CANARY"
+
+    class FailedProcess:
+        returncode = 9
+
+        async def communicate(self):
+            return b"PRIVATE-STDOUT-CANARY", secret.encode()
+
+    async def fake_spawn(*_args, **_kwargs):
+        return FailedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    vm = LumeVM(vm_name="echoecho-vm")
+    vm.ip = "10.0.0.9"
+    vm.ssh_argv = lambda remote: ["ssh", "guest", remote]
+    driver = SshGuiDriver(vm, tmp_path)
+
+    with pytest.raises(gm.GuiError, match="exit 9") as caught:
+        asyncio.run(driver.type_text("PRIVATE-TYPED-CANARY"))
+
+    rendered = str(caught.value)
+    assert secret not in rendered
+    assert "PRIVATE-TYPED-CANARY" not in rendered
+
+
 def test_computer_use_prepares_a_cold_vm_before_stepping(tmp_path):
     """A cold daemon's first computer.use must boot the VM itself (the silent
     Mac playtest caught 'VM not prepared'): a driver exposing .vm.prepare()
@@ -236,7 +302,7 @@ def test_computer_use_prepares_a_cold_vm_before_stepping(tmp_path):
 
             class Vm:
                 async def prepare(self):
-                    raise RuntimeError("no golden image")
+                    raise RuntimeError("PRIVATE-VM-ERROR-CANARY")
             self.vm = Vm()
 
     broken = BrokenVmFake(tmp_path / "ws")
@@ -244,4 +310,7 @@ def test_computer_use_prepares_a_cold_vm_before_stepping(tmp_path):
                        tmp_path, extra={"gui_driver": broken})
     assert task.status == "done"  # a reported failure, not a worker crash
     assert "couldn't start my Mac VM" in task.result.say
+    assert "PRIVATE-VM-ERROR-CANARY" not in task.result.say
+    assert "PRIVATE-VM-ERROR-CANARY" not in repr(task.result.data)
+    assert task.result.data["error_type"] == "RuntimeError"
     assert broken.actions == []  # never stepped without a VM

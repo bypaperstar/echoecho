@@ -159,6 +159,22 @@ def test_injection_gate_closed_outside_active():
     assert s.can_inject() is False  # ENDING
 
 
+def test_injection_timing_is_best_effort_when_custom_clock_fails():
+    s, _, _, _ = make()
+    s.wake()
+    s.note_assistant_response_done()
+
+    def broken_clock():
+        raise RuntimeError("clock unavailable")
+
+    s.clock = broken_clock
+    injection = Injection(text="x")
+    s.queue_injection(injection)
+    assert s.pending_injections == [injection]
+    assert s.drain_injections() == [injection]
+    assert s.pending_injections == []
+
+
 def test_silence_timeout_env_default(monkeypatch):
     monkeypatch.setenv("ECHOECHO_SILENCE_TIMEOUT", "5")
     s = Session()
@@ -203,11 +219,17 @@ def test_scripted_smoke_session(tmp_path):
     assert text.index("queued") < text.index("[task t1 done]")
 
 
-def test_dispatch_task_lifts_instructions_nested_in_args():
+def test_dispatch_task_lifts_instructions_nested_in_args(monkeypatch):
     """Voice models sometimes nest instructions inside args instead of the
     top-level field; the worker must still see them (live playtest: doc.edit
     fell back to its 'start a draft' default and wrote an empty draft)."""
     import echoecho
+    from echoecho_app import diagnostics
+
+    diagnostic_records = []
+    monkeypatch.setattr(
+        diagnostics, "info",
+        lambda event, **fields: diagnostic_records.append((event, fields)))
 
     class FakeOrch:
         def submit(self, request):
@@ -225,11 +247,21 @@ def test_dispatch_task_lifts_instructions_nested_in_args():
                                       "instructions": "add eggs"}})
     assert orch.request.instructions == "add eggs"
     assert orch.request.args == {"file": "grocery.md"}
+    nested = [fields for event, fields in diagnostic_records
+              if event == "tool.dispatch.instructions_resolved"][-1]
+    assert nested == {
+        "source": "nested_args", "instruction_chars": len("add eggs"),
+        "task_arg_count": 1}
+    assert "add eggs" not in repr(diagnostic_records)
 
     # the top-level field still wins when both are present
     handle("dispatch_task", {"kind": "doc.edit", "instructions": "top",
                              "args": {"instructions": "nested"}})
     assert orch.request.instructions == "top"
+    top = [fields for event, fields in diagnostic_records
+           if event == "tool.dispatch.instructions_resolved"][-1]
+    assert top["source"] == "top_level"
+    assert top["instruction_chars"] == 3
 
 
 def test_env_flags_case_insensitive(monkeypatch):

@@ -7,9 +7,10 @@ non-LLM fallback (grocery.merge) catch.
 import json
 import os
 import re
+import time
 from pathlib import Path
 
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 
 
 class LLMUnavailable(Exception):
@@ -35,8 +36,29 @@ class RealLLM(LLMPort):
         return self._client
 
     async def complete(self, kind, prompt):
-        client = self._client_or_raise()
-        resp = await client.responses.create(model=self.model, input=prompt)
+        started = time.monotonic()
+        diagnostics.info("llm.request.started", provider="openai",
+                         model=self.model, kind=kind,
+                         input_chars=len(prompt))
+        phase = "client_init"
+        try:
+            client = self._client_or_raise()
+            phase = "request"
+            resp = await client.responses.create(model=self.model, input=prompt)
+        except Exception as exc:
+            diagnostics.exception(
+                "llm.request.failed", exc=exc, provider="openai",
+                model=self.model, kind=kind, phase=phase,
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
+            raise
+        usage = getattr(resp, "usage", None)
+        diagnostics.info(
+            "llm.request.finished", provider="openai", model=self.model,
+            kind=kind, output_chars=len(resp.output_text or ""),
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+            response_id=getattr(resp, "id", None))
         return resp.output_text
 
 
@@ -50,8 +72,12 @@ class FakeLLM(LLMPort):
     async def complete(self, kind, prompt):
         path = self.fixtures_dir / (kind + ".json")
         if not path.exists():
+            diagnostics.warning("llm.fixture.missing", kind=kind)
             raise LLMUnavailable("no fixture for kind %r at %s" % (kind, path))
-        return json.loads(path.read_text(encoding="utf-8"))["output"]
+        output = json.loads(path.read_text(encoding="utf-8"))["output"]
+        diagnostics.info("llm.fixture.loaded", kind=kind,
+                         input_chars=len(prompt), output_chars=len(output))
+        return output
 
 
 def for_ctx(ctx):  # type: (...) -> LLMPort

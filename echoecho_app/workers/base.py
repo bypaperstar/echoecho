@@ -10,6 +10,9 @@ ECHOECHO_PLUGINS=1.
 """
 import importlib
 import pkgutil
+import time
+
+from echoecho_app import diagnostics
 
 REGISTRY = {}
 
@@ -44,27 +47,51 @@ def _scan(package_name, required):
     """Import every module in a package so @register side effects run.
     Core workers import strictly; a broken optional plugin must not take the
     daemon down, so plugin import errors are reported and skipped."""
+    started = time.monotonic()
     try:
         package = importlib.import_module(package_name)
-    except ImportError:
+    except ImportError as exc:
+        diagnostics.exception(
+            "worker.discovery.package_unavailable", exc=exc,
+            package=package_name, required=required)
         if required:
             raise
         return
+    discovered = 0
+    loaded = 0
+    failed = 0
     for info in pkgutil.iter_modules(package.__path__):
+        discovered += 1
         name = package_name + "." + info.name
         try:
             importlib.import_module(name)
+            loaded += 1
         except Exception as exc:
+            failed += 1
+            diagnostics.exception(
+                "worker.discovery.module_failed", exc=exc,
+                package=package_name, module=name, required=required)
             if required:
                 raise
             print("[workers] plugin %s failed to load (%s) — skipped"
                   % (name, exc))
+    diagnostics.info(
+        "worker.discovery.finished", package=package_name,
+        required=required, discovered=discovered, loaded=loaded,
+        failed=failed,
+        duration_ms=round((time.monotonic() - started) * 1000, 1))
 
 
 def load_all():
     """Discover workers (strict) + plugins (lenient); return REGISTRY."""
+    before = len(REGISTRY)
     _scan("echoecho_app.workers", required=True)
     _scan(PLUGINS_PACKAGE, required=False)
+    diagnostics.info(
+        "worker.registry.loaded", registered=len(REGISTRY),
+        newly_registered=max(0, len(REGISTRY) - before),
+        plugin_registered=sum(1 for fn in REGISTRY.values()
+                              if getattr(fn, "is_plugin", False)))
     return REGISTRY
 
 
