@@ -1,0 +1,21 @@
+{
+ "name": "20_recipe",
+ "task": "Dictating a recipe: spoken heading command, ingredient quantities to figures, 'make that a list' restructure, numbered-ish steps.",
+ "voice": "shimmer",
+ "turns": [
+  {"say": "Heading. Grandma's tomato soup.", "pause_ms": 1300},
+  {"say": "You'll need two pounds of tomatoes, one large onion, four cloves of garlic, and two cups of vegetable stock.", "pause_ms": 1500},
+  {"say": "Make that a list.", "pause_ms": 2200},
+  {"say": "First, roast the tomatoes at four hundred degrees for twenty five minutes.", "pause_ms": 1300},
+  {"say": "Then sauté the onion until golden, about eight minutes.", "pause_ms": 1300},
+  {"say": "Finally, blend everything together and simmer for ten more minutes.", "pause_ms": 1500}
+ ],
+ "expects": {
+  "contains": ["tomato", "garlic", "onion", "simmer"],
+  "not_contains": ["make that a list"],
+  "regex": ["(?i)\\b400\\b|400°", "(?i)\\b25\\b", "(?i)\\b2 cups"],
+  "min_list_items": 4,
+  "has_heading": true
+ },
+ "judge": {"criteria": "A usable recipe: title heading, ingredients as a list with figures (2 lbs, 4 cloves, 2 cups), steps in order with temperatures/times as figures."}
+}

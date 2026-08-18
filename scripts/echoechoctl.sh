@@ -186,6 +186,38 @@ cmd_stop_app() {
   echo "app stopped"
 }
 
+LIVEWRITER_LOG="/tmp/echoecho-livewriter.log"
+
+cmd_live_writer() {
+  # Standalone by design: the Live Writer server shares nothing with the
+  # daemon/orchestrator. Idempotent — if it's already listening we just open
+  # the page.
+  port="${LIVEWRITER_PORT:-8799}"
+  url="http://127.0.0.1:${port}/"
+  if ! curl -s -o /dev/null -m 2 "${url}healthz"; then
+    cd "$REPO"
+    ( nohup .venv/bin/python -u -m livewriter --port "$port" </dev/null >"$LIVEWRITER_LOG" 2>&1 & )
+    for _ in $(seq 1 20); do
+      curl -s -o /dev/null -m 2 "${url}healthz" && break
+      sleep 0.5
+    done
+    if ! curl -s -o /dev/null -m 2 "${url}healthz"; then
+      echo "live writer FAILED to start — tail of $LIVEWRITER_LOG:"
+      tail -5 "$LIVEWRITER_LOG" 2>/dev/null || true
+      exit 1
+    fi
+  fi
+  command -v open >/dev/null 2>&1 && open "$url"
+  echo "live writer: $url"
+}
+
+cmd_stop_live_writer() {
+  pid="$(pgrep -f 'python[0-9.]* -u -m livewriter' | head -1 || true)"
+  [ -z "$pid" ] && { echo "live writer not running"; return 0; }
+  kill "$pid" 2>/dev/null || true
+  echo "live writer stopped (pid $pid)"
+}
+
 cmd_update() {
   # called detached from the app's Update button (the app quits right after),
   # so wait for it to exit before swapping its bundle
@@ -216,5 +248,7 @@ case "${1:-}" in
   start-app)       cmd_start_app ;;
   stop-app)        cmd_stop_app ;;
   update)          cmd_update ;;
-  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update}"; exit 2 ;;
+  live-writer)     cmd_live_writer ;;
+  stop-live-writer) cmd_stop_live_writer ;;
+  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|live-writer|stop-live-writer}"; exit 2 ;;
 esac

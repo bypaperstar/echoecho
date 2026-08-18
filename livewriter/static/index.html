@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- echoecho · Live Writer — the real thing.
+     Talk out loud; a streaming transcription model hears you word-by-word and
+     a formatter LLM writes + editorializes the document live. Served by
+     `python3 -m livewriter` (see livewriter/server.py for the protocol). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>echoecho · Live Writer</title>
+<link rel="stylesheet" href="/lw.css">
+</head>
+<body class="blink">
+
+<div id="topbar">
+  <div class="title">🎙 echoecho · Live Writer <span class="tag" id="modeltag"></span></div>
+  <button class="btn primary" id="micbtn">🎤 Start talking</button>
+  <button class="btn danger" id="stopbtn" title="or just say “stop”">⏹ Stop</button>
+  <button class="btn" id="newbtn" title="clear the document">✨ New doc</button>
+  <button class="btn" id="copybtn">📋 Copy markdown</button>
+  <button class="btn" id="dlbtn">⬇︎ Save .md</button>
+  <div id="settings">
+    <button class="btn" id="gearbtn">⚙</button>
+    <div id="setpanel"></div>
+  </div>
+  <div id="statusline"><span id="statusdot"></span><span id="statustext">connecting…</span></div>
+</div>
+
+<div id="main">
+  <div id="docpanel">
+    <div id="dochead">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <span class="fname" id="fname">live session</span>
+      <div id="hud">
+        <div class="stat"><div class="hl">heard→written</div><div class="hv" id="hud-lag">—</div></div>
+        <div class="stat"><div class="hl">backlog</div><div class="hv" id="hud-backlog">0 ch</div></div>
+        <div class="stat"><div class="hl">speed</div><div class="hv" id="hud-cps">0 cps</div></div>
+        <div class="stat"><div class="hl">lag (last 12 s)</div><canvas id="spark" width="150" height="34"></canvas></div>
+      </div>
+    </div>
+    <div id="docscroll"><div id="doc"></div></div>
+    <div id="chips"></div>
+
+    <div class="overlay" id="intro">
+      <div class="ocard">
+        <h3>Talk out loud → it writes, live</h3>
+        <p>Dictate anything — meeting notes, an email, a poem, a plan. A streaming
+        speech model hears you <b>word by word</b> (the gray ghost tail) and a live
+        formatter writes clean, structured text while you keep talking: headings,
+        lists, numbers as figures, your self-corrections applied to what's already
+        on the page.</p>
+        <ul>
+          <li>Say <b>“stop.”</b> — the pen halts instantly.</li>
+          <li>Say <b>“scratch that”</b>, <b>“make that a list”</b>, <b>“new paragraph”</b>,
+              <b>“change X to Y”</b>, <b>“heading …”</b> — they're commands, not text.</li>
+          <li>Corrections work mid-flow: “…goes to Marcus — no wait, Marcia.”</li>
+        </ul>
+        <div class="row">
+          <button class="btn primary" id="introstart">🎤 Start talking</button>
+          <button class="btn" id="introtype">⌨️ Type instead</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="bottombar">
+  <div id="hints">
+    <span class="mh1">“stop”</span><span class="mh1">“scratch that”</span>
+    <span class="mh1">“new paragraph”</span><span class="mh1">“make that a list”</span>
+    <span class="mh1">“change <i>x</i> to <i>y</i>”</span><span class="mh1">“heading …”</span>
+  </div>
+  <form id="typeform"><input id="typebox" autocomplete="off"
+    placeholder="…or type a sentence and press enter (commands work here too)">
+  </form>
+</div>
+
+<pre id="testlog"></pre>
+<script src="/lw.js"></script>
+</body>
+</html>

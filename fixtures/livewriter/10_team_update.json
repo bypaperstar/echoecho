@@ -1,0 +1,23 @@
+{
+ "name": "10_team_update",
+ "task": "A PM dictates a team status update: filler dropping, number formatting, a spoken list, a name self-correction, a mid-sentence stop, and a scratch-that rewrite. The productionized version of the mockup's scripted demo.",
+ "voice": "coral",
+ "turns": [
+  {"say": "Okay so, um, quick update on the echo cancellation work for the team.", "pause_ms": 1200},
+  {"say": "We shipped the new echo pipeline on Tuesday, and round trip latency is down to about forty milliseconds.", "pause_ms": 1400},
+  {"say": "There are three things left. Tuning the noise gate, retesting on the mini speaker, and updating the setup docs.", "pause_ms": 1600},
+  {"say": "The docs task goes to Marcus. Ah wait, no, not Marcus. It goes to Diana.", "pause_ms": 1800},
+  {"say": "One more thing. We should probably tell the vendor that their firmware is stop.", "pause_ms": 1600},
+  {"say": "Scratch that last part. Just say we'll follow up with the vendor next week.", "pause_ms": 1500}
+ ],
+ "expects": {
+  "contains": ["Diana", "vendor", "noise gate"],
+  "not_contains": ["Marcus", " um", "scratch that", "firmware"],
+  "regex": ["(?i)40\\s?(ms|milliseconds)"],
+  "min_list_items": 3,
+  "has_heading": true,
+  "stopped": true
+ },
+ "judge": {"criteria": "Reads as a crisp team update: heading, shipped-news sentence with real figures, a 3-item task list, docs task owned by Diana (never Marcus in the final), the interrupted vendor/firmware thought absent, replaced by the follow-up-next-week line."},
+ "latency": {"max_p50_first_ink_ms": 5000}
+}

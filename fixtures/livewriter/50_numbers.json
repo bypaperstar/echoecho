@@ -1,0 +1,18 @@
+{
+ "name": "50_numbers",
+ "task": "Budget notes dense with spoken numbers, prices, percentages, and dates — all must become figures.",
+ "voice": "ballad",
+ "turns": [
+  {"say": "Heading. Q3 budget quick notes.", "pause_ms": 1300},
+  {"say": "Hosting costs went from about twelve hundred dollars a month down to nine hundred eighty dollars.", "pause_ms": 1400},
+  {"say": "That's roughly an eighteen percent drop.", "pause_ms": 1200},
+  {"say": "Headcount stays at seven until January fifteenth.", "pause_ms": 1300},
+  {"say": "And if we close the enterprise deal, revenue should hit one point two million by the end of Q4.", "pause_ms": 1500}
+ ],
+ "expects": {
+  "regex": ["1,?200", "980", "18\\s?%|18 percent", "(?i)January 15", "1\\.2\\s?(m|million)|\\$1\\.2"],
+  "has_heading": true,
+  "contains": ["Q3", "headcount"]
+ },
+ "judge": {"criteria": "Every number is a figure ($1,200, $980, 18%, 7, January 15, $1.2M), nothing left in words; concise notes format."}
+}

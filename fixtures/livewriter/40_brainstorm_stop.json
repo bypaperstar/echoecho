@@ -1,0 +1,18 @@
+{
+ "name": "40_brainstorm_stop",
+ "task": "A fast brainstorm with an enumerated list, an instant mid-sentence 'stop.' (the interrupted fragment must never land), then resuming.",
+ "voice": "verse",
+ "turns": [
+  {"say": "Some quick ideas for the team offsite. One, a cooking class. Two, kayaking on the river. Three, a board game night.", "pause_ms": 1800},
+  {"say": "Also maybe we could invite the whole", "pause_ms": 350},
+  {"say": "Stop.", "pause_ms": 2000},
+  {"say": "Okay, keep going. Idea four, a museum tour with a guide.", "pause_ms": 1500}
+ ],
+ "expects": {
+  "contains": ["kayaking", "museum"],
+  "not_contains": ["invite the whole"],
+  "min_list_items": 3,
+  "stopped": true
+ },
+ "judge": {"criteria": "Offsite ideas as a clean list (cooking class, kayaking, board games, museum tour). The interrupted 'invite the whole…' thought is completely absent. The resume ('keep going') continued the list rather than starting over."}
+}
