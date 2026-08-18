@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """Live end-to-end proof that echoecho can drive its macOS VM's SCREEN:
 
-    open the VM -> lock it -> log back in over VNC -> create a note in
-    TextEdit -> save it -> leave it on screen.
+    open the VM -> log in over VNC -> create a note in TextEdit -> save it ->
+    leave it on screen.
 
 Run ON THE MAC (needs lume + the echoecho-vm guest). It uses echoecho's own
-code — LumeVM for lifecycle, VncGuiDriver for input (virtual-HID over VNC, so
-it sidesteps the guest TCC block that hangs SSH osascript keystrokes) — and
-`screencapture` over SSH after every phase, so the PNGs are the proof.
+code — LumeVM for lifecycle, the RFB/VNC client for virtual-HID input and for
+capturing the framebuffer. Two deliberate choices proven out live:
 
-Phases (screenshots land in <workspace>/screens/):
-  00-open           the VM's screen right after boot
-  01-login-screen   after we lock the session (CGSession -suspend)
-  02-logged-in      after VNC-typing the password + Return
-  03-note-typed     the note typed into TextEdit
-  04-note-saved     the saved document
+  * Input goes over VNC (virtual HID), not SSH osascript, because osascript
+    synthetic keystrokes hang on the guest's Accessibility (TCC) prompt.
+  * Screenshots are the VNC FRAMEBUFFER, not `screencapture` over SSH: on a
+    headless (--no-display) guest, app windows composite for a connected VNC
+    client but not reliably for screencapture-over-SSH. The framebuffer is
+    exactly what a human sees over Screen Sharing.
+
+Screenshots land in <workspace>/screens/:
+  00-open           the VM's screen right after boot (login window or desktop)
+  01-logged-in      the desktop after logging in over VNC
+  02-note-typed     the note typed into a TextEdit window
+  03-note-saved     the saved document (title bar shows the file name)
 
 Env: ECHOECHO_VM_PASSWORD (guest login password, default 'lume'),
-DEMO_WS (workspace dir, default /tmp/echoecho-demo-ws).
+ECHOECHO_VNC_CMD_KEYSYM (keysym for Command; default is auto from config),
+DEMO_WS (workspace dir whose basename must be 'workspace').
 """
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -28,98 +35,133 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from echoecho_app.services.gui import VncGuiDriver
+from echoecho_app.services import vnc as vnc_mod
 from echoecho_app.services.vm import LumeVM
 
-WS = Path(os.environ.get("DEMO_WS", "/tmp/echoecho-demo-ws"))
+WS = Path(os.environ.get("DEMO_WS", "/tmp/echoecho-demo/workspace"))
 PASSWORD = os.environ.get("ECHOECHO_VM_PASSWORD", "lume")
+NOTE_PATH = "~/Desktop/grocery-list.txt"
 NOTE = ("echoecho grocery list\n\n"
         "- milk\n- eggs\n- coffee beans\n- bananas\n- olive oil\n")
+
 
 def log(msg):
     print("[demo] %s" % msg, flush=True)
 
 
-async def shot(driver, name):
-    """Screenshot the guest; True on success, False if screencapture refuses
-    (it fails with 'could not create image from display 0' at the
-    loginwindow, before any console user is logged in)."""
-    try:
-        await driver.screenshot(name)
-        return True
-    except Exception as exc:
-        log("screenshot %s not available yet (%s)" % (name, exc))
-        return False
+class Guest:
+    """Thin helper: SSH for launch/probe, VNC for input + framebuffer grabs."""
 
+    def __init__(self, vm):
+        self.vm = vm
+        self.c = None
 
-async def ssh(vm, cmd, timeout=30):
-    proc = await asyncio.create_subprocess_exec(
-        *vm.ssh_argv(cmd),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await asyncio.wait_for(proc.communicate(), timeout)
-    return proc.returncode, out.decode("utf-8", "replace"), err.decode(
-        "utf-8", "replace")
+    def ssh(self, cmd, timeout=30):
+        argv = self.vm.ssh_argv(cmd)
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout)
+
+    def logged_in(self):
+        # screencapture over SSH succeeds only once a console user is logged
+        # in and unlocked — a cheap, reliable login probe.
+        return self.ssh("screencapture -x -t png /tmp/_probe.png").returncode == 0
+
+    def vnc(self):
+        if self.c is not None:
+            return self.c
+        raw = subprocess.run(["lume", "get", self.vm.vm_name, "-f", "json"],
+                             capture_output=True, text=True).stdout
+        url = None
+        for i in sorted(j for j, ch in enumerate(raw) if ch in "[{"):
+            try:
+                d = json.loads(raw[i:])
+            except ValueError:
+                continue
+            d = d[0] if isinstance(d, list) else d
+            url = d.get("vncUrl")
+            break
+        host, port, pw = vnc_mod.parse_vnc_url(os.environ.get(
+            "ECHOECHO_VNC_URL") or url)
+        self.c = vnc_mod.VncClient(host, port, pw, timeout=25).connect()
+        log("VNC connected (%dx%d)" % (self.c.width, self.c.height))
+        return self.c
+
+    def shot(self, name):
+        path = WS / "screens" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # reconnect per grab: some servers only send one full update per
+        # SetPixelFormat cycle, and a fresh client is the simplest way to get
+        # a clean full-frame each time.
+        self.close()
+        self.vnc().capture_png(str(path), timeout=25)
+        log("captured %s" % name)
+
+    def click(self, x, y):
+        self.vnc().click(x, y)
+
+    def type_text(self, t):
+        self.vnc().type_text(t)
+
+    def key(self, combo):
+        mods, keysym = vnc_mod.combo_to_events(combo)
+        c = self.vnc()
+        c.chord(mods, keysym) if mods else c.tap(keysym)
+
+    def close(self):
+        if self.c is not None:
+            self.c.close()
+            self.c = None
 
 
 async def main():
     (WS / "screens").mkdir(parents=True, exist_ok=True)
     vm = LumeVM(workspace=WS)
-
     log("opening the VM (clone-if-needed, boot, wait for ssh, attach share)…")
     await vm.prepare()
     log("VM is up at %s" % vm.ip)
+    g = Guest(vm)
 
-    driver = VncGuiDriver(vm, WS)
     try:
-        # A fresh guest sits at the loginwindow, where `screencapture` over
-        # ssh fails ("could not create image from display 0") — that failure
-        # IS the signal that we still need to log in.
-        logged_in = await shot(driver, "screens/00-open.png")
-        if logged_in:
-            log("already at the desktop (auto-login); 00-open captured")
+        g.shot("00-open.png")  # login window or desktop — the VM is open
+
+        if g.logged_in():
+            log("already at the desktop (auto-login)")
         else:
-            log("at the loginwindow — logging in over VNC…")
+            log("at the login window — logging in over VNC…")
+            g.click(g.c.width // 2, int(g.c.height * 0.62))  # password field
+            time.sleep(0.5)
+            g.type_text(PASSWORD)
+            g.key("return")
+            for _ in range(12):
+                time.sleep(3)
+                if g.logged_in():
+                    break
+            else:
+                raise SystemExit("login didn't take — desktop never came up")
+        g.shot("01-logged-in.png")
 
-        # -- log in over VNC (virtual HID keystrokes) ---------------------
-        # A pointer wake, then the password + Return into the focused field.
-        await driver.click(640, 460)
-        await asyncio.sleep(0.5)
-        await driver.type_text(PASSWORD)
-        await driver.key("return")
-        log("typed the password over VNC; waiting for the desktop…")
-        # the desktop takes a few seconds; retry the shot until it renders
-        for attempt in range(12):
-            await asyncio.sleep(3)
-            if await shot(driver, "screens/02-logged-in.png"):
-                log("logged in — desktop captured (after %ds)"
-                    % ((attempt + 1) * 3))
-                break
-        else:
-            raise SystemExit("desktop never rendered after login")
+        # -- create the note: open a doc window (no Command needed), then type
+        log("opening a TextEdit document and typing the note over VNC…")
+        g.ssh("printf '' > %s" % NOTE_PATH)          # fresh empty file
+        g.ssh("open -e %s" % NOTE_PATH)               # opens a TextEdit window
+        time.sleep(4)
+        g.click(g.vnc().width // 2, g.vnc().height // 2)  # focus the doc
+        time.sleep(0.5)
+        g.type_text(NOTE)
+        time.sleep(0.5)
+        g.shot("02-note-typed.png")
 
-        # -- create the note in TextEdit ----------------------------------
-        log("creating the note in TextEdit…")
-        await driver.launch("TextEdit")
-        await asyncio.sleep(3)
-        await driver.key("cmd+n")            # new document
-        await asyncio.sleep(1.5)
-        await driver.click(640, 360)          # focus the doc
-        await asyncio.sleep(0.5)
-        await driver.type_text(NOTE)
-        await asyncio.sleep(0.5)
-        await shot(driver, "screens/03-note-typed.png")
-        log("captured 03-note-typed")
-
-        # -- save it (Cmd+S, name, Return) --------------------------------
-        await driver.key("cmd+s")
-        await asyncio.sleep(1.5)
-        await driver.type_text("grocery-list")
-        await driver.key("return")
-        await asyncio.sleep(2)
-        await shot(driver, "screens/04-note-saved.png")
-        log("captured 04-note-saved")
+        # -- save (Cmd+S in TextEdit writes the already-named file) ----------
+        log("saving with Cmd+S…")
+        g.key("cmd+s")
+        time.sleep(1.5)
+        g.key("return")   # confirm the Save sheet if one appears
+        time.sleep(1.5)
+        g.shot("03-note-saved.png")
+        saved = g.ssh("cat %s" % NOTE_PATH).stdout
+        log("note file on disk now:\n%s" % saved)
     finally:
-        driver.close()
+        g.close()
 
     log("done. screenshots in %s/screens/" % WS)
 
