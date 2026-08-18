@@ -34,7 +34,7 @@ import time
 import uuid
 from pathlib import Path
 
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 
 
 class SandboxUnavailable(Exception):
@@ -72,18 +72,40 @@ class LumeVM:
         self.workspace = Path(workspace) if workspace else None
         self.ip = None
         self._runner = None  # detached `lume run` process handle
+        # reset() must reap the detached runner and delete the disposable VM
+        # without diagnostic I/O in the middle of that safety-critical
+        # boundary.  Keep this state internal so tests and callers can still
+        # replace _lume with the existing ``async def fake_lume(*args)``.
+        self._cleanup_lume_depth = 0
 
     # -- lume CLI plumbing --------------------------------------------------
 
     async def _lume(self, *args):
+        operation = str(args[0]) if args else "unknown"
+        started = time.monotonic()
+        instrument = self._cleanup_lume_depth == 0
         exe = shutil.which("lume")
         if exe is None:
+            if instrument:
+                diagnostics.warning("vm.lume.unavailable",
+                                    operation=operation)
             raise SandboxUnavailable(
                 "lume is not installed — run scripts/vm_golden.sh first")
-        proc = await asyncio.create_subprocess_exec(
-            exe, *args, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
-        out, _ = await proc.communicate()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                exe, *args, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            out, _ = await proc.communicate()
+        except Exception as exc:
+            if instrument:
+                diagnostics.exception("vm.lume.failed", exc=exc,
+                                      operation=operation)
+            raise
+        if instrument:
+            diagnostics.info(
+                "vm.lume.finished", operation=operation,
+                exit_code=proc.returncode, output_bytes=len(out),
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
         return proc.returncode, out.decode("utf-8", "replace")
 
     async def _get(self):
@@ -109,18 +131,29 @@ class LumeVM:
     # -- lifecycle ------------------------------------------------------------
 
     async def prepare(self):
+        started = time.monotonic()
+        diagnostics.info("vm.prepare.started",
+                         user_doc_mount_count=len(config.user_docs()),
+                         workspace_mounted=self.workspace is not None)
         self._require_ssh_key()
         info = await self._get()
         if info is None:  # first use (or after reset): clone from golden
+            diagnostics.info("vm.clone.started")
             await self._clone_from_golden()
+            diagnostics.info("vm.clone.finished")
             info = await self._get()
         if not self._is_running(info):
+            diagnostics.info("vm.boot.required")
             await self._boot()
         try:
             await self._wait_ready()
-        except SandboxUnavailable:
+        except SandboxUnavailable as exc:
+            diagnostics.exception("vm.ready.failed", exc=exc,
+                                  recovery="one_shot")
             await self._recover_once()
-        if not await self._mounts_ok():
+        mounts_ok = await self._mounts_ok()
+        diagnostics.info("vm.mount_check.finished", ok=mounts_ok)
+        if not mounts_ok:
             # virtiofs shares bind at `lume run` time: a VM booted by an
             # older session serves ITS workspace at the guest mount, and
             # every write from this session silently lands in the wrong
@@ -128,12 +161,18 @@ class LumeVM:
             await self._lume("stop", self.vm_name)
             await self._boot()
             await self._wait_ready()
-            if not await self._mounts_ok():
+            mounts_ok = await self._mounts_ok()
+            diagnostics.info("vm.mount_check.finished", ok=mounts_ok,
+                             after_reboot=True)
+            if not mounts_ok:
                 raise SandboxUnavailable(
                     "workspace %s is not visible inside VM %r at %s even "
                     "after a reboot with the share attached (virtiofs "
                     "mount failed)" % (self.workspace, self.vm_name,
                                        config.vm_guest_workspace()))
+        diagnostics.info(
+            "vm.prepare.finished",
+            duration_ms=round((time.monotonic() - started) * 1000, 1))
 
     async def _mounts_ok(self):
         """Prove end-to-end that the guest sees THIS session's shares (lume
@@ -224,12 +263,15 @@ class LumeVM:
           a fresh boot hands out a live address.
         """
         if self._boot_log_mentions_lock():
+            diagnostics.warning("vm.recovery.started", reason="stale_lock")
             await self._kill_stale_holders()
         else:
+            diagnostics.warning("vm.recovery.started", reason="state_drift")
             await self._lume("stop", self.vm_name)
             await asyncio.sleep(1.0)
         await self._boot()
         await self._wait_ready()
+        diagnostics.info("vm.recovery.finished")
 
     async def _kill_stale_holders(self):
         """Best-effort reap of orphaned owners of this (disposable, scratch)
@@ -306,6 +348,9 @@ class LumeVM:
             self._runner = await asyncio.create_subprocess_exec(
                 *self._boot_argv(exe), stdout=log,
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        diagnostics.info("vm.boot.spawned", pid=self._runner.pid,
+                         share_count=(1 if self.workspace is not None else 0)
+                         + len(config.user_docs()))
 
     async def _wait_ready(self, timeout=None):
         """Poll until the VM reports running + an IP, then until SSH answers.
@@ -315,7 +360,10 @@ class LumeVM:
         budget = timeout or config.vm_boot_timeout()
         deadline = time.monotonic() + budget
         status = None
+        polls = 0
+        started = time.monotonic()
         while time.monotonic() < deadline:
+            polls += 1
             runner_rc = self._runner.returncode if self._runner else None
             if runner_rc not in (None, 0):
                 raise SandboxUnavailable(
@@ -327,9 +375,16 @@ class LumeVM:
             self.ip = (info or {}).get("ipAddress") or (info or {}).get("ip")
             if self._is_running(info) and self.ip:
                 if await self._ssh_up():
+                    diagnostics.info(
+                        "vm.ready", polls=polls,
+                        duration_ms=round(
+                            (time.monotonic() - started) * 1000, 1))
                     return
             await asyncio.sleep(1.0)
         tail = self._boot_log_tail()
+        diagnostics.error(
+            "vm.ready.timed_out", polls=polls, budget_s=budget,
+            last_status=status, boot_log_available=bool(tail))
         raise SandboxUnavailable(
             "VM %r did not become reachable within %.0fs (last lume state: "
             "status=%s ip=%s)%s"
@@ -351,19 +406,28 @@ class LumeVM:
         delete leaves the VM behind — swallowing that would hand the NEXT
         task a dirty VM with the killed task's guest processes still alive,
         breaking the no-orphan-outlives-its-budget guarantee."""
-        await self._lume("stop", self.vm_name)
-        if self._runner is not None:  # reap our detached `lume run`: a
-            try:                      # lingering one holds the aux-storage
-                self._runner.terminate()  # lock and blocks every next boot
-            except ProcessLookupError:
-                pass
-            self._runner = None
-        rc, out = await self._lume("delete", self.vm_name, "--force")
-        self.ip = None
-        if rc != 0 and await self._get() is not None:
-            raise SandboxUnavailable(
-                "could not delete VM %r (a dirty scratch VM would leak into "
-                "the next task): %s" % (self.vm_name, out.strip()[-300:]))
+        started = time.monotonic()
+        self._cleanup_lume_depth += 1
+        try:
+            await self._lume("stop", self.vm_name)
+            if self._runner is not None:  # reap our detached `lume run`: a
+                try:                      # lingering one holds the aux-storage
+                    self._runner.terminate()  # lock and blocks every next boot
+                except ProcessLookupError:
+                    pass
+                self._runner = None
+            rc, out = await self._lume("delete", self.vm_name, "--force")
+            self.ip = None
+            if rc != 0 and await self._get() is not None:
+                raise SandboxUnavailable(
+                    "could not delete VM %r (a dirty scratch VM would leak "
+                    "into the next task): %s"
+                    % (self.vm_name, out.strip()[-300:]))
+        finally:
+            self._cleanup_lume_depth -= 1
+        diagnostics.warning("vm.reset.finished", exit_code=rc,
+                            duration_ms=round(
+                                (time.monotonic() - started) * 1000, 1))
 
     # -- ssh into the guest ---------------------------------------------------
 
@@ -513,6 +577,8 @@ async def discard(sandbox):
             # discard runs in kill/error paths and must not raise, but a
             # swallowed failed delete means the next task may inherit a
             # dirty VM — say so where the operator can see it
+            diagnostics.exception("vm.discard.failed", exc=exc,
+                                  sandbox=getattr(sandbox, "name", "sandbox"))
             print("[vm] WARNING: discard of %s failed: %s"
                   % (getattr(sandbox, "name", "sandbox"), exc))
     if sandbox is _shared_vm:
@@ -525,6 +591,8 @@ def for_task(task, ctx):
     warm instance."""
     injected = ctx.extra.get("sandbox")
     if injected is not None:
+        diagnostics.info("sandbox.selected", sandbox=injected.name,
+                         source="injected")
         return injected
     tier = task.request.args.get("sandbox") or config.sandbox_tier()
     if tier == "vm":
@@ -533,6 +601,10 @@ def for_task(task, ctx):
         # installed, run there instead of killing the task; an explicit
         # ECHOECHO_SANDBOX=vm with lume missing stays a loud failure.
         if config.sandbox_tier() != "vm" and shutil.which("lume") is None:
+            diagnostics.warning("sandbox.fallback", requested="vm",
+                                selected="shell", reason="lume unavailable")
             return ShellSandbox()
+        diagnostics.info("sandbox.selected", sandbox="vm", source="task")
         return shared_vm(workspace=ctx.workspace)
+    diagnostics.info("sandbox.selected", sandbox="shell", source="task")
     return ShellSandbox()

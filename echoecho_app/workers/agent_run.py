@@ -16,9 +16,10 @@ import os
 import posixpath
 import shutil
 import signal
+import time
 from pathlib import Path
 
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 from echoecho_app.bus import TaskResult
 from echoecho_app.services import agent_cli, artifacts
 from echoecho_app.services import vm as vm_mod
@@ -147,7 +148,7 @@ def _hook(workspace, ev):
             pass  # a broken fixture write shows up in the test's asserts
 
 
-async def _lines(stream, max_line=MAX_LINE):
+async def _lines(stream, max_line=MAX_LINE, telemetry=None):
     """Decoded stdout lines. asyncio's readline() RAISES past its 64 KiB
     limit and real agent CLIs routinely exceed it (tool results embed whole
     files), so split lines ourselves and silently drop anything over
@@ -156,8 +157,12 @@ async def _lines(stream, max_line=MAX_LINE):
     skipping = False
     while True:
         chunk = await stream.read(READ_CHUNK)
+        if telemetry is not None:
+            telemetry["stdout_bytes"] += len(chunk)
         if not chunk:
             if buf and not skipping:
+                if telemetry is not None:
+                    telemetry["stdout_lines"] += 1
                 yield buf.decode("utf-8", "replace")
             return
         buf += chunk
@@ -167,11 +172,15 @@ async def _lines(stream, max_line=MAX_LINE):
                 if len(buf) > max_line:
                     buf = b""
                     skipping = True  # drop the rest of this oversized line
+                    if telemetry is not None:
+                        telemetry["oversized_lines"] += 1
                 break
             line, buf = buf[:nl], buf[nl + 1:]
             if skipping:
                 skipping = False
             elif line.strip():
+                if telemetry is not None:
+                    telemetry["stdout_lines"] += 1
                 yield line.decode("utf-8", "replace")
 
 
@@ -179,19 +188,25 @@ async def _pump(stream, runtime, workspace, state, report=None):
     """Parse the CLI's stdout JSONL into the normalized event stream,
     mirroring it into ctx.report so progress reaches the live conversation
     (throttled by the orchestrator) and the session id is checkpointed."""
-    async for line in _lines(stream):
+    telemetry = state["telemetry"]
+    async for line in _lines(stream, telemetry=telemetry):
         try:
             raw = json.loads(line)
         except ValueError:
+            telemetry["malformed_json"] += 1
             continue  # CLIs print the odd non-JSON banner; never fatal
         if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
+            telemetry["invalid_events"] += 1
             continue
         if raw.get("type", "").startswith("_"):
+            telemetry["control_events"] += 1
             _hook(workspace, raw)
             continue
         ev = runtime.parse_event(raw)
         if ev is None:
+            telemetry["ignored_events"] += 1
             continue
+        telemetry["parsed_events"] += 1
         if ev["event"] == "init":
             state["session_id"] = ev.get("session_id") or state["session_id"]
             if report and state["session_id"]:
@@ -218,8 +233,10 @@ async def _drain(stream, state):
         chunk = await stream.read(READ_CHUNK)
         if not chunk:
             break
+        state["telemetry"]["stderr_bytes"] += len(chunk)
         tail = (tail + chunk)[-4 * STDERR_TAIL:]
     state["stderr"] = tail.decode("utf-8", "replace")
+    state["telemetry"]["stderr_tail_bytes"] = len(tail)
 
 
 def _resume_session(task, ctx):
@@ -257,22 +274,30 @@ def _resume_session(task, ctx):
           # touched-file attribution diffs mtimes), so writers never overlap
           serialize="workspace.write")
 async def run_agent(task, ctx):
+    started = time.monotonic()
     runtime = agent_cli.for_ctx(ctx)
     if runtime is None:
+        diagnostics.warning("agent.runtime.unavailable")
         return TaskResult(say="I can't run agent tasks here — no agent CLI "
                               "(claude or codex) is installed.",
                           priority="interrupt", data={"error": "no agent cli"})
     resume, refusal = _resume_session(task, ctx)
     if refusal is not None:
+        diagnostics.info("agent.resume.refused",
+                         reason="prior task unavailable", resumed=False)
         return refusal  # data["error"] auto-ranks as interrupt
     # tier picked BEFORE the prompt: the user-docs convention must name the
     # paths the agent will actually see (guest mounts in the vm tier)
     sandbox = vm_mod.for_task(task, ctx)
+    diagnostics.info("agent.run.preparing", runtime=runtime.name,
+                     sandbox=sandbox.name, resumed=bool(resume))
     prompt = (task.request.instructions + PROMPT_SUFFIX
               + _user_docs_convention(task, sandbox))
     try:
         argv = runtime.command(prompt, resume=resume)
     except Exception as exc:  # e.g. a directory fixture ran out of scripts
+        diagnostics.exception("agent.command.failed", exc=exc,
+                              runtime=runtime.name, resumed=bool(resume))
         return TaskResult(say="The agent couldn't start: %s" % exc,
                           priority="interrupt", data={"error": str(exc)})
 
@@ -280,8 +305,11 @@ async def run_agent(task, ctx):
     # tier 1 spawns the CLI directly, tier 2 wraps it in ssh into echoecho's VM
     # with the workspace virtiofs-mounted; the pipeline below is identical
     try:
-        await sandbox.prepare()
+        with diagnostics.span("agent.sandbox.prepare", sandbox=sandbox.name):
+            await sandbox.prepare()
     except Exception as exc:
+        diagnostics.exception("agent.sandbox.prepare_failed", exc=exc,
+                              sandbox=sandbox.name)
         return TaskResult(
             say="The %s sandbox couldn't start: %s"
                 % (sandbox.name, _speakable(str(exc))),
@@ -293,25 +321,42 @@ async def run_agent(task, ctx):
     # finally below can only reap a process it got to assign to `proc`)
     budget = config.agent_timeout()
     before = _snapshot(ctx.workspace)
-    proc = await asyncio.create_subprocess_exec(
-        *argv, cwd=str(cwd),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        # own process group: the agent spawns its own children (builds, dev
-        # servers, tool subprocesses); a budget kill must take the whole tree,
-        # not just the CLI, or orphans burn resources past the budget
-        start_new_session=True)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            # own process group: the agent spawns its own children (builds,
+            # dev servers, tool subprocesses); a budget kill takes the tree.
+            start_new_session=True)
+    except Exception as exc:
+        diagnostics.exception("agent.process.spawn_failed", exc=exc,
+                              runtime=runtime.name, sandbox=sandbox.name)
+        raise
+    diagnostics.info("agent.process.spawned", runtime=runtime.name,
+                     sandbox=sandbox.name, pid=proc.pid, budget_s=budget)
     state = {"progress": [], "result": "", "error": None,
-             "session_id": resume, "stderr": "", "cost_usd": None}
+             "session_id": resume, "stderr": "", "cost_usd": None,
+             "telemetry": {
+                 "stdout_bytes": 0, "stdout_lines": 0,
+                 "oversized_lines": 0, "malformed_json": 0,
+                 "invalid_events": 0, "control_events": 0,
+                 "ignored_events": 0, "parsed_events": 0,
+                 "stderr_bytes": 0, "stderr_tail_bytes": 0,
+             }}
     pump = asyncio.ensure_future(_pump(proc.stdout, runtime, ctx.workspace,
                                        state, report=ctx.report))
     drain = asyncio.ensure_future(_drain(proc.stderr, state))
     rc, timed_out = None, False
+    kill_reason = None
     try:
         try:
             await asyncio.wait_for(asyncio.gather(pump, drain), budget)
             rc = await proc.wait()
         except asyncio.TimeoutError:
             timed_out = True
+            if proc.returncode is None:
+                kill_reason = "timeout"
+                _kill_tree(proc)
     finally:
         # a worker exception must NEVER orphan a live agent: nobody would be
         # reading its pipes, so it would block forever, still burning tokens
@@ -319,6 +364,8 @@ async def run_agent(task, ctx):
         drain.cancel()
         await asyncio.gather(pump, drain, return_exceptions=True)
         if proc.returncode is None:
+            kill_reason = kill_reason or (
+                "timeout" if timed_out else "worker_exit")
             _kill_tree(proc)  # tier 1: the agent tree. tier 2: only local ssh
             await proc.wait()
             # tier 2's real agent runs in the guest, unreachable over the now
@@ -326,13 +373,29 @@ async def run_agent(task, ctx):
             # budget (no-op for shell/fake without a reset())
             await vm_mod.discard(sandbox)
 
+    if timed_out:
+        diagnostics.warning("agent.process.timed_out", pid=proc.pid,
+                            budget_s=budget)
+    if kill_reason is not None:
+        diagnostics.warning(
+            "agent.process.killed", pid=proc.pid, reason=kill_reason)
+
     touched = sorted(name for name, mt in _snapshot(ctx.workspace).items()
                      if before.get(name) != mt)
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    diagnostics.info(
+        "agent.run.finished", runtime=runtime.name, sandbox=sandbox.name,
+        resumed=bool(resume), exit_code=rc, timed_out=timed_out,
+        duration_ms=elapsed_ms, touched_count=len(touched),
+        progress_count=len(state["progress"]),
+        reported_error=bool(state["error"]), **state["telemetry"])
     data = {"result": state["result"], "cli": runtime.name, "exit_code": rc,
             "session_id": state["session_id"], "sandbox": sandbox.name,
             "progress": state["progress"][-5:]}
     if state["cost_usd"] is not None:
         data["cost_usd"] = state["cost_usd"]
+        diagnostics.metric("agent.cost", state["cost_usd"], unit="usd",
+                           runtime=runtime.name)
     if timed_out:
         data["error"] = "hit the %d-minute budget" % (budget / 60)
         return TaskResult(

@@ -5,6 +5,7 @@
 #   bash scripts/echoechoctl.sh status|start-daemon|stop-daemon|restart-daemon
 #                           boot-vm|stop-vm|reset-vm
 #                           build-app|install-app|start-app|stop-app|update
+#                           diagnostics|doctor|logs
 #
 # Daemon env pins (audio device etc.) live in ~/.echoecho/daemon.env — one
 # KEY=VALUE per line, sourced at daemon start so the app's buttons launch the
@@ -20,10 +21,17 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$REPO/app"
 VM_NAME="${ECHOECHO_VM_NAME:-echoecho-vm}"
 GOLDEN="${ECHOECHO_VM_GOLDEN:-echoecho-golden}"
-DAEMON_ENV="$HOME/.echoecho/daemon.env"
-DAEMON_LOG="/tmp/echoecho-daemon.log"
-APP_LOG="/tmp/echoecho-orb.log"
+STATE_DIR="${ECHOECHO_STATE_DIR:-$HOME/.echoecho}"
+DIAGNOSTICS_DIR="${ECHOECHO_DIAGNOSTICS_DIR:-$STATE_DIR/diagnostics}"
+CONSOLE_DIR="$DIAGNOSTICS_DIR/console"
+DAEMON_ENV="$STATE_DIR/daemon.env"
+DAEMON_LOG="$CONSOLE_DIR/daemon-current.log"
+APP_LOG="$CONSOLE_DIR/orb-current.log"
+VM_LOG="$CONSOLE_DIR/vm-current.log"
+LIVEWRITER_LOG="$CONSOLE_DIR/livewriter-current.log"
+UPDATE_LOG="$CONSOLE_DIR/update-current.log"
 START_LOCK="/tmp/echoecho-start-daemon.lock"
+export ECHOECHO_DIAGNOSTICS_DIR="$DIAGNOSTICS_DIR"
 
 # tools live in per-user places (nvm node, ~/.local/bin lume); resolve here so
 # double-clicked app buttons (no shell profile) still find them
@@ -44,6 +52,132 @@ repo_version() {
     *) ver="$ver.$(git -C "$REPO" rev-list --count HEAD 2>/dev/null || echo 0)" ;;
   esac
   echo "$ver"
+}
+
+# Console output complements the structured JSONL stream. Each detached launch
+# gets a private, size-bounded log ring plus a convenient <component>-current
+# symlink. Structured diagnostics remain the preferred, redacted source.
+ensure_log_dirs() {
+  umask 077
+  diagnostics_existed=0; [ -d "$DIAGNOSTICS_DIR" ] && diagnostics_existed=1
+  mkdir -p "$DIAGNOSTICS_DIR"
+  if [ -L "$CONSOLE_DIR" ]; then
+    echo "refusing symlink console directory: $CONSOLE_DIR" >&2
+    return 1
+  fi
+  if [ -e "$CONSOLE_DIR" ] && [ ! -d "$CONSOLE_DIR" ]; then
+    echo "console log path is not a directory: $CONSOLE_DIR" >&2
+    return 1
+  fi
+  console_existed=0; [ -d "$CONSOLE_DIR" ] && console_existed=1
+  mkdir -p "$CONSOLE_DIR"
+  if [ -L "$CONSOLE_DIR" ] || [ ! -d "$CONSOLE_DIR" ]; then
+    echo "console directory changed while opening: $CONSOLE_DIR" >&2
+    return 1
+  fi
+  # Preserve intentional sharing policy on operator-supplied existing dirs;
+  # newly created dirs and every log file are private.
+  [ "$diagnostics_existed" -eq 1 ] || chmod 700 "$DIAGNOSTICS_DIR" 2>/dev/null || true
+  [ "$console_existed" -eq 1 ] || chmod 700 "$CONSOLE_DIR" 2>/dev/null || true
+}
+
+new_console_log() {
+  component="$1"
+  if ! ensure_log_dirs; then
+    echo "console logging disabled: log directory unavailable" >&2
+    echo /dev/null
+    return 0
+  fi
+  create_python="$(diagnostics_python 2>/dev/null || true)"
+  if [ -n "$create_python" ] && [ -r "$REPO/scripts/console_capture.py" ]; then
+    if log="$("$create_python" "$REPO/scripts/console_capture.py" \
+        --create-dir "$CONSOLE_DIR" --component "$component")"; then
+      echo "$log"
+      return 0
+    fi
+  fi
+  # Console capture is observability, never a launch dependency. If the
+  # bounded helper is unavailable or retention cannot be enforced, discard
+  # raw output instead of adding an unbounded fallback file.
+  echo "console logging disabled: bounded capture unavailable" >&2
+  echo /dev/null
+}
+
+latest_console_log() {
+  component="$1"
+  [ -d "$CONSOLE_DIR" ] && [ ! -L "$CONSOLE_DIR" ] || return 1
+  python="$(diagnostics_python 2>/dev/null || true)"
+  [ -n "$python" ] && [ -r "$REPO/scripts/console_capture.py" ] || return 1
+  "$python" "$REPO/scripts/console_capture.py" \
+    --latest-dir "$CONSOLE_DIR" --component "$component"
+}
+
+diagnostics_python() {
+  if [ -x "$REPO/.venv/bin/python" ]; then
+    echo "$REPO/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    command -v python3
+  else
+    echo "python3 is required for diagnostics" >&2
+    return 1
+  fi
+}
+
+# Put the real command on the producer side of a pipe rather than underneath a
+# Python launcher. That preserves the exact command line used by daemon_pid and
+# the existing pgrep/pkill controls. If Python is unavailable, preserve the
+# requested component and discard raw output rather than let a file grow.
+start_console_command() {
+  local log capture_python
+  log="$1"
+  shift
+  capture_python="$(diagnostics_python 2>/dev/null || true)"
+  if [ -n "$capture_python" ] && [ -r "$REPO/scripts/console_capture.py" ]; then
+    ( nohup "$@" </dev/null 2>&1 \
+        | nohup "$capture_python" -u "$REPO/scripts/console_capture.py" --log "$log" \
+          >/dev/null 2>&1 & )
+  else
+    echo "console rotation unavailable; raw output discarded" >>"$log"
+    ( nohup "$@" </dev/null >/dev/null 2>&1 & )
+  fi
+}
+
+run_console_command_sync() {
+  local log capture_python producer_status
+  log="$1"
+  shift
+  capture_python="$(diagnostics_python 2>/dev/null || true)"
+  set +e
+  if [ -n "$capture_python" ] && [ -r "$REPO/scripts/console_capture.py" ]; then
+    "$@" 2>&1 \
+      | "$capture_python" -u "$REPO/scripts/console_capture.py" --log "$log"
+    producer_status="${PIPESTATUS[0]}"
+  else
+    echo "console rotation unavailable; raw output discarded" >>"$log"
+    "$@" >/dev/null 2>&1
+    producer_status="$?"
+  fi
+  set -e
+  return "$producer_status"
+}
+
+safe_console_tail() {
+  local log lines raw python
+  log="$1"
+  lines="$2"
+  raw="${3:-}"
+  python="$(diagnostics_python 2>/dev/null || true)"
+  if [ -n "$python" ] && [ -r "$REPO/scripts/console_capture.py" ]; then
+    if [ "$raw" = "--raw" ]; then
+      "$python" "$REPO/scripts/console_capture.py" \
+        --log "$log" --tail "$lines" --raw-tail
+    else
+      "$python" "$REPO/scripts/console_capture.py" --log "$log" --tail "$lines"
+    fi
+  else
+    echo "python3 is required to read console logs safely" >&2
+    return 1
+  fi
 }
 
 daemon_pid() { pgrep -f "echoecho\.py --voice" | head -1 || true; }
@@ -68,6 +202,7 @@ cmd_status() {
     echo "vm: lume not installed"
   fi
   pgrep -f "echoecho\.app/Contents/MacOS/echoecho" >/dev/null && echo "app: running" || echo "app: not running"
+  echo "diagnostics: $DIAGNOSTICS_DIR"
 }
 
 cmd_start_daemon() {
@@ -85,7 +220,13 @@ cmd_start_daemon() {
       for _ in $(seq 1 30); do sleep 1; [ -n "$(daemon_pid)" ] && break; done
       [ -n "$(daemon_pid)" ] && { echo "daemon started (pid $(daemon_pid)) via the app"; return 0; }
       echo "daemon did not come up via the app — tails of $APP_LOG and $DAEMON_LOG:"
-      tail -5 "$APP_LOG" "$DAEMON_LOG" 2>/dev/null || true
+      for component in orb daemon; do
+        failed_log="$(latest_console_log "$component" || true)"
+        if [ -n "$failed_log" ]; then
+          echo "==> $failed_log <=="
+          safe_console_tail "$failed_log" 5 2>/dev/null || true
+        fi
+      done
       exit 1
     fi
   fi
@@ -106,11 +247,22 @@ cmd_start_daemon() {
   cd "$REPO"
   # shellcheck disable=SC1090
   [ -f "$DAEMON_ENV" ] && set -a && . "$DAEMON_ENV" && set +a
+  # A daemon-specific diagnostics root in daemon.env should hold its console
+  # output too, rather than splitting one reproduction across two locations.
+  if [ -n "$ECHOECHO_DIAGNOSTICS_DIR" ] \
+      && [ "$ECHOECHO_DIAGNOSTICS_DIR" != "$DIAGNOSTICS_DIR" ]; then
+    DIAGNOSTICS_DIR="$ECHOECHO_DIAGNOSTICS_DIR"
+    CONSOLE_DIR="$DIAGNOSTICS_DIR/console"
+  elif [ -z "$ECHOECHO_DIAGNOSTICS_DIR" ]; then
+    ECHOECHO_DIAGNOSTICS_DIR="$DIAGNOSTICS_DIR"
+    export ECHOECHO_DIAGNOSTICS_DIR
+  fi
   : "${ECHOECHO_SANDBOX:=vm}"; export ECHOECHO_SANDBOX
-  ( nohup .venv/bin/python -u echoecho.py --voice </dev/null >"$DAEMON_LOG" 2>&1 & )
+  DAEMON_LOG="$(new_console_log daemon)"
+  start_console_command "$DAEMON_LOG" .venv/bin/python -u echoecho.py --voice
   sleep 3
   [ -n "$(daemon_pid)" ] && echo "daemon started (pid $(daemon_pid)), log $DAEMON_LOG" \
-    || { echo "daemon FAILED to start — tail of $DAEMON_LOG:"; tail -5 "$DAEMON_LOG"; exit 1; }
+    || { echo "daemon FAILED to start — tail of $DAEMON_LOG:"; safe_console_tail "$DAEMON_LOG" 5 || true; exit 1; }
 }
 
 cmd_stop_daemon() {
@@ -133,8 +285,10 @@ cmd_boot_vm() {
   if lume ls 2>/dev/null | awk -v vm="$VM_NAME" '$1 == vm && $7 == "running" {found=1} END {exit !found}'; then
     echo "vm already running"; return 0
   fi
-  ( nohup lume run "$VM_NAME" --no-display --shared-dir "$REPO/workspace:rw" </dev/null >/tmp/lume-echoecho-vm.log 2>&1 & )
-  echo "vm booting (log /tmp/lume-echoecho-vm.log)"
+  VM_LOG="$(new_console_log vm)"
+  start_console_command "$VM_LOG" \
+    lume run "$VM_NAME" --no-display --shared-dir "$REPO/workspace:rw"
+  echo "vm booting (log $VM_LOG)"
 }
 
 cmd_stop_vm() { lume stop "$VM_NAME" 2>/dev/null || true; echo "vm stopped"; }
@@ -188,7 +342,13 @@ cmd_install_app() {
 
 cmd_start_app() {
   b="$(app_bundle)"
-  [ -n "$b" ] && open "$b" || ( cd "$APP_DIR" && ( nohup ./node_modules/.bin/electron . </dev/null >"$APP_LOG" 2>&1 & ) )
+  if [ -n "$b" ]; then
+    open "$b"
+  else
+    APP_LOG="$(new_console_log orb)"
+    ( cd "$APP_DIR" && start_console_command "$APP_LOG" ./node_modules/.bin/electron . )
+    echo "orb starting (log $APP_LOG)"
+  fi
 }
 
 cmd_stop_app() {
@@ -198,8 +358,6 @@ cmd_stop_app() {
   echo "app stopped"
 }
 
-LIVEWRITER_LOG="/tmp/echoecho-livewriter.log"
-
 cmd_live_writer() {
   # Standalone by design: the Live Writer server shares nothing with the
   # daemon/orchestrator. Idempotent — if it's already listening we just open
@@ -208,14 +366,16 @@ cmd_live_writer() {
   url="http://127.0.0.1:${port}/"
   if ! curl -s -o /dev/null -m 2 "${url}healthz"; then
     cd "$REPO"
-    ( nohup .venv/bin/python -u -m livewriter --port "$port" </dev/null >"$LIVEWRITER_LOG" 2>&1 & )
+    LIVEWRITER_LOG="$(new_console_log livewriter)"
+    start_console_command "$LIVEWRITER_LOG" \
+      .venv/bin/python -u -m livewriter --port "$port"
     for _ in $(seq 1 20); do
       curl -s -o /dev/null -m 2 "${url}healthz" && break
       sleep 0.5
     done
     if ! curl -s -o /dev/null -m 2 "${url}healthz"; then
       echo "live writer FAILED to start — tail of $LIVEWRITER_LOG:"
-      tail -5 "$LIVEWRITER_LOG" 2>/dev/null || true
+      safe_console_tail "$LIVEWRITER_LOG" 5 2>/dev/null || true
       exit 1
     fi
   fi
@@ -227,12 +387,38 @@ cmd_stop_live_writer() {
   pid="$(pgrep -f 'python[0-9.]* -u -m livewriter' | head -1 || true)"
   [ -z "$pid" ] && { echo "live writer not running"; return 0; }
   kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  # Escalate only the pid we signalled. A newly launched Live Writer must not
+  # be caught by a second pgrep while this stop command is winding down.
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "live writer FAILED to stop (pid $pid)" >&2
+    return 1
+  fi
   echo "live writer stopped (pid $pid)"
 }
 
 cmd_update() {
   # called detached from the app's Update button (the app quits right after),
   # so wait for it to exit before swapping its bundle
+  UPDATE_LOG="$(new_console_log update)"
+  echo "update running; log $UPDATE_LOG"
+  run_console_command_sync "$UPDATE_LOG" \
+    bash "$REPO/scripts/echoechoctl.sh" _update-body
+}
+
+cmd_update_body() {
+  echo "update started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  trap 'status=$?; echo "update finished at $(date -u +%Y-%m-%dT%H:%M:%SZ), status=$status"' EXIT
   sleep 2
   cd "$REPO"
   was_daemon=""
@@ -251,6 +437,41 @@ cmd_update() {
   echo "update complete: v$(bash "$REPO/scripts/echoechoctl.sh" version) ($(git rev-parse --short HEAD))"
 }
 
+cmd_diagnostics() {
+  python="$(diagnostics_python)"
+  "$python" "$REPO/scripts/diagnostics.py" --dir "$DIAGNOSTICS_DIR" "$@"
+}
+
+cmd_doctor() {
+  python="$(diagnostics_python)"
+  "$python" "$REPO/scripts/diagnostics.py" --dir "$DIAGNOSTICS_DIR" --doctor "$@"
+}
+
+cmd_logs() {
+  component="${1:-all}"
+  lines="${2:-100}"
+  raw="${3:-}"
+  case "$lines" in ''|*[!0-9]*) echo "lines must be a positive integer" >&2; return 2 ;; esac
+  [ "$lines" -gt 0 ] || { echo "lines must be a positive integer" >&2; return 2; }
+  case "$raw" in ''|--raw) ;; *) echo "usage: echoechoctl.sh logs [component] [lines] [--raw]" >&2; return 2 ;; esac
+  case "$component" in
+    all) components="daemon orb vm livewriter update" ;;
+    daemon|orb|vm|livewriter|update) components="$component" ;;
+    *) echo "usage: echoechoctl.sh logs [daemon|orb|vm|livewriter|update|all] [lines]" >&2; return 2 ;;
+  esac
+  found=0
+  for name in $components; do
+    log="$(latest_console_log "$name" || true)"
+    [ -n "$log" ] || continue
+    found=1
+    echo "== $name: $log =="
+    safe_console_tail "$log" "$lines" "$raw" 2>/dev/null \
+      || echo "console log could not be read safely" >&2
+  done
+  [ "$found" -eq 1 ] || echo "no console logs found under $CONSOLE_DIR"
+  echo "structured diagnostics: $DIAGNOSTICS_DIR"
+}
+
 case "${1:-}" in
   status)          cmd_status ;;
   start-daemon)    cmd_start_daemon ;;
@@ -264,8 +485,12 @@ case "${1:-}" in
   start-app)       cmd_start_app ;;
   stop-app)        cmd_stop_app ;;
   update)          cmd_update ;;
+  _update-body)    cmd_update_body ;;
   version)         repo_version ;;
   live-writer)     cmd_live_writer ;;
   stop-live-writer) cmd_stop_live_writer ;;
-  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|version|live-writer|stop-live-writer}"; exit 2 ;;
+  diagnostics)     shift; cmd_diagnostics "$@" ;;
+  doctor)          shift; cmd_doctor "$@" ;;
+  logs)            shift; cmd_logs "$@" ;;
+  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|version|live-writer|stop-live-writer|diagnostics|doctor|logs}"; exit 2 ;;
 esac

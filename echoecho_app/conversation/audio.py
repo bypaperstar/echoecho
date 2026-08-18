@@ -16,7 +16,7 @@ import math
 import struct
 import threading
 
-from echoecho_app import events, recorder
+from echoecho_app import diagnostics, events, recorder
 from echoecho_app.conversation.audio_pipeline import AudioPipeline
 
 RATE = 24000
@@ -155,9 +155,26 @@ class AudioIO:
         self._out_stream = None
         self.muted_capture = False
         self.pipeline = pipeline
+        self._last_pipeline_stats = None
+        self._pipeline_closed = False
+        # A native stream whose close() raised may still be open even after we
+        # have dropped the Python reference.  Keep that uncertainty sticky:
+        # no later idempotent stop() may falsely certify a PortAudio refresh as
+        # safe merely because there are no references left to retry.
+        self._stream_close_error = None
         self._output_delay_s = 0.0
         self._pipeline_status_lock = threading.Lock()
         self._pipeline_disabled_announced = False
+        self._telemetry_lock = threading.Lock()
+        self._telemetry = {
+            "capture_callbacks": 0, "capture_bytes": 0,
+            "playback_callbacks": 0, "playback_bytes": 0,
+            "playback_zero_fill_bytes": 0, "capture_status": 0,
+            "playback_status": 0, "send_scheduled": 0,
+            "send_failures": 0, "dsp_wrapper_errors": 0,
+            "flush_count": 0, "flushed_bytes": 0,
+            "playback_queue_high_water_bytes": 0,
+        }
 
     # -- capture: mic -> input_audio_buffer.append --------------------------
 
@@ -165,6 +182,11 @@ class AudioIO:
         # Bind locally: stop() nulls these from another thread mid-callback.
         send, loop = self.send_event, self.loop
         rec = recorder.active()
+        with self._telemetry_lock:
+            self._telemetry["capture_callbacks"] += 1
+            self._telemetry["capture_bytes"] += len(indata)
+            if status:
+                self._telemetry["capture_status"] += 1
         if rec is not None and status:  # overflow = dropped capture: log it
             rec.note_status("input", status)
         sending = not (self.muted_capture or send is None or loop is None)
@@ -194,6 +216,8 @@ class AudioIO:
                 # The adapter itself is fail-safe; this last guard preserves
                 # capture if an unforeseen wrapper bug escapes it. Avoid I/O
                 # from PortAudio's real-time thread.
+                with self._telemetry_lock:
+                    self._telemetry["dsp_wrapper_errors"] += 1
                 data = bytes(indata)
         event = {"type": "input_audio_buffer.append",
                  "audio": base64.b64encode(data).decode("ascii")}
@@ -202,9 +226,32 @@ class AudioIO:
         # Retrieve task exceptions: a send racing transport close is expected
         # during teardown and must not spam "exception was never retrieved".
         def _send():
-            loop.create_task(send(event)).add_done_callback(
-                lambda t: t.exception())
+            with self._telemetry_lock:
+                self._telemetry["send_scheduled"] += 1
+            loop.create_task(send(event)).add_done_callback(self._on_send_done)
         loop.call_soon_threadsafe(_send)
+
+    def _on_send_done(self, task):
+        """Retrieve capture-send failures on the asyncio thread. A transport
+        close can race one final callback; count it and report logarithmically
+        instead of losing the only clue that upload stopped."""
+        error_type = None
+        if task.cancelled():
+            error_type = "CancelledError"
+        else:
+            try:
+                exc = task.exception()
+            except Exception as err:
+                exc = err
+            if exc is None:
+                return
+            error_type = exc.__class__.__name__
+        with self._telemetry_lock:
+            self._telemetry["send_failures"] += 1
+            count = self._telemetry["send_failures"]
+        if count == 1 or count & (count - 1) == 0:
+            diagnostics.warning("audio.capture_send.failed",
+                                error_type=error_type, count=count)
 
     # -- playback: output_audio.delta -> speaker ----------------------------
 
@@ -215,11 +262,20 @@ class AudioIO:
     def feed_pcm(self, pcm_bytes):
         with self._lock:
             self._buf.extend(pcm_bytes)
+            queued = len(self._buf)
+        with self._telemetry_lock:
+            self._telemetry["playback_queue_high_water_bytes"] = max(
+                self._telemetry["playback_queue_high_water_bytes"], queued)
 
     def flush(self):
         """Barge-in: drop everything queued for the speaker."""
         with self._lock:
+            dropped = len(self._buf)
             del self._buf[:]
+        with self._telemetry_lock:
+            self._telemetry["flush_count"] += 1
+            self._telemetry["flushed_bytes"] += dropped
+        diagnostics.info("audio.playback.flushed", dropped_bytes=dropped)
 
     def _out_callback(self, outdata, frames, time_info, status):
         need = frames * 2  # mono int16
@@ -229,6 +285,12 @@ class AudioIO:
         played = len(chunk)
         if played < need:
             chunk += b"\x00" * (need - played)
+        with self._telemetry_lock:
+            self._telemetry["playback_callbacks"] += 1
+            self._telemetry["playback_bytes"] += played
+            self._telemetry["playback_zero_fill_bytes"] += need - played
+            if status:
+                self._telemetry["playback_status"] += 1
         outdata[:need] = chunk
         if time_info is not None:
             try:
@@ -245,7 +307,8 @@ class AudioIO:
                 if not self.pipeline.enabled:
                     self._schedule_pipeline_warning(self.loop)
             except Exception:  # speaker callback stays fail-open too
-                pass
+                with self._telemetry_lock:
+                    self._telemetry["dsp_wrapper_errors"] += 1
         if self.tracker is not None and played:
             self.tracker.advance(played / (self.rate * 2.0) * 1000.0)
         rec = recorder.active()
@@ -278,6 +341,8 @@ class AudioIO:
         def report():
             events.emit("audio_processing", status="fallback-gate",
                         detail=reason)
+            diagnostics.warning("audio.pipeline.degraded",
+                                reason=reason, processing="fallback-gate")
             print("[audio] WARNING: echo cancellation failed (%s); "
                   "using playback gate" % reason)
 
@@ -291,6 +356,9 @@ class AudioIO:
 
     def start(self, loop, send_event):
         import sounddevice as sd  # lazy: Mac-only dependency
+        if not self.portaudio_close_safe:
+            raise RuntimeError(
+                "cannot start audio after a native stream failed to close")
         self.loop = loop
         self.send_event = send_event
         # resolve specs NOW, against the current device list (voice_main
@@ -313,6 +381,8 @@ class AudioIO:
                                          + _latency(self._out_stream)))
                 self.pipeline = AudioPipeline(rate=self.rate,
                                               stream_delay_ms=delay_ms)
+            self._last_pipeline_stats = None
+            self._pipeline_closed = False
             # Seed callback timing with the stream's reported output latency;
             # a valid PortAudio timestamp replaces it on first render.
             self._output_delay_s = _latency(self._out_stream)
@@ -339,6 +409,11 @@ class AudioIO:
             self._pipeline_disabled_announced = not self.pipeline.enabled
         events.emit("audio", input=in_name, output=out_name,
                     processing=processing)
+        diagnostics.info(
+            "audio.streams.started", rate_hz=self.rate,
+            block_frames=self.block_frames, processing=processing,
+            input_latency_ms=round(_latency(self._in_stream) * 1000, 1),
+            output_latency_ms=round(_latency(self._out_stream) * 1000, 1))
         print("[audio] mic: %s -> speaker: %s" % (in_name, out_name))
         if self.pipeline.enabled:
             print("[audio] WebRTC echo cancellation + residual suppression enabled")
@@ -349,7 +424,7 @@ class AudioIO:
 
     def stop(self):
         """Close every session resource, then surface the first close error."""
-        first_error = None
+        first_error = self._stream_close_error
         try:
             for stream in (self._in_stream, self._out_stream):
                 if stream is None:
@@ -361,14 +436,54 @@ class AudioIO:
                 try:
                     stream.close()
                 except Exception as exc:
+                    if self._stream_close_error is None:
+                        self._stream_close_error = exc
                     first_error = first_error or exc
         finally:
             self._in_stream = self._out_stream = None
             self.send_event = None
             if self.pipeline is not None:
-                try:
-                    self.pipeline.close()
-                except Exception as exc:
-                    first_error = first_error or exc
+                if self._last_pipeline_stats is None:
+                    try:
+                        # Snapshot while the native APM still exists. close()
+                        # releases it, after which `enabled` would misleadingly
+                        # describe teardown rather than the completed session.
+                        self._last_pipeline_stats = self.pipeline.stats()
+                    except Exception as exc:
+                        diagnostics.exception(
+                            "audio.pipeline.stats_failed", exc=exc,
+                            phase="pre_close")
+                if not self._pipeline_closed:
+                    try:
+                        self.pipeline.close()
+                        self._pipeline_closed = True
+                    except Exception as exc:
+                        first_error = first_error or exc
+        diagnostics.info("audio.streams.stopped", **self.telemetry())
         if first_error is not None:
+            diagnostics.exception("audio.streams.stop_failed", exc=first_error)
             raise first_error
+
+    @property
+    def portaudio_close_safe(self):
+        """Whether every native stream close completed without uncertainty."""
+        return self._stream_close_error is None
+
+    def telemetry(self):
+        """Thread-safe aggregate I/O counters; never contains PCM."""
+        with self._telemetry_lock:
+            result = dict(self._telemetry)
+        result["portaudio_close_safe"] = self.portaudio_close_safe
+        return result
+
+    def pipeline_telemetry(self):
+        """Last session DSP snapshot, preserved before native teardown."""
+        if self._last_pipeline_stats is not None:
+            return dict(self._last_pipeline_stats)
+        if self.pipeline is None:
+            return None
+        try:
+            return self.pipeline.stats()
+        except Exception as exc:
+            diagnostics.exception("audio.pipeline.stats_failed", exc=exc)
+            return None

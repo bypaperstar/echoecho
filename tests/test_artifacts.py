@@ -86,6 +86,84 @@ def test_write_atomic_binary(tmp_path):
     assert artifacts.read(tmp_path, "img/chart.png", default="") == ""
 
 
+def test_write_instrumentation_accepts_resolve_coercions_and_cleans_failures(
+        tmp_path, monkeypatch):
+    # resolve() has always normalized names with str(); diagnostics must not
+    # make that successful compatibility path fail afterward.
+    records = []
+    monkeypatch.setattr(
+        artifacts.diagnostics, "info",
+        lambda event, **fields: records.append((event, fields)))
+    target = artifacts.write_atomic(tmp_path, 123, "café")
+    assert target.name == "123" and target.read_text() == "café"
+    assert records[-1][1]["content_bytes"] == len("café".encode("utf-8"))
+
+    with pytest.raises(TypeError):
+        artifacts.write_atomic(tmp_path, "bad.txt", object())
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_write_diagnostics_only_emit_allowlisted_suffixes(tmp_path,
+                                                          monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        artifacts.diagnostics, "info",
+        lambda event, **fields: records.append((event, fields)))
+    monkeypatch.setattr(
+        artifacts.diagnostics, "exception",
+        lambda event, exc=None, **fields: records.append((event, fields)))
+
+    artifacts.write_atomic(tmp_path, "known.md", "ok")
+    artifacts.write_atomic(tmp_path, "README", "ok")
+    artifacts.write_atomic(tmp_path, "report.private-canary", "ok")
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(OSError):
+        artifacts.write_atomic(
+            tmp_path, "blocker/report.private-canary", "fail")
+
+    finished = [fields for event, fields in records
+                if event == "artifact.write.finished"]
+    failed = [fields for event, fields in records
+              if event == "artifact.write.failed"]
+    assert finished[0]["suffix"] == ".md"
+    assert finished[1]["suffix"] == "none"
+    for fields in (finished[2], failed[-1]):
+        assert fields["suffix"] == "unknown"
+        assert fields["suffix_length"] == len(".private-canary")
+        assert len(fields["suffix_fingerprint"]) == 16
+        assert all(char in "0123456789abcdef"
+                   for char in fields["suffix_fingerprint"])
+    assert "private-canary" not in repr(records)
+
+
+def test_write_failures_are_instrumented_before_temp_file_exists(
+        tmp_path, monkeypatch):
+    failures = []
+    monkeypatch.setattr(
+        artifacts.diagnostics, "exception",
+        lambda event, exc=None, **fields: failures.append((event, fields)))
+
+    with pytest.raises(ValueError):
+        artifacts.write_atomic(tmp_path, "../escape.txt", "x")
+    assert failures[-1][0] == "artifact.write.failed"
+    assert failures[-1][1]["stage"] == "resolve"
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(OSError):
+        artifacts.write_atomic(tmp_path, "blocker/child.txt", "x")
+    assert failures[-1][1]["stage"] == "mkdir"
+
+    monkeypatch.setattr(
+        artifacts.tempfile, "mkstemp",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        artifacts.write_atomic(tmp_path, "temp-open.txt", "x")
+    assert failures[-1][1]["stage"] == "temp_open"
+
+
 def test_list_files_recurses_and_hides_dotted(tmp_path):
     artifacts.write_atomic(tmp_path, "a.md", "x")
     artifacts.write_atomic(tmp_path, "notes/deep/b.py", "print(1)")

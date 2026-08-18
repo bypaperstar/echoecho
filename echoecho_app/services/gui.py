@@ -28,8 +28,9 @@ profile) for type/key to work. launch + screenshot need no such grant.
 """
 import asyncio
 import shlex
+import time
 
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 
 GUI_TIMEOUT = 20.0  # a TCC-blocked osascript would otherwise hang forever
 
@@ -105,6 +106,8 @@ class SshGuiDriver(GuiDriver):
         The timeout matters: a keystroke blocked on an Accessibility TCC
         prompt never returns, so bound it and report instead of hanging."""
         remote = " ".join(shlex.quote(a) for a in argv)
+        operation = argv[0] if argv else "unknown"
+        started = time.monotonic()
         ssh = self.vm.ssh_argv(remote)
         proc = await asyncio.create_subprocess_exec(
             *ssh, stdout=asyncio.subprocess.PIPE,
@@ -117,13 +120,27 @@ class SshGuiDriver(GuiDriver):
                 await proc.wait()
             except ProcessLookupError:
                 pass
+            diagnostics.warning(
+                "gui.command.timed_out", operation=operation,
+                timeout_s=GUI_TIMEOUT,
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
             raise GuiError(
                 "guest GUI command timed out (%s) — likely an Accessibility "
                 "permission the VM hasn't granted; launch/screenshot work, "
                 "type/key need the golden image's TCC grant" % argv[0])
         if proc.returncode != 0:
+            diagnostics.error(
+                "gui.command.failed", operation=operation,
+                exit_code=proc.returncode, stdout_bytes=len(out),
+                stderr_bytes=len(err),
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
             raise GuiError("guest GUI command failed (%s): %s"
                            % (argv[0], err.decode("utf-8", "replace")[-200:]))
+        diagnostics.info(
+            "gui.command.finished", operation=operation,
+            exit_code=proc.returncode, stdout_bytes=len(out),
+            stderr_bytes=len(err),
+            duration_ms=round((time.monotonic() - started) * 1000, 1))
         return out
 
     async def launch(self, app):

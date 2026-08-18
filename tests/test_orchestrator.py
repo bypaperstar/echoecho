@@ -1,7 +1,8 @@
 import asyncio
+import hashlib
 import json
 
-from echoecho_app import config, events
+from echoecho_app import config, diagnostics, events
 from echoecho_app.bus import TaskRequest, TaskResult
 from echoecho_app.orchestrator import log as tasklog
 from echoecho_app.orchestrator.core import Orchestrator
@@ -75,6 +76,69 @@ def test_unknown_kind_is_error(tmp_path):
     orch, injections = run_orch({}, [TaskRequest(kind="nope")], tmp_path)
     assert orch.tasks["t1"].status == "error"
     assert injections[0].priority == "interrupt"
+
+
+def test_unknown_kind_is_fingerprinted_only_in_structured_diagnostics(
+        tmp_path, monkeypatch):
+    """The product task feed/log retain their contract, but diagnostics must
+    not turn model-supplied labels into a new content channel."""
+    raw_kind = "private dictated task about a family medical appointment"
+    raw_source = "private referral from a named family member"
+    expected_fingerprint = hashlib.sha256(
+        raw_kind.encode("utf-8")).hexdigest()[:16]
+    expected_source_fingerprint = hashlib.sha256(
+        raw_source.encode("utf-8")).hexdigest()[:16]
+    monkeypatch.setattr(config, "WORKSPACE_DIR", tmp_path)
+    events.reset(mode="test")
+    diagnostics.shutdown(outcome="test_reset")
+    diagnostics.configure("orchestrator-test", log_dir=tmp_path / "diagnostics")
+    diagnostic_path = diagnostics.get_log_path()
+    try:
+        orch, _injections = run_orch(
+            {}, [TaskRequest(kind=raw_kind, source=raw_source)], tmp_path)
+    finally:
+        diagnostics.shutdown(outcome="test")
+
+    records = [json.loads(line) for line in
+               diagnostic_path.read_text(encoding="utf-8").splitlines()
+               if line.strip()]
+    task_records = [record for record in records
+                    if record["event"] in {
+                        "task.queued", "task.started", "task.worker.failed",
+                        "task.finished",
+                    }]
+    assert {record["event"] for record in task_records} == {
+        "task.queued", "task.started", "task.worker.failed", "task.finished",
+    }
+    assert raw_kind not in json.dumps(records)
+    assert raw_source not in json.dumps(records)
+    for record in task_records:
+        assert record["fields"]["kind"] == "unknown"
+        assert record["fields"]["kind_length"] == len(raw_kind)
+        assert record["fields"]["kind_fingerprint"] == expected_fingerprint
+    queued = next(record for record in task_records
+                  if record["event"] == "task.queued")
+    assert queued["fields"]["source"] == "unknown"
+    assert queued["fields"]["source_length"] == len(raw_source)
+    assert queued["fields"]["source_fingerprint"] == \
+        expected_source_fingerprint
+    for event_name in ("task.started", "task.worker.failed"):
+        record = next(item for item in task_records
+                      if item["event"] == event_name)
+        assert record["context"]["task_kind"] == "unknown"
+        assert record["context"]["task_kind_length"] == len(raw_kind)
+        assert record["context"]["task_kind_fingerprint"] == \
+            expected_fingerprint
+
+    # Persistence and UI events are product surfaces, not structured
+    # diagnostics; their existing task-kind semantics stay unchanged.
+    task_events = tasklog.replay(tmp_path / "tasks.jsonl")
+    assert task_events and {item["kind"] for item in task_events} == {raw_kind}
+    assert task_events[0]["source"] == raw_source
+    feed = [json.loads(line) for line in
+            (tmp_path / events.FEED_NAME).read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    assert any(item.get("kind") == raw_kind for item in feed)
 
 
 def test_silent_results_only_hit_task_table(tmp_path):

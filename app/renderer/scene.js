@@ -16,6 +16,13 @@ const DEMO = qs.get('demo') === '1';
 const blob = window.echoechoBlob;
 const itemsEl = document.getElementById('items');
 const canvas = document.getElementById('blob');
+const report = (event, fields) => {
+  try { if (window.echoDiagnostics) window.echoDiagnostics.report(event, fields); } catch { /* diagnostics never break the scene */ }
+};
+const errorMeta = (err) => ({
+  error_name: (err && err.name) || 'Error', error_code: (err && err.code) || '',
+  message: (err && err.message) || String(err || ''), stack: (err && err.stack) || '',
+});
 
 const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
 const lerp = (a, b, p) => a + (b - a) * p;
@@ -31,7 +38,9 @@ let userPose = null;
 try {
   const saved = JSON.parse(localStorage.getItem('echoecho.pose'));
   if (saved && isFinite(saved.fx) && isFinite(saved.fy)) userPose = saved;
-} catch { /* first-summon spot */ }
+} catch (err) {
+  report('scene.storage_failed', { operation: 'pose-read', ...errorMeta(err) });
+}
 
 // Rest radius as a fraction of the short window edge. echoecho used to sit at
 // 0.135 (a ~240 px centrepiece); it rests at a quarter of that so it reads as a
@@ -137,7 +146,12 @@ function releaseNeck(it) {
 
 function removeItem(it) {
   if (it.handle) { it.handle.cancel(); it.handle = null; }
-  if (it === macItem) { try { window.echoVnc.close(); } catch {} macItem = null; }
+  if (it === macItem) {
+    try { window.echoVnc.close(); } catch (err) {
+      report('vnc.cleanup_failed', { stage: 'scene-remove', ...errorMeta(err) });
+    }
+    macItem = null;
+  }
   if (it === expanded) expanded = null;
   it.el.remove();
   const i = items.indexOf(it);
@@ -221,6 +235,7 @@ function spawnMac(opts = {}) {
     window.echoVnc.setViewOnly(viewOnly);
     btn.textContent = viewOnly ? 'view-only: on' : 'view-only: off';
     btn.classList.toggle('on', viewOnly);
+    report('vnc.view_only', { enabled: viewOnly });
   });
   head.append(label, btn);
   const screen = document.createElement('div');
@@ -229,7 +244,9 @@ function spawnMac(opts = {}) {
   const size = macSize(380);
   macItem = emergeItem(el, 'mac', size.w, size.h, opts);
   // echoVnc renders its own status ("echoecho's Mac is asleep") into the screen
-  window.echoVnc.open(screen, {}).catch(() => {});
+  window.echoVnc.open(screen, {}).catch((err) => {
+    report('scene.vnc_open_failed', errorMeta(err));
+  });
   return macItem;
 }
 
@@ -332,7 +349,9 @@ async function taskDocCard(e) {
   let title = arts[0] || `task ${e.task_id || ''} · ${e.kind || 'done'}`;
   let body = e.say || '';
   if (arts[0]) {
-    try { body = await window.orb.doc(arts[0]); } catch {}
+    try { body = await window.orb.doc(arts[0]); } catch (err) {
+      report('scene.doc_fetch_failed', errorMeta(err));
+    }
   }
   const docs = items.filter((i) => i.kind === 'doc');
   if (docs.length >= 2) absorbItem(docs[0]);   // keep the scene calm
@@ -346,14 +365,30 @@ window.orb.onEvents((evts) => {
     else if (e.type === 'task') {
       if (e.status === 'running' || e.status === 'progress') running.add(e.task_id);
       else if (e.status === 'done' || e.status === 'error') running.delete(e.task_id);
-      if (e.status === 'done') taskDocCard(e);
+      if (e.status === 'done') taskDocCard(e).catch((err) => {
+        report('scene.doc_fetch_failed', errorMeta(err));
+      });
       setBaseActivity();
+      report('scene.task_state', { status: e.status || 'unknown', running: running.size });
     }
   }
 });
 
+let lastViewerConnected = null;
+window.orb.onViewerStatus((state) => {
+  const connected = !!(state && state.connected);
+  if (connected !== lastViewerConnected) {
+    report('scene.viewer_status', { connected });
+    lastViewerConnected = connected;
+  }
+});
+
 // --------------------------------------------------------------- lifecycle
+let revealStartedAt = 0;
+let dismissSceneStartedAt = 0;
 window.orb.onReveal(({ anchor: a, reason }) => {
+  revealStartedAt = performance.now();
+  report('scene.lifecycle', { transition: 'reveal-received', reason: reason || 'unknown' });
   if (a) anchor = a;
   hideWhenDone = false;
   applyRest(!!expanded);
@@ -363,6 +398,8 @@ window.orb.onReveal(({ anchor: a, reason }) => {
 });
 
 function dismissScene() {
+  dismissSceneStartedAt = performance.now();
+  report('scene.lifecycle', { transition: 'dismiss-received' });
   if (expanded) restore();
   // drop any in-flight grab: the window hides before its mouseup arrives, and
   // a stale drag state would hold passthrough off — a full-screen invisible
@@ -430,7 +467,9 @@ let lastDragEnd = -1e9;
 // restart) rests it here instead of the middle of the screen
 function parkPose() {
   userPose = { fx: pose.x / innerWidth, fy: pose.y / innerHeight };
-  try { localStorage.setItem('echoecho.pose', JSON.stringify(userPose)); } catch {}
+  try { localStorage.setItem('echoecho.pose', JSON.stringify(userPose)); } catch (err) {
+    report('scene.storage_failed', { operation: 'pose-write', ...errorMeta(err) });
+  }
 }
 
 function updateHover(x, y) {
@@ -575,10 +614,21 @@ function frame() {
   const k = clamp((t - rv.t0) / rv.dur, 0, 1);
   rv.value = rv.from + (rv.target - rv.from) * easeOutCubic(k);
   blob.setReveal(rv.value, anchor);
+  if (revealStartedAt && rv.target === 1 && k >= 1) {
+    report('scene.lifecycle', {
+      transition: 'revealed', duration_ms: Math.round(performance.now() - revealStartedAt),
+    });
+    revealStartedAt = 0;
+  }
   if (hideWhenDone && rv.target === 0 && k >= 1) {
     hideWhenDone = false;
     clearItems();
     setPassthrough(true);   // next summon starts click-through until hover
+    report('scene.lifecycle', {
+      transition: 'hidden-ack',
+      duration_ms: dismissSceneStartedAt ? Math.round(performance.now() - dismissSceneStartedAt) : null,
+    });
+    dismissSceneStartedAt = 0;
     window.orb.hidden();
   }
   if (demoT0 !== null) {

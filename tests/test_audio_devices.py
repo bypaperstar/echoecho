@@ -190,14 +190,36 @@ class StubDetector(object):
 
 
 class StubPipeline(object):
-    enabled = True
     disabled_reason = None
 
     def __init__(self):
+        self.enabled = True
         self.closed = 0
+
+    def stats(self):
+        return {"enabled": self.enabled, "capture_frames": 7}
 
     def close(self):
         self.closed += 1
+        self.enabled = False
+
+
+def test_pre_transition_failure_leaves_healthy_wake_stream_alone(fake_sd):
+    """Client/tool setup can fail after AudioIO construction but before handoff."""
+    mic = WakeMic().start()
+    detector = StubDetector()
+    audio = AudioIO()
+
+    recovered = echoecho.recover_session_audio(
+        mic, audio, detector, transition_attempted=False)
+
+    assert recovered is True
+    assert len(fake_sd.open_streams) == 1
+    assert mic._stream in fake_sd.open_streams
+    assert mic._stream.started
+    assert fake_sd.refreshes == 0
+    assert fake_sd.refresh_violations == 0
+    assert detector.resumed == 0
 
 
 def test_session_sequence_never_refreshes_with_open_streams(fake_sd, feed_dir):
@@ -260,6 +282,56 @@ def test_crashed_audio_start_leaves_no_stream_open_across_refresh(fake_sd):
     assert detector.resumed == 1
 
 
+def test_partial_audio_start_close_refusal_stays_fatal_across_cleanup(fake_sd):
+    class OpenBoom(Exception):
+        pass
+
+    class CloseBoom(Exception):
+        pass
+
+    # The wake stream must use the normal constructor. Only the session input
+    # opened after the first (safe) refresh refuses its partial-start cleanup.
+    mic = WakeMic().start()
+    detector = StubDetector()
+    audio = AudioIO()
+    original_input = fake_sd.RawInputStream
+
+    def refusing_input(**kwargs):
+        stream = original_input(**kwargs)
+
+        def fail_close():
+            raise CloseBoom("native partial input refused to close")
+
+        stream.close = fail_close
+        return stream
+
+    def failing_output(**_kwargs):
+        raise OpenBoom("output device vanished")
+
+    fake_sd.RawInputStream = refusing_input
+    fake_sd.RawOutputStream = failing_output
+
+    with pytest.raises(OpenBoom):
+        echoecho.start_session_audio(mic, audio, loop=None, send_event=None)
+
+    leaked = fake_sd.open_streams[0]
+    assert audio.portaudio_close_safe is False
+    assert audio.telemetry()["portaudio_close_safe"] is False
+    assert fake_sd.refreshes == 1  # the safe wake-to-session refresh only
+
+    # This is voice_main's finally path. The original open failure must not
+    # hide close uncertainty and allow a second, process-unsafe re-init.
+    recovered = echoecho.recover_session_audio(
+        mic, audio, detector, transition_attempted=True)
+
+    assert recovered is False
+    assert leaked in fake_sd.open_streams
+    assert fake_sd.refreshes == 1
+    assert fake_sd.refresh_violations == 0
+    assert mic._stream is None
+    assert detector.resumed == 0
+
+
 def test_stream_start_failure_closes_both_streams_and_pipeline(fake_sd):
     class Boom(Exception):
         pass
@@ -283,6 +355,18 @@ def test_stream_start_failure_closes_both_streams_and_pipeline(fake_sd):
     assert fake_sd.open_streams == []
     assert audio._in_stream is None and audio._out_stream is None
     assert pipeline.closed == 1
+
+
+def test_pipeline_telemetry_describes_session_before_native_close(fake_sd):
+    pipeline = StubPipeline()
+    audio = AudioIO(pipeline=pipeline)
+    audio.start(loop=None, send_event=None)
+    audio.stop()
+    audio.stop()  # idempotent teardown must not replace the live snapshot
+
+    assert pipeline.enabled is False
+    assert audio.pipeline_telemetry() == {
+        "enabled": True, "capture_frames": 7}
 
 
 def test_initial_output_latency_is_used_before_first_render_timestamp(fake_sd,
@@ -342,6 +426,62 @@ def test_end_session_audio_survives_mic_reopen_failure(fake_sd):
     assert fake_sd.refresh_violations == 0
 
 
+def test_end_session_audio_skips_all_portaudio_recovery_after_close_failure(
+        fake_sd):
+    class Boom(Exception):
+        pass
+
+    mic = WakeMic().start()
+    mic.stop()  # ACTIVE state: wake stream is already closed.
+    detector = StubDetector()
+    audio = AudioIO()
+    audio.start(loop=None, send_event=None)
+    leaked = audio._in_stream
+
+    def fail_close():
+        raise Boom("native input refused to close")
+
+    leaked.close = fail_close
+    recovered = echoecho.end_session_audio(mic, audio, detector)
+
+    assert recovered is False
+    assert leaked in fake_sd.open_streams
+    assert fake_sd.refreshes == 0
+    assert fake_sd.refresh_violations == 0
+    assert mic._stream is None
+    assert detector.resumed == 0
+
+
+def test_wake_close_refusal_prevents_session_and_later_refresh(fake_sd):
+    class CloseBoom(Exception):
+        pass
+
+    mic = WakeMic().start()
+    leaked = mic._stream
+    detector = StubDetector()
+    audio = AudioIO()
+
+    def fail_close():
+        raise CloseBoom("native wake input refused to close")
+
+    leaked.close = fail_close
+    with pytest.raises(CloseBoom):
+        echoecho.start_session_audio(mic, audio, loop=None, send_event=None)
+
+    assert mic.portaudio_close_safe is False
+    assert mic.telemetry()["portaudio_close_safe"] is False
+    assert leaked in fake_sd.open_streams
+    assert fake_sd.refreshes == 0
+
+    recovered = echoecho.end_session_audio(mic, audio, detector)
+
+    assert recovered is False
+    assert leaked in fake_sd.open_streams
+    assert fake_sd.refreshes == 0
+    assert fake_sd.refresh_violations == 0
+    assert detector.resumed == 0
+
+
 # -- WakeMic re-resolution ------------------------------------------------------
 
 
@@ -357,6 +497,45 @@ def test_wake_mic_reopen_re_resolves_device(fake_sd, capsys):
     assert mic._stream.kwargs["device"] == 4  # re-resolved, not cached
     assert mic.read(timeout=0.01) is None     # stale chunks drained
     assert capsys.readouterr().out.count("[wake] mic: AirPods Pro") == 2
+
+
+def test_wake_mic_start_failure_closes_constructed_stream(fake_sd):
+    class Boom(Exception):
+        pass
+
+    original = fake_sd.RawInputStream
+
+    def failing_input(**kwargs):
+        stream = original(**kwargs)
+
+        def fail_start():
+            raise Boom("capture would not start")
+
+        stream.start = fail_start
+        return stream
+
+    fake_sd.RawInputStream = failing_input
+    mic = WakeMic()
+    with pytest.raises(Boom):
+        mic.start()
+    assert mic._stream is None
+    assert fake_sd.open_streams == []
+
+
+def test_wake_mic_stop_still_closes_when_stop_fails(fake_sd):
+    class Boom(Exception):
+        pass
+
+    mic = WakeMic().start()
+
+    def fail_stop():
+        raise Boom("capture stop failed")
+
+    mic._stream.stop = fail_stop
+    with pytest.raises(Boom):
+        mic.stop()
+    assert mic._stream is None
+    assert fake_sd.open_streams == []
 
 
 # -- observability: the "audio" event -----------------------------------------

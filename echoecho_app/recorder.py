@@ -22,6 +22,7 @@ Recording is observability, never load-bearing: start() and every recorder
 method swallow their own failures — a full disk must not kill the daemon.
 """
 import json
+import os
 import queue
 import threading
 import time
@@ -29,7 +30,7 @@ import wave
 from array import array
 from pathlib import Path
 
-from echoecho_app import config, events
+from echoecho_app import config, diagnostics, events
 
 RATE = 24000  # matches conversation.audio's pcm16 mono streams
 MIX_CHUNK_FRAMES = 24000  # mix session.wav 1s at a time: bounded memory
@@ -50,10 +51,12 @@ def start(mode, root=None):
         stop()  # never leak a previous recorder
         rec = SessionRecorder(mode, root=root)
         _active = rec
-        events.TEE = rec.on_event
+        events.set_tee(rec.on_event)
         print("[record] session -> %s" % rec.dir)
+        diagnostics.info("recorder.started", mode=mode)
         return rec
     except Exception as exc:
+        diagnostics.exception("recorder.start.failed", exc=exc, mode=mode)
         print("[record] disabled for this session (%s)" % exc)
         return None
 
@@ -64,11 +67,13 @@ def stop(end_reason=None):
     exception would kill the always-on daemon."""
     global _active
     rec, _active = _active, None
-    events.TEE = None
+    events.detach_tee(rec.on_event if rec is not None else None)
     if rec is not None:
         try:
             rec.close(end_reason=end_reason)
         except Exception as exc:
+            diagnostics.exception("recorder.finalize.failed", exc=exc,
+                                  mode=rec.mode)
             print("[record] finalize failed (%s) — raw files kept in %s"
                   % (exc, rec.dir))
     return rec
@@ -82,10 +87,34 @@ class SessionRecorder:
         self.started = clock()
         self.closed = False
         self.errors = 0
+        self.failure_stages = {}
         self.stalled = False  # writer thread failed to exit at close
         self.events = []  # teed event dicts: transcript + meta at close
         self.stream_status = {}  # PortAudio status flags seen, by direction
+        correlation = diagnostics.get_context()
+        self.diagnostic_run_id = diagnostics.get_run_id()
+        self.diagnostic_session_id = correlation.get("session_id")
+        self.audio_processing = None
+        self.audio_io = None
+        self.queue_high_water = 0
+        self.dropped_blocks = 0
+        self.written_blocks = 0
+        self.event_queue_high_water = 0
+        self.dropped_events = 0
+        self.event_writer_stalled = False
+        self._stats_lock = threading.Lock()
+        self._deferred_failure_stages = set()
         self._echoecho_pad_frames = 0  # device-latency shim, see set_echoecho_delay
+        raw_max_blocks = os.environ.get("ECHOECHO_RECORD_QUEUE_BLOCKS", "10000")
+        try:
+            max_blocks = max(100, min(1000000, int(raw_max_blocks)))
+        except (TypeError, ValueError):
+            max_blocks = 10000
+            diagnostics.warning(
+                "recorder.configuration_invalid",
+                setting="ECHOECHO_RECORD_QUEUE_BLOCKS",
+                value_type=type(raw_max_blocks).__name__,
+                value_length=len(str(raw_max_blocks)))
         root = config.recordings_dir() if root is None else Path(root)
         stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(self.started))
         base = "%s_%s" % (stamp, mode)
@@ -97,36 +126,104 @@ class SessionRecorder:
         self.dir.mkdir(parents=True)
         self._events_fh = open(str(self.dir / "events.jsonl"), "a",
                                encoding="utf-8")
-        self._q = queue.Queue()
+        self._event_lock = threading.Lock()
+        self._event_q = queue.Queue(maxsize=max_blocks)
+        self._q = queue.Queue(maxsize=max_blocks)
         self._wavs = {}  # track name -> wave writer (lazy: text mode has none)
         self._frames = {"mic": 0, "echoecho": 0}
         self._thread = threading.Thread(target=self._drain, daemon=True)
-        self._thread.start()
+        self._event_thread = threading.Thread(
+            target=self._drain_events, daemon=True)
+        audio_started = event_started = False
+        try:
+            self._thread.start()
+            audio_started = True
+            self._event_thread.start()
+            event_started = True
+        except BaseException:
+            if audio_started:
+                try:
+                    self._q.put_nowait(None)
+                    self._thread.join(timeout=1.0)
+                except Exception:
+                    pass
+            if event_started:
+                try:
+                    self._event_q.put_nowait(None)
+                    self._event_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+            try:
+                self._events_fh.close()
+            except Exception:
+                pass
+            raise
 
     # -- events tee (events.TEE while active) --------------------------------
 
     def on_event(self, rec, line):
-        """Mirror one already-serialized feed line into the session log."""
-        if self.closed:
-            return
-        try:
+        """Queue one feed line in order without blocking its producer."""
+        with self._event_lock:
+            if self.closed:
+                return
+            try:
+                self._event_q.put_nowait((rec, line))
+                self.event_queue_high_water = max(
+                    self.event_queue_high_water, self._event_q.qsize())
+            except queue.Full:
+                with self._stats_lock:
+                    self.dropped_events += 1
+                self._fail("event_queue_full", emit=False)
+
+    # events.emit invokes this sink while holding its sequence lock. This flag
+    # is the contract that makes that safe: on_event performs only a bounded
+    # put_nowait and never filesystem I/O.
+    on_event._echoecho_ordered_nonblocking = True
+
+    def _drain_events(self):
+        while True:
+            item = self._event_q.get()
+            if item is None:
+                return
+            rec, line = item
+            # Keep the memory review even when the per-session JSONL fails.
             self.events.append(rec)
-            self._events_fh.write(line + "\n")
-            self._events_fh.flush()  # crash-tolerant: the log always survives
-        except Exception:
-            self.errors += 1
+            try:
+                self._events_fh.write(line + "\n")
+                self._events_fh.flush()
+            except Exception as exc:
+                self._fail("event_write", exc)
 
     # -- audio taps (PortAudio callback threads) ------------------------------
 
     def write_mic(self, pcm_bytes):
         """One capture block: what echoecho heard."""
         if not self.closed:
-            self._q.put(("mic", pcm_bytes))
+            self._enqueue("mic", pcm_bytes)
 
     def write_echoecho(self, pcm_bytes):
         """One playback block: what actually reached the speaker."""
         if not self.closed:
-            self._q.put(("echoecho", pcm_bytes))
+            self._enqueue("echoecho", pcm_bytes)
+
+    def _enqueue(self, track, pcm_bytes):
+        try:
+            self._q.put_nowait((track, pcm_bytes))
+            self.queue_high_water = max(self.queue_high_water, self._q.qsize())
+        except queue.Full:
+            with self._stats_lock:
+                self.dropped_blocks += 1
+            # This is a PortAudio callback. Diagnostics write to disk, so only
+            # aggregate here and emit the final count from close().
+            self._fail("audio_queue_full", emit=False)
+
+    def note_audio_processing(self, pipeline_stats, io_stats=None):
+        """Attach aggregate DSP/I/O health to meta.json; never audio bytes."""
+        try:
+            self.audio_processing = dict(pipeline_stats or {})
+            self.audio_io = dict(io_stats or {})
+        except Exception:
+            self._fail("audio_stats")
 
     def set_echoecho_delay(self, seconds):
         """Device-latency alignment for session.wav: audio handed to the
@@ -139,7 +236,7 @@ class SessionRecorder:
             self._echoecho_pad_frames = max(0, min(int(float(seconds) * self.rate),
                                                2 * self.rate))
         except Exception:
-            self.errors += 1
+            self._fail("echoecho_delay")
 
     def note_status(self, direction, status):
         """Count a PortAudio callback status flag (overflow/underflow). An
@@ -149,7 +246,7 @@ class SessionRecorder:
         try:
             self.stream_status[direction] = self.stream_status.get(direction, 0) + 1
         except Exception:
-            self.errors += 1
+            self._fail("stream_status", emit=False)
 
     def _drain(self):
         while True:
@@ -170,26 +267,66 @@ class SessionRecorder:
                         self._frames[track] += self._echoecho_pad_frames
                 w.writeframes(data)
                 self._frames[track] += len(data) // 2
-            except Exception:
-                self.errors += 1
+                self.written_blocks += 1
+            except Exception as exc:
+                self._fail("audio_write", exc)
 
     # -- close: finalize wavs, then render the review artifacts ---------------
 
     def close(self, end_reason=None):
-        if self.closed:
-            return
-        self.closed = True
+        with self._event_lock:
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                self._event_q.put(None, timeout=0.25)
+            except queue.Full:
+                self._fail("event_queue_close_full")
+                try:
+                    discarded = self._event_q.get_nowait()
+                    if discarded is not None:
+                        with self._stats_lock:
+                            self.dropped_events += 1
+                except queue.Empty:
+                    pass
+                try:
+                    self._event_q.put_nowait(None)
+                except queue.Full:
+                    self._fail("event_writer_stop_signal")
         try:
-            self._q.put(None)
+            self._event_thread.join(timeout=10.0)
+            self.event_writer_stalled = self._event_thread.is_alive()
+            if self.event_writer_stalled:
+                self._fail("event_writer_stalled")
+        except Exception as exc:
+            self._fail("event_writer_join", exc)
+        try:
+            try:
+                # A wedged disk writer can leave the bounded queue full. Never
+                # wait indefinitely merely trying to enqueue the stop marker.
+                self._q.put(None, timeout=0.25)
+            except queue.Full:
+                self._fail("audio_queue_close_full")
+                try:
+                    discarded = self._q.get_nowait()
+                    if discarded is not None:
+                        with self._stats_lock:
+                            self.dropped_blocks += 1
+                except queue.Empty:
+                    pass
+                try:
+                    self._q.put_nowait(None)
+                except queue.Full:
+                    self._fail("writer_stop_signal")
             self._thread.join(timeout=10.0)
             self.stalled = self._thread.is_alive()
         except Exception:
-            self.errors += 1
+            self._fail("writer_join")
         if self.stalled:
             # writer stuck on a hung disk: touching its wave handles or
             # reading half-written wavs would race it. Keep the raw files,
             # skip finalize; transcript+meta below are main-thread-only.
-            self.errors += 1
+            self._fail("writer_stalled")
             print("[record] writer thread stalled — wav files left unfinalized"
                   " in %s" % self.dir)
         else:
@@ -197,23 +334,43 @@ class SessionRecorder:
                 try:
                     w.close()
                 except Exception:
-                    self.errors += 1
-        steps = (self._write_transcript, lambda: self._write_meta(end_reason)) \
-            if self.stalled else (self._write_mix, self._write_transcript,
-                                  lambda: self._write_meta(end_reason))
+                    self._fail("wav_close")
+        if self.event_writer_stalled:
+            # The writer may still append to self.events and may be blocked on
+            # this filesystem. Do not race the list or issue more review-file
+            # writes; retain whatever raw JSONL/audio reached disk.
+            steps = ()
+            print("[record] event writer stalled — review files left "
+                  "incomplete in %s" % self.dir)
+        elif self.stalled:
+            steps = (self._write_transcript,
+                     lambda: self._write_meta(end_reason))
+        else:
+            steps = (self._write_mix, self._write_transcript,
+                     lambda: self._write_meta(end_reason))
         for step in steps:
             try:
                 step()
+            except Exception as exc:
+                self._fail(getattr(step, "__name__", "finalize_step"), exc)
+        if not self.event_writer_stalled:
+            try:
+                self._events_fh.close()
             except Exception:
-                self.errors += 1
-        try:
-            self._events_fh.close()
-        except Exception:
-            pass
+                self._fail("events_close")
+        self._flush_deferred_failures()
         secs = max(self._frames["mic"], self._frames["echoecho"]) / float(self.rate)
         audio = ", %.0fs audio" % secs if secs else ""
         print("[record] saved %s (%d events%s)"
               % (self.dir, len(self.events), audio))
+        diagnostics.info(
+            "recorder.finished", mode=self.mode, event_count=len(self.events),
+            duration_s=round(secs, 1), write_errors=self.errors,
+            dropped_blocks=self.dropped_blocks,
+            queue_high_water=self.queue_high_water,
+            dropped_events=self.dropped_events,
+            event_queue_high_water=self.event_queue_high_water,
+            event_writer_stalled=self.event_writer_stalled)
 
     def _write_mix(self):
         """session.wav: stereo review mix, left = mic (you), right = echoecho.
@@ -275,7 +432,25 @@ class SessionRecorder:
                            if ev.get("type") == "tool_call"],
             "event_counts": counts,
             "write_errors": self.errors,
+            "write_error_stages": dict(self.failure_stages),
+            "diagnostic_run_id": self.diagnostic_run_id,
+            "diagnostic_session_id": self.diagnostic_session_id,
+            "audio_queue": {
+                "high_water_blocks": self.queue_high_water,
+                "dropped_blocks": self.dropped_blocks,
+                "written_blocks": self.written_blocks,
+            },
+            "event_queue": {
+                "high_water_events": self.event_queue_high_water,
+                "dropped_events": self.dropped_events,
+                "writer_stalled": self.event_writer_stalled,
+            },
+            "event_feed": events.stats(),
         }
+        if self.audio_processing is not None:
+            meta["audio_processing"] = self.audio_processing
+        if self.audio_io is not None:
+            meta["audio_io"] = self.audio_io
         if self._echoecho_pad_frames:
             meta["echoecho_delay_s"] = round(self._echoecho_pad_frames / float(self.rate), 3)
         if self.stream_status:  # overflows/underflows: track alignment suspect
@@ -284,6 +459,33 @@ class SessionRecorder:
             meta["writer_stalled"] = True
         (self.dir / "meta.json").write_text(
             json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
+
+    def _fail(self, stage, exc=None, emit=True):
+        with self._stats_lock:
+            self.errors += 1
+            self.failure_stages[stage] = self.failure_stages.get(stage, 0) + 1
+            count = self.failure_stages[stage]
+            if not emit:
+                self._deferred_failure_stages.add(stage)
+                return
+        if count == 1 or count & (count - 1) == 0:
+            fields = {"stage": stage, "count": count, "mode": self.mode}
+            if exc is None:
+                diagnostics.warning("recorder.write.failed", **fields)
+            else:
+                diagnostics.exception("recorder.write.failed", exc=exc,
+                                      **fields)
+
+    def _flush_deferred_failures(self):
+        with self._stats_lock:
+            pending = sorted(self._deferred_failure_stages)
+            self._deferred_failure_stages.clear()
+            counts = {stage: self.failure_stages.get(stage, 0)
+                      for stage in pending}
+        for stage, count in counts.items():
+            diagnostics.warning(
+                "recorder.write.failed", stage=stage, count=count,
+                mode=self.mode, deferred_from_realtime_callback=True)
 
     # -- meta helpers ----------------------------------------------------------
 

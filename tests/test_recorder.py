@@ -8,6 +8,9 @@ the real amain() wiring end to end.
 import asyncio
 import json
 import os
+import queue
+import threading
+import time
 import wave
 from array import array
 
@@ -28,6 +31,7 @@ def rec_env(tmp_path, monkeypatch):
     monkeypatch.delenv("ECHOECHO_RECORD", raising=False)
     yield tmp_path / "rec"
     recorder.stop()
+    events.reset(mode="test", run_id=None)
 
 
 def read_wav(path):
@@ -76,16 +80,84 @@ def test_start_tees_events_and_still_feeds_the_viewer(rec_env, capsys):
     # the viewer's live feed keeps working unchanged
     feed = (config.WORKSPACE_DIR / events.FEED_NAME).read_text()
     assert "add milk" in feed
-    # ...and the session gets its own durable copy
+    recorder.stop(end_reason="end_phrase")
+    # ...and the ordered writer drains a durable session copy at close.
     lines = (rec.dir / "events.jsonl").read_text().splitlines()
     assert [json.loads(ln)["type"] for ln in lines] == ["wake", "user_text"]
-    recorder.stop(end_reason="end_phrase")
     assert recorder.active() is None
     assert events.TEE is None
     events.emit("user_text", text="after close")  # must not raise or leak in
     assert "after close" not in (rec.dir / "events.jsonl").read_text()
     out = capsys.readouterr().out
     assert "[record] session -> " in out and "[record] saved " in out
+
+
+def test_recording_tee_serializes_concurrent_events_in_feed_order(rec_env):
+    events.reset(mode="test", run_id="run-recording-order")
+    rec = recorder.start("voice")
+    threads = [threading.Thread(
+        target=events.emit, args=("concurrent",), kwargs={"worker": index})
+               for index in range(80)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    recorder.stop(end_reason="test")
+
+    recorded = [json.loads(line) for line in
+                (rec.dir / "events.jsonl").read_text().splitlines()]
+    assert [item["seq"] for item in recorded] == list(range(2, 82))
+    assert [item["seq"] for item in rec.events] == list(range(2, 82))
+
+
+def test_stop_boundary_cannot_strand_an_event_behind_the_writer_sentinel(
+        rec_env):
+    rec = recorder.start("voice")
+    rec._event_lock.acquire()
+    emitter = threading.Thread(
+        target=events.emit, args=("boundary",), kwargs={"value": 1})
+    stopper = threading.Thread(
+        target=recorder.stop, kwargs={"end_reason": "test"})
+    try:
+        emitter.start()
+        feed = config.WORKSPACE_DIR / events.FEED_NAME
+        deadline = time.monotonic() + 2
+        while (not feed.exists() or '"boundary"' not in feed.read_text()) \
+                and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert feed.exists() and '"boundary"' in feed.read_text()
+        stopper.start()
+        time.sleep(0.05)
+        assert stopper.is_alive()
+    finally:
+        rec._event_lock.release()
+    emitter.join(timeout=2)
+    stopper.join(timeout=2)
+
+    assert not emitter.is_alive() and not stopper.is_alive()
+    recorded = [json.loads(line) for line in
+                (rec.dir / "events.jsonl").read_text().splitlines()]
+    assert [item["type"] for item in recorded] == ["boundary"]
+
+
+def test_constructor_rolls_back_first_writer_if_second_thread_start_fails(
+        rec_env, monkeypatch):
+    real_start = threading.Thread.start
+    started = []
+
+    def fail_second(thread):
+        if not started:
+            real_start(thread)
+            started.append(thread)
+            return
+        raise RuntimeError("event writer would not start")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_second)
+    with pytest.raises(RuntimeError, match="would not start"):
+        recorder.SessionRecorder("voice", root=rec_env)
+
+    assert len(started) == 1
+    assert not started[0].is_alive()
 
 
 def test_stop_writes_transcript_and_meta(rec_env):
@@ -210,8 +282,8 @@ def test_recording_failures_never_reach_the_app(rec_env):
     rec = recorder.start("voice")
     rec._events_fh.close()  # simulate the disk going away mid-session
     events.emit("user_text", text="still fine")  # must not raise
-    assert rec.errors >= 1
     recorder.stop(end_reason="end_phrase")  # close of a broken recorder: fine
+    assert rec.errors >= 1
     meta = json.loads((rec.dir / "meta.json").read_text())
     assert meta["write_errors"] >= 1
     # the event still made the transcript (memory copy) and the live feed
@@ -227,6 +299,16 @@ def test_start_failure_disables_recording_politely(rec_env, monkeypatch, capsys)
     assert recorder.active() is None and events.TEE is None
     assert "[record] disabled for this session" in capsys.readouterr().out
     events.emit("user_text", text="app still works")  # tee-less emit is fine
+
+
+def test_invalid_queue_setting_falls_back_before_filesystem_side_effects(
+        rec_env, monkeypatch):
+    monkeypatch.setenv("ECHOECHO_RECORD_QUEUE_BLOCKS", "not-a-number")
+    rec = recorder.start("voice")
+    assert rec is not None
+    assert rec._q.maxsize == 10000
+    recorder.stop(end_reason="test")
+    assert len(session_dirs(rec_env)) == 1
 
 
 class StuckThread(object):
@@ -252,6 +334,52 @@ def test_close_survives_a_stalled_writer_thread(rec_env, capsys):
     # the review sheet still exists; wavs are left as-is (never touched live)
     assert "you:** hi" in (rec.dir / "transcript.md").read_text()
     assert not (rec.dir / "session.wav").exists()
+
+
+def test_close_does_not_race_review_files_with_stalled_event_writer(
+        rec_env, capsys):
+    rec = recorder.SessionRecorder("voice", root=rec_env)
+    rec._event_q.put(None)
+    rec._event_thread.join(timeout=1.0)
+    rec._event_q = queue.Queue()
+    rec._event_thread = StuckThread()
+    rec.on_event({"ts": time.time(), "type": "user_text"},
+                 '{"type":"user_text"}')
+
+    rec.close(end_reason="test")
+
+    assert rec.event_writer_stalled is True
+    assert not (rec.dir / "transcript.md").exists()
+    assert not (rec.dir / "meta.json").exists()
+    assert "event writer stalled" in capsys.readouterr().out
+    rec._events_fh.close()
+
+
+def test_full_audio_queue_cannot_block_close_or_log_from_callback(
+        rec_env, monkeypatch):
+    rec = recorder.SessionRecorder("voice", root=rec_env)
+    # Retire the real drain thread, then model a writer wedged while a bounded
+    # callback queue is full.
+    rec._q.put(None)
+    rec._thread.join(timeout=1.0)
+    rec._q = queue.Queue(maxsize=1)
+    rec._q.put(("mic", b"\x00\x00"))
+    rec._thread = StuckThread()
+
+    warnings = []
+    monkeypatch.setattr(
+        recorder.diagnostics, "warning",
+        lambda event, **fields: warnings.append((event, fields)))
+    rec._enqueue("mic", b"\x01\x00")
+    assert warnings == []  # PortAudio callback path remains memory-only.
+
+    started = time.monotonic()
+    rec.close(end_reason="test")
+    assert time.monotonic() - started < 1.0
+    assert rec.dropped_blocks >= 2
+    assert any(fields.get("deferred_from_realtime_callback")
+               for event, fields in warnings
+               if event == "recorder.write.failed")
 
 
 def test_stop_swallows_close_failures(rec_env, monkeypatch, capsys):

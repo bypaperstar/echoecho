@@ -140,6 +140,53 @@ def test_parse_op_line():
     assert docmod.parse_op_line("   ") is None
 
 
+def test_audio_liveness_sampling_is_cadenced_and_odd_pcm_is_safe():
+    from livewriter.server import Session
+
+    class Asr:
+        def __init__(self):
+            self.received = []
+
+        def feed_audio(self, value):
+            self.received.append(value)
+
+    session = Session.__new__(Session)
+    session.audio_bytes = 0
+    session.audio_chunks = 0
+    session.audio_peak = 0
+    session.malformed_audio_chunks = 0
+    session.peak_sample_failures = 0
+    session.asr = Asr()
+    for _ in range(31):
+        session._on_audio_message(b"\xff\x7f")
+    assert session.audio_peak == 0
+    session._on_audio_message(b"\xff\x7f\x01")
+
+    assert session.audio_chunks == 32
+    assert session.audio_peak == 32767
+    assert session.malformed_audio_chunks == 1
+    assert session.peak_sample_failures == 0
+    assert session.asr.received[-1] == b"\xff\x7f"
+
+
+def test_asr_protocol_warnings_are_power_of_two_sampled(monkeypatch):
+    import collections
+
+    from echoecho_app import diagnostics
+    from livewriter.asr import Transcriber
+
+    emitted = []
+    monkeypatch.setattr(
+        diagnostics, "warning",
+        lambda event, **fields: emitted.append((event, fields)))
+    transcriber = Transcriber.__new__(Transcriber)
+    transcriber._protocol_errors = collections.Counter()
+    for _ in range(9):
+        transcriber._protocol_issue("invalid_json", error_type="ValueError")
+    assert [fields["occurrences"] for _event, fields in emitted] == [1, 2, 3, 4, 8]
+    assert transcriber._protocol_errors["invalid_json"] == 9
+
+
 # -- segmenter ----------------------------------------------------------------
 
 class SegHarness(object):
@@ -221,6 +268,221 @@ def test_segmenter_runon_emits_at_max_words():
     for w in words.split():
         h.seg.feed(" " + w, 0.0)
     assert len(h.utts) >= 1
+
+
+def test_livewriter_sigterm_backstop_stays_armed_through_shutdown(monkeypatch):
+    import threading
+
+    from livewriter import __main__ as livewriter_main
+
+    cancel = threading.Event()
+    previous_handler = object()
+    restored = []
+    shutdowns = []
+
+    async def fake_serve(**_kwargs):
+        return None
+
+    def fake_signal(_signum, handler):
+        if handler is previous_handler:
+            restored.append(True)
+
+    def fake_shutdown(**fields):
+        assert restored
+        assert not cancel.is_set()
+        shutdowns.append(fields)
+
+    monkeypatch.delenv("LIVEWRITER_PORT", raising=False)
+    monkeypatch.setattr(livewriter_main, "load_env_local", lambda: None)
+    monkeypatch.setattr(livewriter_main.server, "serve", fake_serve)
+    monkeypatch.setattr(livewriter_main.signal, "getsignal",
+                        lambda _signum: previous_handler)
+    monkeypatch.setattr(livewriter_main.signal, "signal", fake_signal)
+    monkeypatch.setattr(livewriter_main.threading, "Event", lambda: cancel)
+    monkeypatch.setattr(livewriter_main.diagnostics, "configure", lambda *a, **kw: None)
+    monkeypatch.setattr(livewriter_main.diagnostics, "info", lambda *a, **kw: None)
+    monkeypatch.setattr(livewriter_main.diagnostics, "shutdown", fake_shutdown)
+
+    assert livewriter_main.main(["--fake"]) == 0
+    assert shutdowns == [{"outcome": "ok"}]
+    assert cancel.is_set()
+
+
+def test_session_cleanup_closes_producers_before_final_task_sweep(monkeypatch):
+    from contextlib import nullcontext
+
+    from livewriter import server
+
+    order = []
+    created_tasks = []
+    session_end = []
+    original_create_task = asyncio.create_task
+
+    def tracked_create_task(coro, *, name=None, context=None):
+        created_tasks.append(name)
+        if context is None:
+            return original_create_task(coro, name=name)
+        return original_create_task(coro, name=name, context=context)
+
+    class FakeLog:
+        failures = {}
+
+        def emit(self, **fields):
+            if fields.get("type") == "session_end":
+                session_end.append(fields)
+
+        def snapshot_doc(self, _markdown):
+            order.append("snapshot")
+
+        def close(self):
+            order.append("log_close")
+
+    class FakeDoc:
+        def to_markdown(self):
+            return ""
+
+    class FakeAsr:
+        model = "fake-asr"
+
+        def start(self):
+            order.append("asr_start")
+
+        async def close(self):
+            order.append("asr_close")
+            session._post({"type": "status"})
+            raise RuntimeError("asr cleanup failed")
+
+    class FakeFormatter:
+        model = "fake-formatter"
+        calls = 0
+        dropped_ops = 0
+
+        def start(self):
+            order.append("formatter_start")
+
+        async def close(self):
+            order.append("formatter_close")
+            session._post({"type": "think"})
+
+            async def late_cleanup():
+                order.append("late_task_start")
+                try:
+                    await asyncio.Future()
+                finally:
+                    order.append("late_task_done")
+
+            task = asyncio.create_task(
+                late_cleanup(), name="livewriter-close-callback")
+            session._tasks.append(task)
+            while "late_task_start" not in order:
+                await asyncio.sleep(0)
+
+    session = server.Session.__new__(server.Session)
+    session.session_id = "test-session"
+    session.cfg = {"fake": False}
+    session.log = FakeLog()
+    session.doc = FakeDoc()
+    session.asr = FakeAsr()
+    session.fmt = FakeFormatter()
+    session.reviewer = None
+    session._tasks = []
+    session._closing = False
+    session.audio_bytes = 0
+    session.audio_chunks = 0
+    session.audio_peak = 0
+    session.malformed_audio_chunks = 0
+    session.peak_sample_failures = 0
+    session.protocol_errors = 0
+    session.unknown_messages = 0
+    session.send_failures = 0
+
+    async def ticker():
+        order.append("ticker_start")
+        try:
+            await asyncio.Future()
+        finally:
+            order.append("ticker_done")
+
+    async def recv_all():
+        while "ticker_start" not in order:
+            await asyncio.sleep(0)
+
+    session._ticker = ticker
+    session._recv_all = recv_all
+
+    def record_exception(event, **fields):
+        if event == "livewriter.session.cleanup_failed":
+            order.append("diagnostic_%s" % fields["stage"])
+
+    monkeypatch.setattr(server.asyncio, "create_task", tracked_create_task)
+    monkeypatch.setattr(server.diagnostics, "context",
+                        lambda **_fields: nullcontext())
+    monkeypatch.setattr(server.diagnostics, "info", lambda *a, **kw: None)
+    monkeypatch.setattr(server.diagnostics, "exception", record_exception)
+
+    asyncio.run(session.run())
+
+    assert created_tasks == [
+        "livewriter-ticker", "livewriter-close-callback"]
+    assert order.index("ticker_done") < order.index("asr_close")
+    assert order.index("asr_close") < order.index("formatter_close")
+    assert order.index("formatter_close") < order.index("late_task_done")
+    assert order.index("late_task_done") < order.index("diagnostic_asr")
+    assert session._closing is True
+    assert session._tasks == []
+    assert session_end[0]["cleanup_errors"] == 1
+
+
+def test_session_never_schedules_review_after_teardown_starts(monkeypatch):
+    from livewriter import server
+
+    session = server.Session.__new__(server.Session)
+    session._closing = True
+    session.reviewer = object()
+    session._review_task = None
+
+    def unexpected_loop_access():
+        pytest.fail("review scheduling reached the event loop during teardown")
+
+    monkeypatch.setattr(server.asyncio, "get_event_loop",
+                        unexpected_loop_access)
+    session._maybe_review()
+    assert session._review_task is None
+
+
+def test_fake_formatter_close_cancels_and_joins_owned_tasks():
+    from livewriter.formatter import FakeFormatter
+
+    class FakeDoc:
+        def apply(self, op):
+            return {"op": "new", "id": 1, "kind": op["kind"],
+                    "md": op["md"]}
+
+    async def exercise():
+        send_started = asyncio.Event()
+
+        async def blocked_send(_op, _gen, _utt_id):
+            send_started.set()
+            await asyncio.Future()
+
+        formatter = FakeFormatter(FakeDoc(), blocked_send)
+        formatter.start()
+        formatter.submit(1, "a pending paragraph", 0.0)
+        await send_started.wait()
+        owned = list(formatter._tasks)
+        assert len(owned) == 1 and not owned[0].done()
+
+        await formatter.close()
+
+        assert owned[0].done()
+        assert formatter._tasks == set()
+        assert formatter._closing is True
+        formatter.submit(2, "must not restart after close", 0.0)
+        await asyncio.sleep(0)
+        assert formatter._tasks == set()
+        assert formatter._submitted == 1
+
+    asyncio.run(exercise())
 
 
 # -- fake e2e through the real server ------------------------------------------

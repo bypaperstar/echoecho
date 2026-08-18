@@ -18,6 +18,7 @@ the I/O contract around it:
 ``livekit`` is imported lazily so text mode and headless imports do not depend
 on the Mac audio requirements.
 """
+import hashlib
 import math
 import threading
 import time
@@ -30,6 +31,17 @@ def _rms(pcm_bytes):
     if not pcm_bytes or len(pcm_bytes) % 2:
         return 0.0
     return float(audioop.rms(pcm_bytes, 2))
+
+
+def _failure_metadata(exc):
+    """Return stable operational metadata without retaining exception text."""
+    try:
+        message = str(exc)
+    except Exception:
+        message = "<unprintable>"
+    return (type(exc).__name__, hashlib.sha256(
+        (type(exc).__name__ + "\0" + message).encode("utf-8", "replace")
+    ).hexdigest()[:16])
 
 
 class AudioPipeline:
@@ -80,6 +92,7 @@ class AudioPipeline:
         self._near_speech_until = 0.0
         self._capture_has_near_speech = False
         self._disabled_reason = None
+        self._disabled_fingerprint = None
         self._errors = 0
         self._malformed = 0
         self._render_frames = 0
@@ -109,7 +122,8 @@ class AudioPipeline:
         except Exception as exc:
             self._apm = None
             self._AudioFrame = None
-            self._disabled_reason = str(exc) or exc.__class__.__name__
+            self._disabled_reason, self._disabled_fingerprint = \
+                _failure_metadata(exc)
 
     @property
     def enabled(self):
@@ -133,6 +147,7 @@ class AudioPipeline:
             return {
                 "enabled": enabled,
                 "disabled_reason": self._disabled_reason,
+                "disabled_fingerprint": self._disabled_fingerprint,
                 "render_frames": self._render_frames,
                 "capture_frames": self._capture_frames,
                 "gated_frames": self._gated_frames,
@@ -346,7 +361,8 @@ class AudioPipeline:
         apm, self._apm = self._apm, None
         with self._state_lock:
             self._errors += 1
-            self._disabled_reason = str(exc) or exc.__class__.__name__
+            self._disabled_reason, self._disabled_fingerprint = \
+                _failure_metadata(exc)
         self._dispose(apm)
 
     def close(self):

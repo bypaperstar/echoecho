@@ -23,7 +23,7 @@ import shutil
 import time
 from pathlib import Path
 
-from echoecho_app import config
+from echoecho_app import config, diagnostics
 from echoecho_app.bus import TaskResult
 from echoecho_app.services import artifacts
 from echoecho_app.workers.base import register
@@ -113,7 +113,10 @@ def _write_over(target, staged_path):
                                   "description": "which staged batch to apply"}},
           advertise_when=_has_user_docs)
 async def run_apply(task, ctx):
+    started = time.monotonic()
     if not _has_user_docs():
+        diagnostics.warning("outbox.apply.unavailable",
+                            reason="no shared folders")
         return TaskResult(
             say="There are no shared folders set up, so there's nothing I can "
                 "save back. You can point echoecho at a folder to enable this.",
@@ -121,6 +124,7 @@ async def run_apply(task, ctx):
 
     task_dir = _pick_task_dir(ctx.workspace, task.request.args)
     if task_dir is None:
+        diagnostics.info("outbox.apply.empty")
         return TaskResult(say="I don't have any staged changes to apply.",
                           data={"error": "no staged changes"})
 
@@ -129,6 +133,7 @@ async def run_apply(task, ctx):
     try:
         entries = json.loads(manifest_raw) if manifest_raw else []
     except ValueError:
+        diagnostics.warning("outbox.apply.manifest_invalid")
         return TaskResult(say="The staged changes are unreadable — I won't "
                               "touch your documents.",
                           data={"error": "bad manifest"})
@@ -177,6 +182,8 @@ async def run_apply(task, ctx):
             bak = _backup(target, stamp)  # true original, once, non-clobbering
             _write_over(target, staged_path)
         except OSError as exc:  # permission, ENOSPC, ...: skip, never abort
+            diagnostics.warning("outbox.apply.entry_failed",
+                                error_type=exc.__class__.__name__)
             failed.append("%s (%s)" % (target.name, exc))
             continue
         applied.append(target.name)
@@ -184,6 +191,12 @@ async def run_apply(task, ctx):
             backups.append(bak.name)
 
     skipped = len(refused) + len(unusable) + len(failed)
+    diagnostics.info(
+        "outbox.apply.finished", planned_count=len(planned),
+        applied_count=len(applied), backup_count=len(backups),
+        refused_count=len(refused), unusable_count=len(unusable),
+        failed_count=len(failed),
+        duration_ms=round((time.monotonic() - started) * 1000, 1))
     if not applied:
         reason = "nothing usable to apply" if not (refused or failed) \
             else "none could be applied safely"

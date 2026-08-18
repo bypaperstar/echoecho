@@ -159,6 +159,22 @@ def test_injection_gate_closed_outside_active():
     assert s.can_inject() is False  # ENDING
 
 
+def test_injection_timing_is_best_effort_when_custom_clock_fails():
+    s, _, _, _ = make()
+    s.wake()
+    s.note_assistant_response_done()
+
+    def broken_clock():
+        raise RuntimeError("clock unavailable")
+
+    s.clock = broken_clock
+    injection = Injection(text="x")
+    s.queue_injection(injection)
+    assert s.pending_injections == [injection]
+    assert s.drain_injections() == [injection]
+    assert s.pending_injections == []
+
+
 def test_silence_timeout_env_default(monkeypatch):
     monkeypatch.setenv("ECHOECHO_SILENCE_TIMEOUT", "5")
     s = Session()

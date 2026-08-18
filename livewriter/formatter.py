@@ -18,6 +18,8 @@ import os
 import re
 import time
 
+from echoecho_app import diagnostics
+
 from . import doc as docmod
 
 DEFAULT_MODEL = "gpt-5.4-mini"
@@ -129,6 +131,8 @@ class Formatter(object):
         self._effort = os.environ.get("LIVEWRITER_EFFORT", "")  # '' = auto
         self.calls = 0
         self.dropped_ops = 0
+        self.queue_high_water = 0
+        self._started = time.monotonic()
 
     def start(self):
         self._task = asyncio.get_event_loop().create_task(self._worker())
@@ -137,15 +141,31 @@ class Formatter(object):
     async def close(self):
         if self._task is not None:
             self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        diagnostics.info(
+            "livewriter.formatter.finished", model=self.model,
+            duration_ms=round((time.monotonic() - self._started) * 1000, 1),
+            calls=self.calls, dropped_ops=self.dropped_ops,
+            queue_high_water=self.queue_high_water,
+            pending_count=len(self._queue))
 
     def submit(self, utt_id, text, t_heard):
         self._queue.append((utt_id, text, t_heard))
+        self.queue_high_water = max(self.queue_high_water, len(self._queue))
+        diagnostics.info("livewriter.formatter.queued",
+                         queue_depth=len(self._queue),
+                         queue_high_water=self.queue_high_water,
+                         utterance_age_ms=round(
+                             max(0.0, time.monotonic() - t_heard) * 1000, 1))
         self._wake.set()
 
     def halt(self):
         """The stop word / stop button: discard queued + in-flight work."""
         self.gen += 1
+        dropped = len(self._queue)
         self._queue = []
+        diagnostics.info("livewriter.formatter.halted",
+                         generation=self.gen, dropped_utterances=dropped)
         return self.gen
 
     # -- internals ----------------------------------------------------------
@@ -164,6 +184,9 @@ class Formatter(object):
                     raise
                 except Exception as e:
                     self.log(type="fmt_error", error=str(e)[:300])
+                    diagnostics.exception("livewriter.formatter.batch_failed",
+                                          exc=e, model=self.model,
+                                          batch_size=len(batch))
                     if self.gen == gen:
                         try:
                             await self.send_op({"op": "chip", "text": "formatter hiccup — retrying"}, gen, batch[-1][0])
@@ -212,6 +235,10 @@ class Formatter(object):
         utt_id = batch[-1][0]
         t0 = time.monotonic()
         self.calls += 1
+        diagnostics.info(
+            "livewriter.formatter.request_started", model=self.model,
+            batch_size=len(batch), input_chars=len(new_speech),
+            queue_depth=len(self._queue), generation=gen)
         self.log(type="fmt_call", utt=utt_id, batch=len(batch), text=new_speech[:400])
         stream = await self._create_stream(prompt)
         buf = ""
@@ -240,6 +267,12 @@ class Formatter(object):
         self.log(type="fmt_done", utt=utt_id, ops=n_ops,
                  ttfop_ms=int(((first_op_t or time.monotonic()) - t0) * 1000),
                  total_ms=int((time.monotonic() - t0) * 1000))
+        diagnostics.info(
+            "livewriter.formatter.request_finished", model=self.model,
+            batch_size=len(batch), ops=n_ops,
+            ttfo_ms=round(((first_op_t or time.monotonic()) - t0) * 1000, 1),
+            duration_ms=round((time.monotonic() - t0) * 1000, 1),
+            dropped_ops=self.dropped_ops, generation=gen)
 
     async def _handle_line(self, raw, gen, utt_id):
         op = docmod.parse_op_line(raw)
@@ -300,6 +333,10 @@ class Formatter(object):
                 return stream
             except Exception as e:
                 last_err = e
+                diagnostics.warning(
+                    "livewriter.formatter.effort_rejected",
+                    model=self.model, effort=eff or "default",
+                    error_type=e.__class__.__name__)
                 if "not supported" not in str(e) and "Unsupported" not in str(e):
                     raise
         raise last_err
@@ -358,6 +395,9 @@ class Reviewer(object):
             self._client = AsyncOpenAI(api_key=self.api_key)
         self.passes += 1
         t0 = time.monotonic()
+        diagnostics.info(
+            "livewriter.reviewer.request_started", model=self.model,
+            utterance_count=len(transcript_lines), generation=gen0)
         kwargs = dict(model=self.model, instructions=REVIEW_SYSTEM, input=prompt,
                       max_output_tokens=2000)
         if self.model.startswith("gpt-5"):
@@ -366,6 +406,9 @@ class Reviewer(object):
         text = (resp.output_text or "").strip()
         if gen_of() != gen0 or utt_count_of() != count0:
             self.log(type="review_stale")
+            diagnostics.info("livewriter.reviewer.stale",
+                             duration_ms=round(
+                                 (time.monotonic() - t0) * 1000, 1))
             return 0
         n = 0
         for raw in text.split("\n"):
@@ -388,6 +431,10 @@ class Reviewer(object):
             except Exception:
                 pass
         self.log(type="review_done", ops=n, ms=int((time.monotonic() - t0) * 1000))
+        diagnostics.info(
+            "livewriter.reviewer.request_finished", model=self.model,
+            ops=n, duration_ms=round(
+                (time.monotonic() - t0) * 1000, 1), total_fixes=self.fixes)
         return n
 
 
@@ -407,19 +454,42 @@ class FakeFormatter(object):
         self._last_line = None
         self.calls = 0
         self.dropped_ops = 0
+        self._tasks = set()
+        self._closing = False
+        self._submitted = 0
+        self._started = time.monotonic()
 
     def start(self):
+        self._closing = False
         return None
 
     async def close(self):
-        return None
+        self._closing = True
+        tasks = list(self._tasks)
+        pending = sum(not task.done() for task in tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        diagnostics.info(
+            "livewriter.fake_formatter.finished",
+            duration_ms=round((time.monotonic() - self._started) * 1000, 1),
+            calls=self.calls, dropped_ops=self.dropped_ops,
+            submitted_count=self._submitted, cancelled_count=pending)
 
     def halt(self):
         self.gen += 1
         return self.gen
 
     def submit(self, utt_id, text, t_heard):
-        asyncio.get_event_loop().create_task(self._run(utt_id, text))
+        if self._closing:
+            return
+        self._submitted += 1
+        task = asyncio.create_task(
+            self._run(utt_id, text), name="livewriter-fake-formatter")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def _run(self, utt_id, text):
         gen = self.gen
