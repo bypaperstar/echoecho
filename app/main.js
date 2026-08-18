@@ -40,6 +40,11 @@ function loadRuntimeConfig() {
       const line = execSync('git log -1 "--format=%h %cI"', { cwd: repoRoot }).toString().trim().split(' ');
       cfg.sha = line[0];
       cfg.updatedAt = line[1];
+      // VERSION holds MAJOR.MINOR; the patch is the commit count, so every
+      // deploy of new code shows a new number. A full semver in VERSION wins.
+      if (cfg.version && cfg.version.split('.').length < 3) {
+        cfg.version += '.' + execSync('git rev-list --count HEAD', { cwd: repoRoot }).toString().trim();
+      }
     } catch { /* not a git checkout: version alone still shows */ }
     return cfg;
   }
