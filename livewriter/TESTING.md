@@ -107,7 +107,7 @@ stress (dense figures, a temperature correction, a retraction command) and
 caught real misses: correction not applied, retracted value kept, "no wind"
 invented, label dropped. Ran pre-it7/9 fixes; kept as the hard fixture.
 
-### 9 — team_update stability ×3 + the destructive-op guard
+### 9a — team_update stability ×3 + the destructive-op guard
 Runs 1-2 (pre-guard): Diana lost again — the trace showed the model, on
 hearing the lead-in "One more thing", emitting `delete` on the list item
 holding Diana and re-creating "One more thing" as a fresh line. A prompt
@@ -119,3 +119,58 @@ dangling "- " bullets), mirrored in the page. Stopped utterances are kept in
 the writer's context marked "(stopped)" so "scratch that last part" has its
 antecedent; prose register hardened (no bold, no invented headings, near-
 verbatim).
+
+### 10 — release-candidate: scripted ×2 + 4 fresh generative + the Mac
+Scripted: 45/50 and 47/50 — team_update hit **11/11 with judge PASS** (the
+guard holds; Diana survives). Fresh generative wave (sports recap, sea poem,
+support case, Kyoto itinerary): 39/42 objective checks but harsh judge
+verdicts exposing a new command class — mid-flow writing directives ("start
+with the big moment:", "end with a couplet:") transcribed as prose — plus
+deferred-fragment words being dropped ("Nobody had ever" vanished) and a
+new-sentence merge that ate "The lighthouse keeper found the letter".
+Meanwhile on the real Mac: WS-mode playtest passed 5/5 first try, but the
+browser fake-mic recorded pure silence — server-side peak metering
+(audio_peak=0 with 3.2 MB streamed) pinned it to a macOS Chrome quirk: fake
+audio capture needs the audio service in-process
+(--disable-features=AudioServiceOutOfProcess,AudioServiceSandbox). With the
+flag: full demo recorded on the Mac — mic-piped dictation, live ASR,
+formatter, typewriter — video+audio muxed to
+livewriter-results/live-writer-demo-mac.mp4.
+**Changes:** directive-execution + deferred-words + no-merge rules; harness
+settle outlasts the editor pass (its fixes never landed in test runs
+before); recorder gets the macOS audio-service flags and a --loop option.
+
+### 11-12 — post-fix verification (scripted + all 8 generated scenarios)
+Scripted: every judge verdict PASS (brainstorm 10/10/10). Generated rerun
+found one systematic op bug: models write `find` WITH markdown
+("dissolved oxygen **5.2**") though matching is plain-text — a retraction
+and two editor repairs all silently dropped on it (while a chip claimed
+success). Also: dictating "subject: X" in an email should write a Subject
+line; and the judge's "invented 'no wind'" turned out to be the ASR
+mishearing "no wait" — an end-to-end limitation, not a writer bug (the
+72→71 correction still applied).
+**Changes:** doc.replace retries with markdown-stripped find (unit-tested);
+subject-line rule; editor restructures inline enumerations of 3+ items;
+abrupt-disconnect teardown quieted.
+
+### 13-14 — final validation
+Scripted suite: **50/50 objective checks, all 6 judge verdicts PASS**
+(40_brainstorm 10/10/10; the rest 8-10 fidelity with style-polish notes).
+Pipeline speed: utterance close → first ink p50 0.72-1.17 s; the ghost tail
+covers the wait word-by-word. All 8 generated scenarios: 75/86 objective
+checks; remaining judge failures are mostly end-to-end ASR effects (proper
+nouns normalized — "Trevor Lane"→"Trevor Lawrence" —, spelled codes) and
+date-format-brittle early fixtures, plus occasional dropped/padded details
+under dense dictation — the editor pass now also deletes unspoken content.
+
+## Known limitations (honest list for the demo)
+
+- ASR mishearings pass through: rare word substitutions ("no wait"→"no
+  wind"), famous-name normalization, spelled codes/IDs. The writer is only
+  as faithful as what it hears.
+- Long utterances mean the first words of a sentence wait for the sentence
+  to close before inking (p50 heard→ink 3-5 s); the gray ghost shows them
+  live within ~0.5 s, which is what makes it feel instant.
+- Register nuances (separate Ingredients vs Steps sections, numbered vs
+  bulleted lists) land ~80% of the time; the judge's style notes track the
+  gap.

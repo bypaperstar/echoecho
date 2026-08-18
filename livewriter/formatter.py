@@ -45,7 +45,7 @@ RULES
 - SPOKEN COMMANDS are instructions, never content: "scratch that" (delete what you just wrote — including any lead-in left dangling, e.g. an orphaned "One more thing."), "new paragraph", "make that a list" (restructure your last text into li lines), "change X to Y", "heading ...", "quote ...", "bold X", "just say X" / "make it say X" (write X, nothing else). Meta asides ("hang on", "let's draft an email to Z") set intent — never appear in the document.
 - Any instruction about HOW to write is also a command, even mid-flow: "start with the big moment:", "close with one line:", "end with a couplet:", "keep it short", "make the heading say X". Execute the instruction on the content that follows; the directive words themselves never land on the page.
 - Writing NEW content never destroys OLD content: delete/emptying-replace are reserved for explicit corrections and scratch commands. New speech goes on new lines or appends.
-- Headings hold ONLY the title. Body sentences never live on an h1/h2/h3 line — start a new p. Emails and letters get NO heading unless one is dictated — start at the salutation.
+- Headings hold ONLY the title. Body sentences never live on an h1/h2/h3 line — start a new p. Emails and letters get NO heading unless one is dictated — start at the salutation (but a dictated "subject: X" becomes a first line "Subject: X").
 - A transition lead-in ("One more thing", "Also", "Next up", "Okay so") announces a NEW thought: put what follows on a new line; never append it to a line about something else.
 - "scratch that" removes EXACTLY the LAST WRITTEN addition (unless the speaker names something else) — never more. If it shares a line with older content, surgically remove it with replace; never delete a line that still holds content the speaker wants. If the thought being scratched was interrupted by a stop and never written (marked "(stopped)", nothing landed), there is NOTHING to remove — emit only a chip.
 - "new paragraph" is always honored: the next content starts a fresh p, no exceptions.
@@ -309,8 +309,9 @@ REVIEW_SYSTEM = """You are the copy editor working behind a live dictation write
 - SUBSTANTIVE spoken content that is missing: facts, names, numbers, tasks, requests, ideas (unless the speaker retracted it, or it is marked (stopped) — never reinstate stopped/scratched material)
 - self-corrections that were not applied
 - quantities/numbers/dates dropped or left in words
-- structure the speaker asked for (lists, headings, new paragraphs) not honored
+- structure the speaker asked for (lists, headings, new paragraphs) not honored; a spoken enumeration of 3+ parallel items ("three things left: A, B, and C" / "First... Then... Finally...") left inline as prose should be restructured into li lines (split the sentence: intro line ending with ":", one li per item, no words lost)
 - duplicated fragments, punctuation seams, filler words that leaked in, command words typed as text
+- content in the document the speaker NEVER said (an invented step, a padded detail) — delete it; the transcript is the only source of truth
 The writer DELIBERATELY drops fillers (um, okay so), meta announcements ("here's the opening", "let's draft an email", "quick update on X" when it became the title), transition lead-ins, and spoken commands — their absence is correct, never an omission. Keep every edit minimal and surgical — never rewrite lines for style, never add anything unspoken, never restate a fact that is already on the page in different words. When in doubt, do nothing: a wrong edit is far worse than no edit.
 
 OPERATIONS (one JSON object per line)

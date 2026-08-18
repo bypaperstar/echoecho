@@ -142,6 +142,22 @@ class Session(object):
         self.log.emit(type="session_start", fake=self.cfg["fake"],
                       asr=getattr(self.asr, "model", "fake"), fmt=self.fmt.model)
         try:
+            await self._recv_all()
+        finally:
+            for t in self._tasks:
+                t.cancel()
+            if self.asr is not None:
+                await self.asr.close()
+            await self.fmt.close()
+            self.log.emit(type="session_end", audio_bytes=self.audio_bytes,
+                          audio_peak=self.audio_peak,
+                          calls=self.fmt.calls, dropped_ops=self.fmt.dropped_ops)
+            self.log.snapshot_doc(self.doc.to_markdown())
+            self.log.close()
+
+    async def _recv_all(self):
+        import websockets.exceptions
+        try:
             async for message in self.ws:
                 if isinstance(message, bytes):
                     self.audio_bytes += len(message)
@@ -155,17 +171,8 @@ class Session(object):
                         self.asr.feed_audio(message)
                     continue
                 await self._on_text(message)
-        finally:
-            for t in self._tasks:
-                t.cancel()
-            if self.asr is not None:
-                await self.asr.close()
-            await self.fmt.close()
-            self.log.emit(type="session_end", audio_bytes=self.audio_bytes,
-                          audio_peak=self.audio_peak,
-                          calls=self.fmt.calls, dropped_ops=self.fmt.dropped_ops)
-            self.log.snapshot_doc(self.doc.to_markdown())
-            self.log.close()
+        except websockets.exceptions.ConnectionClosed:
+            pass  # a discarded tab / killed browser is a normal way to leave
 
     async def _ticker(self):
         while True:

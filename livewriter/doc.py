@@ -198,12 +198,24 @@ class Doc(object):
             text = plain(line.atoms)
             pos = text.rfind(find)
             if pos < 0:
-                # forgiving retry: case-insensitive
+                # models keep writing find WITH markdown ("**5.2**") though
+                # matching is on plain text — strip and retry before giving up
+                stripped = plain(parse_md(find))
+                if stripped != find:
+                    pos = text.rfind(stripped)
+                    if pos >= 0:
+                        find = stripped
+            if pos < 0:
+                # forgiving retry: case-insensitive (both raw and stripped)
                 low = text.lower()
-                pos = low.rfind(find.lower())
+                for cand in (find, plain(parse_md(find))):
+                    p = low.rfind(cand.lower())
+                    if p >= 0:
+                        pos = p
+                        find = text[p:p + len(cand)]
+                        break
                 if pos < 0:
                     raise OpError("replace: %r not in line %d" % (find[:40], line.id))
-                find = text[pos:pos + len(find)]
             new_atoms = parse_md(md)
             line.atoms[pos:pos + len(find)] = new_atoms
             norm = {"op": "replace", "line": line.id, "find": find, "md": md}

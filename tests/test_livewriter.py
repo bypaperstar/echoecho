@@ -70,6 +70,14 @@ def test_replace_matches_plain_text_across_styles():
     assert docmod.plain(d.line(0).atoms) == "goes to Diana today"
 
 
+def test_replace_find_with_markdown_markers_still_matches():
+    d = docmod.Doc()
+    d.apply({"op": "new", "kind": "li", "md": "pH **6.8**, dissolved oxygen **5.2**."})
+    # models write find WITH markdown though matching is plain-text
+    d.apply({"op": "replace", "line": 0, "find": ", dissolved oxygen **5.2**", "md": ""})
+    assert docmod.plain(d.line(0).atoms) == "pH 6.8."
+
+
 def test_replace_case_insensitive_fallback_and_miss():
     d = docmod.Doc()
     d.apply({"op": "new", "kind": "p", "md": "The Vendor called."})
