@@ -36,14 +36,20 @@ PASSWORD = os.environ.get("ECHOECHO_VM_PASSWORD", "lume")
 NOTE = ("echoecho grocery list\n\n"
         "- milk\n- eggs\n- coffee beans\n- bananas\n- olive oil\n")
 
-# CGSession lives here; -suspend drops the console to the login/lock window
-# without needing TCC (unlike an osascript lock).
-CGSESSION = ("/System/Library/CoreServices/Menu Extras/User.menu/Contents/"
-             "Resources/CGSession")
-
-
 def log(msg):
     print("[demo] %s" % msg, flush=True)
+
+
+async def shot(driver, name):
+    """Screenshot the guest; True on success, False if screencapture refuses
+    (it fails with 'could not create image from display 0' at the
+    loginwindow, before any console user is logged in)."""
+    try:
+        await driver.screenshot(name)
+        return True
+    except Exception as exc:
+        log("screenshot %s not available yet (%s)" % (name, exc))
+        return False
 
 
 async def ssh(vm, cmd, timeout=30):
@@ -65,28 +71,31 @@ async def main():
 
     driver = VncGuiDriver(vm, WS)
     try:
-        await driver.screenshot("screens/00-open.png")
-        log("captured 00-open")
+        # A fresh guest sits at the loginwindow, where `screencapture` over
+        # ssh fails ("could not create image from display 0") — that failure
+        # IS the signal that we still need to log in.
+        logged_in = await shot(driver, "screens/00-open.png")
+        if logged_in:
+            log("already at the desktop (auto-login); 00-open captured")
+        else:
+            log("at the loginwindow — logging in over VNC…")
 
-        # -- lock, so logging back in is a real, visible step --------------
-        rc, _, err = await ssh(vm, '"%s" -suspend' % CGSESSION)
-        log("lock (CGSession -suspend) rc=%s %s" % (rc, err.strip()))
-        await asyncio.sleep(4)
-        try:
-            await driver.screenshot("screens/01-login-screen.png")
-            log("captured 01-login-screen")
-        except Exception as exc:  # screencapture can refuse at loginwindow
-            log("01 screenshot skipped (%s)" % exc)
-
-        # -- log in over VNC (virtual HID) --------------------------------
-        log("logging in over VNC (typing the password)…")
-        # a pointer wake + a leading Return focuses the password field
-        await driver.click(640, 400)
+        # -- log in over VNC (virtual HID keystrokes) ---------------------
+        # A pointer wake, then the password + Return into the focused field.
+        await driver.click(640, 460)
+        await asyncio.sleep(0.5)
         await driver.type_text(PASSWORD)
         await driver.key("return")
-        await asyncio.sleep(6)
-        await driver.screenshot("screens/02-logged-in.png")
-        log("captured 02-logged-in")
+        log("typed the password over VNC; waiting for the desktop…")
+        # the desktop takes a few seconds; retry the shot until it renders
+        for attempt in range(12):
+            await asyncio.sleep(3)
+            if await shot(driver, "screens/02-logged-in.png"):
+                log("logged in — desktop captured (after %ds)"
+                    % ((attempt + 1) * 3))
+                break
+        else:
+            raise SystemExit("desktop never rendered after login")
 
         # -- create the note in TextEdit ----------------------------------
         log("creating the note in TextEdit…")
@@ -98,7 +107,7 @@ async def main():
         await asyncio.sleep(0.5)
         await driver.type_text(NOTE)
         await asyncio.sleep(0.5)
-        await driver.screenshot("screens/03-note-typed.png")
+        await shot(driver, "screens/03-note-typed.png")
         log("captured 03-note-typed")
 
         # -- save it (Cmd+S, name, Return) --------------------------------
@@ -107,7 +116,7 @@ async def main():
         await driver.type_text("grocery-list")
         await driver.key("return")
         await asyncio.sleep(2)
-        await driver.screenshot("screens/04-note-saved.png")
+        await shot(driver, "screens/04-note-saved.png")
         log("captured 04-note-saved")
     finally:
         driver.close()
