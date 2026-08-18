@@ -137,8 +137,11 @@ async def run_computer_use(task, ctx):
         except Exception as exc:
             diagnostics.exception("computer_use.vm.prepare_failed", exc=exc)
             return TaskResult(
-                say="I couldn't start my Mac VM: %s" % exc,
-                priority="interrupt", data={"error": str(exc)})
+                say="I couldn't start my Mac VM (%s). Check the diagnostics "
+                    "for this run." % type(exc).__name__,
+                priority="interrupt",
+                data={"error": "vm prepare failed",
+                      "error_type": type(exc).__name__})
 
     shot_dir = "%s/%s" % (SHOT_DIR, task.id)
     done, shots = [], []
@@ -166,11 +169,17 @@ async def run_computer_use(task, ctx):
                         (time.monotonic() - step_started) * 1000, 1),
                     completed_count=len(done), screenshot_count=len(shots))
                 # stop at the failing step, but keep the shots taken so far so
-                # the user can see how far it got
+                # the user can see how far it got. Exception text can contain
+                # prompt-derived action/combo/value strings or guest output;
+                # detailed, sanitized context belongs in diagnostics only.
                 return TaskResult(
-                    say="Stopped on step %d (%s) of the on-screen task: %s"
-                        % (idx + 1, action, exc),
-                    data={"error": str(exc), "completed": done,
+                    say="Stopped on step %d (%s) of the on-screen task "
+                        "(%s). Check the diagnostics for this run."
+                        % (idx + 1, action, type(exc).__name__),
+                    data={"error": "gui step failed",
+                          "error_type": type(exc).__name__,
+                          "step": idx + 1, "action": action,
+                          "completed": done,
                           "screens": shots}, artifacts_touched=shots)
             done.append(label)
             shots.append(shot)
@@ -181,7 +190,13 @@ async def run_computer_use(task, ctx):
     finally:
         close = getattr(driver, "close", None)
         if close is not None:
-            close()
+            try:
+                close()
+            except Exception as exc:
+                # Cleanup telemetry matters, but a failed socket close must
+                # not replace the completed/failure result from the real step.
+                diagnostics.exception(
+                    "computer_use.driver_close_failed", exc=exc)
 
     diagnostics.info(
         "computer_use.finished", step_count=len(done),

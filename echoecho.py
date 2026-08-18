@@ -222,12 +222,21 @@ def make_tool_handler(orch, port):
         if name == "dispatch_task":
             task_args = dict(args.get("args") or {})
             instructions = args.get("instructions", "")
+            instruction_source = "top_level" if instructions else "missing"
             if not instructions:
                 # voice models sometimes nest instructions inside args
                 # instead of the top-level field; honor them — otherwise
                 # the worker falls back to its default and the result
                 # looks like echoecho ignored what was asked
                 instructions = task_args.pop("instructions", "")
+                if instructions:
+                    instruction_source = "nested_args"
+            diagnostics.info(
+                "tool.dispatch.instructions_resolved",
+                source=instruction_source,
+                instruction_chars=(len(instructions)
+                                   if isinstance(instructions, str) else None),
+                task_arg_count=len(task_args))
             task = orch.submit(TaskRequest(kind=args["kind"],
                                            instructions=instructions,
                                            args=task_args))
@@ -727,6 +736,7 @@ def main(argv=None):
         python=platform.python_version(), platform=platform.platform(),
         revision=os.environ.get("ECHOECHO_BUILD_SHA", "unknown"),
         parent_run_id=os.environ.get("ECHOECHO_PARENT_RUN_ID") or None)
+    gui_backend = config.gui_input_backend()
     diagnostics.info(
         "startup.capabilities",
         openai_key_present=bool(os.environ.get("OPENAI_API_KEY")),
@@ -735,6 +745,9 @@ def main(argv=None):
         viewer_enabled=not args.no_viewer,
         realtime_model=config.realtime_model() if args.voice else None,
         sandbox=config.sandbox_tier(),
+        gui_input_backend=(gui_backend if gui_backend in {"vnc", "ssh"}
+                           else "other"),
+        vnc_override_present=bool(config.vnc_url_override()),
         sounddevice_available=importlib.util.find_spec("sounddevice") is not None,
         vosk_model_present=config.VOSK_MODEL_DIR.is_dir(),
         claude_available=shutil.which("claude") is not None,

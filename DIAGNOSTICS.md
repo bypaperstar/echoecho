@@ -26,9 +26,15 @@ completion/failure paths.
 
 Worker and service boundaries record agent subprocess preparation/spawn/timeout,
 sandbox selection/fallback, VM clone/boot/readiness/recovery/reset, LLM request
-timing and cost metadata, and web-search outcomes. Live Writer has its own
-Python run covering server/client sessions, ASR transport and protocol health,
-formatter queues/batches, reviewer staleness, and send/session failures.
+timing and cost metadata, and web-search outcomes. GUI automation records the
+selected SSH/VNC backend, credential-free endpoint classification, RFB
+protocol/authentication phases, bounded input and framebuffer-capture outcomes,
+wire/operation totals, and driver recovery. The Mac-only VM note proof has its
+own structured run covering VM preparation, login probes, screenshots, and
+note verification without retaining commands, credentials, or note content.
+Live Writer has its own Python run covering server/client sessions, ASR
+transport and protocol health, formatter queues/batches, reviewer staleness,
+and send/session failures.
 
 The Electron Orb records process and app lifecycle, unhandled errors, window
 load/responsiveness/renderer exits, viewer connectivity, VNC setup and teardown,
@@ -129,6 +135,9 @@ bash scripts/echoechoctl.sh diagnostics --latest 5 --level info --tail 200
 
 # Restrict to one or more source substrings
 bash scripts/echoechoctl.sh diagnostics --component realtime --component viewer
+
+# Inspect a Mac-only scripts/vm_note_demo.py run
+bash scripts/echoechoctl.sh diagnostics --component vm-note-demo --latest 3
 
 # Show operations at least 250 ms in the slow-span section
 bash scripts/echoechoctl.sh diagnostics --slow-ms 250

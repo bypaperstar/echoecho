@@ -236,14 +236,16 @@ components, and correlation IDs with:
 ```bash
 bash scripts/echoechoctl.sh diagnostics --latest 3 --level warn --tail 100
 bash scripts/echoechoctl.sh doctor                 # environment/preflight
-bash scripts/echoechoctl.sh logs daemon 200        # raw launch log, if needed
+bash scripts/echoechoctl.sh logs daemon 200        # terminal-safe launch tail
 ```
 
 The lifecycle script retains separate console logs for detached daemon, Orb
 development, VM, Live Writer, and update runs. Launch logs rotate in a bounded
 ring (five 5 MiB parts and 10 roots per component by default), and `logs` reads
 across retained parts. Raw console output has a weaker privacy boundary than
-the structured stream; review it before sharing. See
+the structured stream; `logs` escapes terminal controls by default, while
+`logs daemon 200 --raw` is an explicit local-only opt-in. Review either form
+before sharing. See
 [`DIAGNOSTICS.md`](DIAGNOSTICS.md) for schema, locations, retention, filters,
 privacy rules, configuration, and the reproduce/inspect/fix workflow.
 

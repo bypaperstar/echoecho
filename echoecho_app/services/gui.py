@@ -27,6 +27,7 @@ must pre-grant Accessibility (SIP-disabled build + TCC entry, or a PPPC
 profile) for type/key to work. launch + screenshot need no such grant.
 """
 import asyncio
+import ipaddress
 import shlex
 import time
 
@@ -109,9 +110,17 @@ class SshGuiDriver(GuiDriver):
         operation = argv[0] if argv else "unknown"
         started = time.monotonic()
         ssh = self.vm.ssh_argv(remote)
-        proc = await asyncio.create_subprocess_exec(
-            *ssh, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+        except Exception as exc:
+            diagnostics.exception(
+                "gui.command.spawn_failed", exc=exc, operation=operation,
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
+            raise GuiError(
+                "guest GUI command could not start (%s, %s)"
+                % (operation, type(exc).__name__)) from None
         try:
             out, err = await asyncio.wait_for(proc.communicate(), GUI_TIMEOUT)
         except asyncio.TimeoutError:
@@ -134,8 +143,12 @@ class SshGuiDriver(GuiDriver):
                 exit_code=proc.returncode, stdout_bytes=len(out),
                 stderr_bytes=len(err),
                 duration_ms=round((time.monotonic() - started) * 1000, 1))
-            raise GuiError("guest GUI command failed (%s): %s"
-                           % (argv[0], err.decode("utf-8", "replace")[-200:]))
+            # Guest stderr can contain AppleScript source (including typed
+            # text), document paths, or app output. Keep it in neither the
+            # user/model-facing error nor console logs; byte counts and the
+            # operation/exit code above are enough to locate the run record.
+            raise GuiError("guest GUI command failed (%s, exit %d)"
+                           % (operation, proc.returncode))
         diagnostics.info(
             "gui.command.finished", operation=operation,
             exit_code=proc.returncode, stdout_bytes=len(out),
@@ -189,44 +202,128 @@ class VncGuiDriver(SshGuiDriver):
 
     async def _vnc(self):
         if self._client is not None:
+            diagnostics.debug("gui.vnc.connection.reused")
             return self._client
         from echoecho_app.services import vnc as vnc_mod
         from echoecho_app.services import vm as vm_mod
+        started = time.monotonic()
         url = config.vnc_url_override()
-        if not url:
-            name = getattr(self.vm, "vm_name", None)
-            url = await asyncio.to_thread(vm_mod.vnc_url, name)
-        host, port, password = vnc_mod.parse_vnc_url(url)
+        source = "override" if url else "lume"
+        stage = "resolve"
         try:
+            if not url:
+                name = getattr(self.vm, "vm_name", None)
+                url = await asyncio.to_thread(vm_mod.vnc_url, name)
+            stage = "parse"
+            host, port, password = vnc_mod.parse_vnc_url(url)
+            try:
+                address = ipaddress.ip_address(host)
+                host_scope = (
+                    "loopback" if address.is_loopback else
+                    "private" if address.is_private else
+                    "link_local" if address.is_link_local else
+                    "public" if address.is_global else "special")
+            except ValueError:
+                host_scope = "name"
+            diagnostics.info(
+                "gui.vnc.endpoint.resolved", source=source,
+                host_scope=host_scope, default_port=port == 5900,
+                password_present=bool(password))
+            if host_scope == "public":
+                diagnostics.warning(
+                    "gui.vnc.endpoint.public", source=source,
+                    password_present=bool(password), encrypted=False)
+            stage = "connect"
             client = await asyncio.to_thread(
                 lambda: vnc_mod.VncClient(host, port, password).connect())
         except Exception as exc:
-            raise GuiError("could not reach the guest's VNC server (%s): %s"
-                           % (url, exc))
+            diagnostics.exception(
+                "gui.vnc.driver.connect_failed", exc=exc, source=source,
+                stage=stage,
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
+            # Never include the credential-bearing URL (or peer-provided
+            # failure text) in a task result sent back to the model/user.
+            raise GuiError(
+                "could not reach the guest's VNC server (%s stage, %s)"
+                % (stage, type(exc).__name__))
         self._client = client
+        diagnostics.info(
+            "gui.vnc.driver.connected", source=source,
+            width=client.width, height=client.height,
+            duration_ms=round((time.monotonic() - started) * 1000, 1))
         return client
 
-    async def type_text(self, text):
+    async def _input(self, action, call, **fields):
         client = await self._vnc()
-        await asyncio.to_thread(client.type_text, text)
+        started = time.monotonic()
+        try:
+            result = await asyncio.to_thread(call, client)
+        except Exception as exc:
+            diagnostics.exception(
+                "gui.vnc.driver.input_failed", exc=exc, action=action,
+                duration_ms=round((time.monotonic() - started) * 1000, 1),
+                **fields)
+            # A wire failure makes the cached protocol state unusable. Close
+            # best-effort and force the next step to perform a fresh handshake.
+            if self._client is client:
+                self._client = None
+            try:
+                client.close(outcome="input_failed")
+            except Exception:
+                pass
+            raise GuiError("guest VNC input failed during %s (%s)"
+                           % (action, type(exc).__name__))
+        diagnostics.info(
+            "gui.vnc.driver.input_finished", action=action,
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+            **fields)
+        return result
+
+    async def type_text(self, text):
+        await self._input(
+            "type", lambda client: client.type_text(text),
+            requested_chars=len(text) if isinstance(text, str) else None)
 
     async def key(self, combo):
         from echoecho_app.services import vnc as vnc_mod
-        mods, keysym = vnc_mod.combo_to_events(combo)  # validate before connect
-        client = await self._vnc()
+        try:
+            mods, keysym = vnc_mod.combo_to_events(combo)
+        except Exception as exc:
+            diagnostics.exception(
+                "gui.vnc.driver.input_failed", exc=exc, action="key",
+                stage="validation")
+            raise
         if mods:
-            await asyncio.to_thread(client.chord, mods, keysym)
+            await self._input(
+                "key", lambda client: client.chord(mods, keysym),
+                modifier_count=len(mods), input_class="modified")
         else:
-            await asyncio.to_thread(client.tap, keysym)
+            await self._input(
+                "key", lambda client: client.tap(keysym),
+                modifier_count=0, input_class="single")
 
     async def click(self, x, y, button=1):
-        client = await self._vnc()
-        await asyncio.to_thread(client.click, int(x), int(y), button)
+        await self._input(
+            "click",
+            lambda client: client.click(int(x), int(y), button),
+            button=int(button))
 
     def close(self):
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        client, self._client = self._client, None
+        if client is None:
+            diagnostics.debug("gui.vnc.driver.close_skipped")
+            return
+        started = time.monotonic()
+        try:
+            client.close()
+        except Exception as exc:
+            diagnostics.exception(
+                "gui.vnc.driver.close_failed", exc=exc,
+                duration_ms=round((time.monotonic() - started) * 1000, 1))
+            raise
+        diagnostics.info(
+            "gui.vnc.driver.closed",
+            duration_ms=round((time.monotonic() - started) * 1000, 1))
 
 
 class FakeGuiDriver(GuiDriver):
@@ -276,6 +373,8 @@ def for_ctx(ctx):
     reports instead of crashing)."""
     injected = ctx.extra.get("gui_driver")
     if injected is not None:
+        diagnostics.info("gui.driver.selected", source="injected",
+                         backend="injected")
         return injected
     from echoecho_app.services import vm as vm_mod
     sandbox = ctx.extra.get("sandbox")
@@ -283,6 +382,12 @@ def for_ctx(ctx):
         sandbox = vm_mod.shared_vm(workspace=ctx.workspace)
     if hasattr(sandbox, "ssh_argv"):  # a LumeVM
         if config.gui_input_backend() == "vnc":
+            diagnostics.info("gui.driver.selected", source="sandbox",
+                             backend="vnc")
             return VncGuiDriver(sandbox, ctx.workspace)
+        diagnostics.info("gui.driver.selected", source="sandbox",
+                         backend="ssh")
         return SshGuiDriver(sandbox, ctx.workspace)
+    diagnostics.warning("gui.driver.unavailable",
+                        sandbox_present=sandbox is not None)
     return None
