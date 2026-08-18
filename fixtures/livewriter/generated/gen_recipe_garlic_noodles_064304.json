@@ -1,0 +1,61 @@
+{
+ "name": "gen_recipe_garlic_noodles",
+ "task": "A home cook dictates a clean, formatted recipe for spicy garlic noodles with a short ingredients list and steps.",
+ "voice": "coral",
+ "turns": [
+  {
+   "say": "heading spicy garlic noodles",
+   "pause_ms": 700
+  },
+  {
+   "say": "okay so this is dinner for two, um, ready in about fifteen minutes.",
+   "pause_ms": 700
+  },
+  {
+   "say": "new paragraph make that a list: ingredients.",
+   "pause_ms": 700
+  },
+  {
+   "say": "two hundred grams dried noodles, two tablespoons soy sauce, one tablespoon sesame oil, three cloves garlic minced.",
+   "pause_ms": 700
+  },
+  {
+   "say": "half teaspoon chili flakes, no wait, make that one teaspoon, and one teaspoon brown sugar.",
+   "pause_ms": 700
+  },
+  {
+   "say": "optional: one scallion sliced, and about five dollars of spinach, roughly two cups.",
+   "pause_ms": 700
+  },
+  {
+   "say": "new paragraph steps: boil noodles, reserve half a cup water, then saut\u00e9 garlic in sesame oil thirty seconds.",
+   "pause_ms": 700
+  },
+  {
+   "say": "change half a cup to one quarter cup. toss noodles with soy, sugar, chili, splash water, add spinach to wilt.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "spicy garlic noodles",
+   "200 g",
+   "1 tsp chili flakes",
+   "$5",
+   "1/4 cup"
+  ],
+  "not_contains": [
+   "um",
+   "scratch that",
+   "change half a cup to one quarter cup",
+   "no wait, make that"
+  ],
+  "min_list_items": 6,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Final document is a formatted recipe with a heading, an ingredients list and steps; it applies corrections (1 tsp chili flakes, 1/4 cup) and converts spoken numbers/prices to figures without including command phrases or disfluencies."
+ },
+ "generated": true,
+ "genre": "cooking recipe"
+}

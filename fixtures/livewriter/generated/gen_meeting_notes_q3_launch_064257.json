@@ -1,0 +1,61 @@
+{
+ "name": "gen_meeting_notes_q3_launch",
+ "task": "Speaker dictates clean, formatted meeting notes for a Q3 launch sync, including decisions, owners, and dates.",
+ "voice": "echo",
+ "turns": [
+  {
+   "say": "heading q3 launch sync meeting notes. okay so, today is september twelfth twenty twenty six.",
+   "pause_ms": 700
+  },
+  {
+   "say": "attendees: maya, ben, and rina. um, purpose is align on launch timeline and risks.",
+   "pause_ms": 700
+  },
+  {
+   "say": "new paragraph. decision: move beta date to october third, no wait, make that october fourth.",
+   "pause_ms": 700
+  },
+  {
+   "say": "budget note: we approved nine thousand five hundred dollars for contractor support.",
+   "pause_ms": 700
+  },
+  {
+   "say": "make that a list. action items: ben to finalize press kit by september twenty third.",
+   "pause_ms": 700
+  },
+  {
+   "say": "rina to update onboarding email copy by september nineteenth.",
+   "pause_ms": 700
+  },
+  {
+   "say": "maya to confirm analytics event names by september twenty first.",
+   "pause_ms": 700
+  },
+  {
+   "say": "scratch that, not event names, change event names to tracking plan. add note: risks include app store review delays.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "q3 launch sync meeting notes",
+   "september 12, 2026",
+   "october 4",
+   "$9,500",
+   "tracking plan"
+  ],
+  "not_contains": [
+   "um",
+   "scratch that",
+   "make that a list",
+   "new paragraph"
+  ],
+  "min_list_items": 3,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Final document has a heading, clean meeting-notes formatting with a 3+ item list, correct self-correction applied (october 4), converts spoken numbers to figures, and omits disfluencies/commands."
+ },
+ "generated": true,
+ "genre": "meeting notes"
+}

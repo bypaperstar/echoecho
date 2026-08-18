@@ -41,7 +41,10 @@ RULES
 - Enumerations -> li lines (one item per li, no duplicated fragments). Clear topic shift -> new p or h3. Match the intended register: meeting notes, formal email (salutation line, body p's, sign-off), recipe (ingredients list, steps), poem (one p per verse line), code (kind "code"), story prose (plain p's, no forced structure).
 - SELF-CORRECTIONS: "no wait, X" / "actually Y" / "I mean Z" -> fix what is already written via replace; never type the correction words.
 - SPOKEN COMMANDS are instructions, never content: "scratch that" (delete what you just wrote — including any lead-in left dangling, e.g. an orphaned "One more thing."), "new paragraph", "make that a list" (restructure your last text into li lines), "change X to Y", "heading ...", "quote ...", "bold X", "just say X" / "make it say X" (write X, nothing else). Meta asides ("hang on", "let's draft an email to Z") set intent — never appear in the document.
-- Headings hold ONLY the title. Body sentences never live on an h1/h2/h3 line — start a new p.
+- Headings hold ONLY the title. Body sentences never live on an h1/h2/h3 line — start a new p. Emails and letters get NO heading unless one is dictated — start at the salutation.
+- A transition lead-in ("One more thing", "Also", "Next up", "Okay so") announces a NEW thought: put what follows on a new line; never append it to a line about something else.
+- "scratch that" removes the MOST RECENT addition only — the last sentence or line you wrote. If that sentence shares a line with older content, surgically remove it with replace; never delete a line that still holds content the speaker wants.
+- "new paragraph" is always honored: the next content starts a fresh p, no exceptions.
 - Before appending, read the line's current ending: continue grammatically, never duplicate connectives ("and and") or re-open a finished sentence.
 - The page must always read as if a good writer typed it: proper capitalization/punctuation, the speaker's voice, light polish.
 - Emit ops in reading order; most turns need 1-3 ops. No blank-md ops.
@@ -225,6 +228,91 @@ class Formatter(object):
                 if "not supported" not in str(e) and "Unsupported" not in str(e):
                     raise
         raise last_err
+
+
+REVIEW_SYSTEM = """You are the copy editor working behind a live dictation writer. A person spoke; a fast writer already produced the document. Compare the FULL TRANSCRIPT against the DOCUMENT and emit corrective edit operations (same JSONL op format) ONLY where the document is unfaithful or malformed:
+- spoken content that is missing (unless the speaker retracted it, or it is marked (stopped) — never reinstate stopped/scratched material)
+- self-corrections that were not applied
+- quantities/numbers/dates dropped or left in words
+- structure the speaker asked for (lists, headings, new paragraphs) not honored
+- duplicated fragments, punctuation seams, filler words that leaked in, command words typed as text
+Keep every edit minimal and surgical — never rewrite whole lines for style, never add anything unspoken. If the document is faithful, emit NOTHING (empty output).
+
+OPERATIONS (one JSON object per line)
+{"op":"new","kind":"h1|h2|h3|p|li|quote|code|small","md":"text","after":7}
+{"op":"append","line":7,"md":" more"}
+{"op":"replace","line":7,"find":"plain text","md":"replacement"}
+{"op":"delete","line":7}
+{"op":"chip","text":"note"}"""
+
+REVIEW_PROMPT = """DOCUMENT
+%s
+
+FULL TRANSCRIPT (in spoken order; (stopped) = interrupted by a stop command, must stay out)
+%s
+
+Emit corrective ops now (or nothing)."""
+
+
+class Reviewer(object):
+    """Slow fidelity pass: runs when the pen is idle, diffs transcript vs doc,
+    and repairs what the fast writer missed. Discards its own output if new
+    speech arrived while it was thinking — the next idle moment retries."""
+
+    def __init__(self, document, send_op, model=None, api_key=None, log=None):
+        self.doc = document
+        self.send_op = send_op
+        self.model = model or os.environ.get("LIVEWRITER_REVIEW_MODEL", DEFAULT_MODEL)
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.log = log or (lambda **kw: None)
+        self._client = None
+        self.passes = 0
+        self.fixes = 0
+
+    async def run_pass(self, transcript_lines, gen_of, utt_count_of):
+        """transcript_lines: list of (text, stopped_bool). gen_of()/utt_count_of()
+        report live state so a stale review can drop itself."""
+        gen0, count0 = gen_of(), utt_count_of()
+        prompt = REVIEW_PROMPT % (
+            self.doc.render_for_prompt(),
+            "\n".join(('%s "%s"' % ("(stopped)" if st else "-", t)) for t, st in transcript_lines[-60:]),
+        )
+        if self._client is None:
+            from openai import AsyncOpenAI
+            self._client = AsyncOpenAI(api_key=self.api_key)
+        self.passes += 1
+        t0 = time.monotonic()
+        kwargs = dict(model=self.model, instructions=REVIEW_SYSTEM, input=prompt,
+                      max_output_tokens=2000)
+        if self.model.startswith("gpt-5"):
+            kwargs["reasoning"] = {"effort": "low"}
+        resp = await self._client.responses.create(**kwargs)
+        text = (resp.output_text or "").strip()
+        if gen_of() != gen0 or utt_count_of() != count0:
+            self.log(type="review_stale")
+            return 0
+        n = 0
+        for raw in text.split("\n"):
+            op = docmod.parse_op_line(raw)
+            if op is None:
+                continue
+            if op.get("op") == "chip":
+                continue  # the editor speaks through one summary chip below
+            try:
+                norm = self.doc.apply(op)
+            except docmod.OpError as e:
+                self.log(type="review_op_dropped", reason=str(e)[:200])
+                continue
+            await self.send_op(norm, gen0, None)
+            n += 1
+        if n:
+            self.fixes += n
+            try:
+                await self.send_op({"op": "chip", "text": "🪶 editor tidied %d spot%s" % (n, "" if n == 1 else "s")}, gen0, None)
+            except Exception:
+                pass
+        self.log(type="review_done", ops=n, ms=int((time.monotonic() - t0) * 1000))
+        return n
 
 
 class FakeFormatter(object):

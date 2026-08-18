@@ -197,15 +197,19 @@ def test_segmenter_runon_emits_at_max_words():
 
 @pytest.mark.skipif(not HAS_WS, reason="websockets not installed")
 def test_fake_server_end_to_end(tmp_path):
+    import socket
     import websockets
     from livewriter import server
 
+    with socket.socket() as s:  # a free port — parallel playtests own 89xx
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
     async def scenario():
-        stop = asyncio.Event()
         task = asyncio.get_event_loop().create_task(
-            server.serve(port=0 or 8971, fake=True, log_dir=str(tmp_path)))
+            server.serve(port=port, fake=True, log_dir=str(tmp_path)))
         await asyncio.sleep(0.4)
-        ws = await websockets.connect("ws://127.0.0.1:8971/ws")
+        ws = await websockets.connect("ws://127.0.0.1:%d/ws" % port)
         await ws.send(json.dumps({"type": "hello"}))
         events = []
 

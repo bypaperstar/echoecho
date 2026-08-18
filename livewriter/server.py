@@ -37,8 +37,11 @@ import os
 import time
 
 from . import doc as docmod
-from .formatter import Formatter, FakeFormatter
+from .formatter import Formatter, FakeFormatter, Reviewer
 from .segmenter import Segmenter
+
+REVIEW_IDLE_S = 3.0      # pen quiet this long -> the editor may pass
+REVIEW_MIN_GAP_S = 12.0  # but never more often than this
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
@@ -117,6 +120,15 @@ class Session(object):
             from .asr import Transcriber
             self.asr = Transcriber(model=cfg.get("asr_model"), api_key=cfg.get("api_key"),
                                    on_delta=self._on_delta, on_status=self._on_asr_status)
+        self.reviewer = None
+        if not cfg["fake"] and os.environ.get("LIVEWRITER_REVIEW", "1") != "0":
+            self.reviewer = Reviewer(self.doc, self._send_op, log=self.log.emit,
+                                     api_key=cfg.get("api_key"))
+        self.all_utts = []        # [utt_id, text, stopped] — the reviewer's transcript
+        self._last_activity = _now()
+        self._last_review = 0.0
+        self._reviewed_count = 0
+        self._review_task = None
         self._tasks = []
         self.audio_bytes = 0
 
@@ -154,6 +166,34 @@ class Session(object):
             if self._doc_dirty:
                 self._doc_dirty = False
                 self.log.snapshot_doc(self.doc.to_markdown())
+            self._maybe_review()
+
+    def _maybe_review(self):
+        if self.reviewer is None or (self._review_task and not self._review_task.done()):
+            return
+        now = _now()
+        written = [u for u in self.all_utts if not u[2]]
+        if (len(written) > self._reviewed_count
+                and not self.fmt._queue
+                and not self.seg.pending.strip()
+                and now - self._last_activity >= REVIEW_IDLE_S
+                and now - self._last_review >= REVIEW_MIN_GAP_S):
+            self._last_review = now
+            count = len(written)
+            gen0 = self.fmt.gen
+
+            async def run():
+                try:
+                    await self.reviewer.run_pass(
+                        [(u[1], u[2]) for u in self.all_utts],
+                        gen_of=lambda: self.fmt.gen,
+                        utt_count_of=lambda: len(self.all_utts))
+                    if self.fmt.gen == gen0:
+                        self._reviewed_count = count
+                except Exception as e:
+                    self.log.emit(type="review_error", error=str(e)[:200])
+
+            self._review_task = asyncio.get_event_loop().create_task(run())
 
     # -- client messages ------------------------------------------------------
     async def _on_text(self, message):
@@ -164,7 +204,8 @@ class Session(object):
         mtype = msg.get("type")
         if mtype == "hello":
             await self._send({"type": "ready", "asr": getattr(self.asr, "model", "fake"),
-                              "fmt": self.fmt.model, "fake": self.cfg["fake"]})
+                              "fmt": self.fmt.model, "fake": self.cfg["fake"],
+                              "session_dir": self.log.dir})
         elif mtype == "halt":
             self.log.emit(type="halt", source="client")
             self._halt()
@@ -205,6 +246,8 @@ class Session(object):
         self.utt_id += 1
         uid = self.utt_id
         self.ghost_utts.append((uid, text))
+        self.all_utts.append([uid, text, False])
+        self._last_activity = _now()
         age_ms = int((_now() - t_first) * 1000) if t_first else 0
         self.log.emit(type="utt", utt=uid, text=text, age_ms=age_ms)
         self._post({"type": "utt", "id": uid, "text": text, "age_ms": age_ms})
@@ -215,9 +258,17 @@ class Session(object):
         self._halt()
 
     def _halt(self):
+        queued = {u for u, _, _ in self.fmt._queue} if hasattr(self.fmt, "_queue") else set()
         gen = self.fmt.halt()
         self.seg.clear()
+        # utterances whose ops never landed were interrupted by the stop: the
+        # reviewer must not reinstate them
+        unwritten = {u for u, _ in self.ghost_utts} | queued
+        for u in self.all_utts:
+            if u[0] in unwritten:
+                u[2] = True
         self.ghost_utts = []
+        self._last_activity = _now()
         self._post({"type": "halted", "gen": gen})
 
     def _on_think(self, on, queued):
@@ -228,6 +279,7 @@ class Session(object):
             return
         self.log.emit(type="op", gen=gen, utt=utt_id, **{"op_": norm})
         self._doc_dirty = True
+        self._last_activity = _now()
         await self._send({"type": "op", "gen": gen, "utt": utt_id, "op": norm})
 
     async def _on_batch_done(self, through_utt, gen):
@@ -258,9 +310,11 @@ def make_process_request(cfg):
         if path == "/ws":
             return None  # proceed with the websocket handshake
         if path == "/healthz":
+            from .formatter import DEFAULT_MODEL
+            from .asr import LIVE_MODEL_DEFAULT
             body = json.dumps({"ok": True, "fake": cfg["fake"],
-                               "asr": cfg.get("asr_model") or "gpt-live-transcribe",
-                               "fmt": cfg.get("fmt_model") or os.environ.get("LIVEWRITER_MODEL", "gpt-4.1-mini"),
+                               "asr": cfg.get("asr_model") or os.environ.get("LIVEWRITER_ASR_MODEL", LIVE_MODEL_DEFAULT),
+                               "fmt": cfg.get("fmt_model") or os.environ.get("LIVEWRITER_MODEL", DEFAULT_MODEL),
                                "log_dir": cfg["log_dir"]})
             resp = connection.respond(http.HTTPStatus.OK, body)
             resp.headers["Content-Type"] = "application/json"

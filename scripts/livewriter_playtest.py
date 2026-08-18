@@ -212,7 +212,10 @@ class Driver(object):
         self.ws = await websockets.connect("ws://127.0.0.1:%d/ws" % self.port, max_size=None)
         await self.ws.send(json.dumps({"type": "hello"}))
         self._reader = asyncio.get_event_loop().create_task(self._read())
-        await self._wait(lambda e: e["type"] == "ready", 10)
+        i = await self._wait(lambda e: e["type"] == "ready", 10)
+        # read results from THIS session's dir, never /last/* — another client
+        # (a stray page, a parallel test) must not swap the session under us
+        self.session_dir = self.events[i].get("session_dir") if i >= 0 else None
 
     async def _read(self):
         try:
@@ -498,6 +501,7 @@ async def run_scenario(scenario, args, out_dir, port):
     try:
         if not srv.wait_ready():
             raise RuntimeError("server not ready")
+        session_dir = None
         if args.browser:
             wav = os.path.join(out_dir, "input.wav")
             dur = build_scenario_wav(scenario, tts, wav)
@@ -505,6 +509,7 @@ async def run_scenario(scenario, args, out_dir, port):
         else:
             drv = Driver(port)
             await drv.connect()
+            session_dir = drv.session_dir
             for turn in scenario["turns"]:
                 if turn.get("say"):
                     pcm = tts.synth(turn["say"], scenario.get("voice"))
@@ -513,8 +518,14 @@ async def run_scenario(scenario, args, out_dir, port):
             await drv.settle()
             await drv.close()
         time.sleep(0.6)
-        md = srv.http("/last/doc")
-        raw_log = srv.http("/last/log")
+        if session_dir:
+            with open(os.path.join(session_dir, "doc.md")) as f:
+                md = f.read()
+            with open(os.path.join(session_dir, "session.jsonl")) as f:
+                raw_log = f.read()
+        else:
+            md = srv.http("/last/doc")
+            raw_log = srv.http("/last/log")
     finally:
         srv.stop()
     events = [json.loads(l) for l in raw_log.splitlines() if l.strip()]
