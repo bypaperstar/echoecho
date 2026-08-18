@@ -89,6 +89,19 @@ def test_computer_use_runs_steps_and_captures_shots(tmp_path):
     assert "5 on-screen steps" in task.result.say
 
 
+def test_computer_use_opens_only_workspace_relative_files(tmp_path):
+    fake = FakeGuiDriver(tmp_path / "ws")
+    task, _ = run_task({"steps": [{"action": "open", "path": "notes/today.md"}]},
+                       tmp_path, extra={"gui_driver": fake})
+    assert task.status == "done"
+    assert ("open", "notes/today.md", "TextEdit") in fake.actions
+    assert task.result.data["completed"] == ["opened notes/today.md"]
+
+    rejected, _ = run_task({"steps": [{"action": "open", "path": "../private.md"}]},
+                           tmp_path, extra={"gui_driver": FakeGuiDriver(tmp_path / "ws")})
+    assert "workspace-relative" in rejected.result.data["error"]
+
+
 def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
     task, ws = run_task(
         {"steps": [{"action": "launch", "app": "TextEdit"},
@@ -161,14 +174,16 @@ def test_ssh_gui_driver_builds_guest_commands(monkeypatch, tmp_path):
     driver._run = fake_run
 
     asyncio.run(driver.launch("Safari"))
+    asyncio.run(driver.open_file("notes/today.md"))
     asyncio.run(driver.key("cmd+t"))
     asyncio.run(driver.screenshot("screens/t1/a.png"))
     argvs = sent["argvs"]
     assert argvs[0] == ["open", "-a", "Safari"]
-    assert argvs[1][0] == "osascript" and "command down" in argvs[1][-1]
+    assert argvs[1] == ["open", "-a", "TextEdit", "/Volumes/Shared/ws/notes/today.md"]
+    assert argvs[2][0] == "osascript" and "command down" in argvs[2][-1]
     # screenshot targets the guest mount path so the PNG lands on the host
-    assert "screencapture" in argvs[2][-1]
-    assert "/Volumes/Shared/ws/screens/t1/a.png" in argvs[2][-1]
+    assert "screencapture" in argvs[3][-1]
+    assert "/Volumes/Shared/ws/screens/t1/a.png" in argvs[3][-1]
 
 
 def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
