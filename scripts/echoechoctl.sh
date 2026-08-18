@@ -243,8 +243,12 @@ cmd_update() {
   # stop only: install-app reopens the new bundle, and the app launch starts a
   # fresh daemon tethered to the new app process (never to the dying old one)
   if [ -n "$was_daemon" ]; then cmd_stop_daemon; fi
-  cmd_install_app
-  echo "update complete: v$(repo_version) ($(git rev-parse --short HEAD))"
+  # The pull may have rewritten this very script, but bash keeps executing
+  # the PRE-pull function bodies (observed: a version-bake change didn't
+  # apply to the build its own update produced). Run the rebuild — and the
+  # version banner — from the fresh copy on disk.
+  bash "$REPO/scripts/echoechoctl.sh" install-app
+  echo "update complete: v$(bash "$REPO/scripts/echoechoctl.sh" version) ($(git rev-parse --short HEAD))"
 }
 
 case "${1:-}" in
@@ -260,7 +264,8 @@ case "${1:-}" in
   start-app)       cmd_start_app ;;
   stop-app)        cmd_stop_app ;;
   update)          cmd_update ;;
+  version)         repo_version ;;
   live-writer)     cmd_live_writer ;;
   stop-live-writer) cmd_stop_live_writer ;;
-  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|live-writer|stop-live-writer}"; exit 2 ;;
+  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|version|live-writer|stop-live-writer}"; exit 2 ;;
 esac
