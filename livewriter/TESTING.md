@@ -62,3 +62,60 @@ mockup's scene 6), so the fixture now stops *and* scratches.
 **Changes:** default model gpt-5.4-mini; prompt rules for lead-ins/new
 thoughts, surgical scratch, no-heading-on-emails, always-honor "new
 paragraph"; 40_brainstorm speaks "Stop." then "Scratch that."
+
+### 4 — scripted suite after the rule changes
+46/50 checks, but the runs exposed the real enemy: **variance**. The same
+prompt that produced a perfect team update in the browser run (it. 6) dropped
+the Diana assignment and the list here, and the recipe lost its quantities.
+Sampling at temperature 1 (gpt-5 models take no temperature) + ASR
+nondeterminism means prompt-only fixes cannot pin fidelity.
+**Changes:** none yet — evidence gathering.
+
+### 5 — first generative scenarios (gpt-5.2 invents, gpt-5.2 judges)
+Four fresh genres (wetland-frog field notes, Q3 meeting notes, garlic-noodle
+recipe, airport-pickup email). Recipe 11/11, meeting notes 10/11 — the
+mechanics generalize. The bio scenario "failed" with fidelity 0 — traced to a
+harness race, not the product: a parallel unit test's session overwrote the
+LAST pointer the harness read results from. Also caught: generator-authored
+checks were format-brittle ("august 23, 2026" vs "Aug 23").
+**Changes:** `ready` carries `session_dir` and the harness reads its own
+session's artifacts (never `/last/*`); unit test uses an ephemeral port;
+generator guidance: contains-checks must be single words/figures,
+format-sensitive expectations go to the judge.
+
+### 6 — browser E2E (headless Chrome, WAV as fake mic)
+The full real path — getUserMedia → AudioWorklet resample → websocket → live
+ASR → formatter → typewriter — produced **11/11 checks and the ideal
+document** (heading, list, Marcus→Diana correction, stop + scratch clean).
+The page code works end to end without a human.
+
+### 7 — the editor pass behind the pen
+Added the Reviewer: when the pen is idle ≥3 s (≥12 s between passes) it diffs
+the full transcript (stop-interrupted utterances marked) against the document
+and emits minimal corrective ops; a pass discards itself if new speech
+arrived meanwhile. Suite: brainstorm 10/10/10, email 9/9/10 pass, recipe
+fidelity 10. Caught: the editor *reinstated* deliberately-dropped filler
+("Okay, so, um, quick update…") as "missing content" — seen live in the
+recording-pipeline test.
+**Changes:** editor prompt narrowed to SUBSTANTIVE content with an explicit
+"dropped fillers/meta are correct" clause and a strong when-in-doubt-do-
+nothing bias.
+
+### 8 — generative rerun (race-fixed)
+Recipe 11/11; the wetland-bio scenario is a beautifully brutal fidelity
+stress (dense figures, a temperature correction, a retraction command) and
+caught real misses: correction not applied, retracted value kept, "no wind"
+invented, label dropped. Ran pre-it7/9 fixes; kept as the hard fixture.
+
+### 9 — team_update stability ×3 + the destructive-op guard
+Runs 1-2 (pre-guard): Diana lost again — the trace showed the model, on
+hearing the lead-in "One more thing", emitting `delete` on the list item
+holding Diana and re-creating "One more thing" as a fresh line. A prompt
+can't reliably stop that, so the server now BLOCKS destructive ops
+mechanically: `delete` / replace-to-empty are dropped unless the speech batch
+contains an explicit correction/deletion word (scratch, remove, no wait, i
+mean, change, …). A replace that empties a line now also deletes the line (no
+dangling "- " bullets), mirrored in the page. Stopped utterances are kept in
+the writer's context marked "(stopped)" so "scratch that last part" has its
+antecedent; prose register hardened (no bold, no invented headings, near-
+verbatim).

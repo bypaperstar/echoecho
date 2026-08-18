@@ -15,6 +15,7 @@ utterances are dropped. openai is imported lazily (sandbox convention).
 
 import asyncio
 import os
+import re
 import time
 
 from . import doc as docmod
@@ -36,14 +37,15 @@ RULES
 - Write promptly and incrementally; append small pieces rather than waiting for complete thoughts. NEVER re-emit text already in the document — when extending a list or paragraph, add only the new part.
 - PUNCTUATION SEAMS: speech often arrives split mid-sentence, so the last line may end with a stray "." while the new speech continues that same sentence (", wedged beneath the door"). Fix the seam: replace the stray terminator so the sentence reads as one, then continue.
 - Drop fillers (um, uh, okay so, you know) silently.
-- Numbers, dates, prices, units spoken in words -> figures ("about forty milliseconds" -> "~40 ms", "twelve hundred dollars" -> "$1,200"). Bold truly key figures/names with **x**, sparingly. In literary prose, keep numbers as words.
-- An opening like "quick update on X" / "notes on Y" / a spoken title announces the DOCUMENT TITLE: write a short h1/h2 heading (title-cased, not a sentence), never a paragraph.
-- Enumerations -> li lines (one item per li, no duplicated fragments). Clear topic shift -> new p or h3. Match the intended register: meeting notes, formal email (salutation line, body p's, sign-off), recipe (ingredients list, steps), poem (one p per verse line), code (kind "code"), story prose (plain p's, no forced structure).
+- Numbers, dates, prices, units spoken in words -> figures ("about forty milliseconds" -> "~40 ms", "twelve hundred dollars" -> "$1,200"). Bold truly key figures/names with **x**, sparingly.
+- An opening like "quick update on X" / "notes on Y" / a spoken title announces the DOCUMENT TITLE in informational registers (notes, updates, plans, specs): write a short h1/h2 heading (title-cased, not a sentence), never a paragraph. In prose/poem registers, opening meta ("here's the opening of the story") is dropped entirely — no heading unless one is dictated.
+- Enumerations -> li lines (one item per li, no duplicated fragments). Clear topic shift -> new p or h3. Match the intended register: meeting notes, formal email (salutation line, body p's, sign-off), recipe (ingredients list, steps), poem (one p per verse line), code (kind "code"). LITERARY PROSE is near-verbatim: plain p's split only where commanded or at clear scene/topic breaks, numbers stay as words, NO bolding or emphasis, no lists or headings.
 - SELF-CORRECTIONS: "no wait, X" / "actually Y" / "I mean Z" -> fix what is already written via replace; never type the correction words.
 - SPOKEN COMMANDS are instructions, never content: "scratch that" (delete what you just wrote — including any lead-in left dangling, e.g. an orphaned "One more thing."), "new paragraph", "make that a list" (restructure your last text into li lines), "change X to Y", "heading ...", "quote ...", "bold X", "just say X" / "make it say X" (write X, nothing else). Meta asides ("hang on", "let's draft an email to Z") set intent — never appear in the document.
+- Writing NEW content never destroys OLD content: delete/emptying-replace are reserved for explicit corrections and scratch commands. New speech goes on new lines or appends.
 - Headings hold ONLY the title. Body sentences never live on an h1/h2/h3 line — start a new p. Emails and letters get NO heading unless one is dictated — start at the salutation.
 - A transition lead-in ("One more thing", "Also", "Next up", "Okay so") announces a NEW thought: put what follows on a new line; never append it to a line about something else.
-- "scratch that" removes the MOST RECENT addition only — the last sentence or line you wrote. If that sentence shares a line with older content, surgically remove it with replace; never delete a line that still holds content the speaker wants.
+- "scratch that" removes EXACTLY the LAST WRITTEN addition (unless the speaker names something else) — never more. If it shares a line with older content, surgically remove it with replace; never delete a line that still holds content the speaker wants. If the thought being scratched was interrupted by a stop and never written (marked "(stopped)", nothing landed), there is NOTHING to remove — emit only a chip.
 - "new paragraph" is always honored: the next content starts a fresh p, no exceptions.
 - Before appending, read the line's current ending: continue grammatically, never duplicate connectives ("and and") or re-open a finished sentence.
 - The page must always read as if a good writer typed it: proper capitalization/punctuation, the speaker's voice, light polish.
@@ -67,12 +69,28 @@ CORRECT OUTPUT
 {"op":"new","kind":"p","md":"We need three things:"}
 {"op":"new","kind":"li","md":"Visas"}
 {"op":"new","kind":"li","md":"Travel insurance"}
-{"op":"new","kind":"li","md":"Rental car"}"""
+{"op":"new","kind":"li","md":"Rental car"}
+
+EXAMPLE (surgical scratch — the stop interrupted a thought, the rest of the line stays)
+DOCUMENT
+[4|p] The docs task goes to **Diana**. One more thing.
+RECENT SPEECH (newest last; already handled — for context only)
+"It goes to Diana" / "One more thing" / "(stopped) we should probably tell the vendor that their firmware is"
+LAST WRITTEN (your most recent addition to the document)
+" One more thing."
+NEW SPEECH (write this now)
+"Scratch that last part."
+CORRECT OUTPUT
+{"op":"replace","line":4,"find":" One more thing.","md":""}
+{"op":"chip","text":"scratched the interrupted thought"}"""
 
 PROMPT = """DOCUMENT
 %s
 
 RECENT SPEECH (newest last; already handled — for context only)
+%s
+
+LAST WRITTEN (your most recent addition to the document)
 %s
 
 NEW SPEECH (write this now)
@@ -91,6 +109,9 @@ class Formatter(object):
         self.log = log or (lambda **kw: None)
         self.gen = 0
         self.history = []               # (utt_id, text) already handled
+        self.last_written = "(nothing yet)"
+        self._batch_added = []
+        self._destructive_n = 0
         self._queue = []                # (utt_id, text, t_heard)
         self._wake = asyncio.Event()
         self._task = None
@@ -143,17 +164,39 @@ class Formatter(object):
                 if self.gen == gen:
                     self.history.extend((u, t) for u, t, _ in batch)
                     del self.history[:-12]
+                    if self._batch_added:
+                        self.last_written = " / ".join(self._batch_added)[-300:]
                     if self.on_batch_done is not None:
                         try:
                             await self.on_batch_done(batch[-1][0], gen)
                         except Exception:
                             pass
 
+    # words that license destructive ops — without one of these in the new
+    # speech, a delete/emptying-replace is the model erasing content on a
+    # whim (observed: "One more thing" triggering a delete of the list item
+    # it was appended to), and gets dropped mechanically.
+    _DESTRUCTIVE_OK = re.compile(
+        r"scratch|delete|remove|undo|strike|change|replace|instead|rather|"
+        r"actually|correction|wait|no[,.]? not|not |i mean|make (that|it)|forget",
+        re.IGNORECASE)
+
+    def _op_allowed(self, op, speech):
+        name = op.get("op")
+        destructive = name == "delete" or (name == "replace" and not str(op.get("md", "")).strip())
+        if not destructive:
+            return True
+        return bool(self._DESTRUCTIVE_OK.search(speech))
+
     async def _run_batch(self, batch, gen):
         new_speech = " ".join(t for _, t, _ in batch)
+        self._speech = new_speech
+        self._batch_added = []
+        self._destructive_n = 0
         prompt = PROMPT % (
             self.doc.render_for_prompt(),
             "\n".join('"%s"' % t for _, t in self.history[-8:]) or "(none)",
+            '"%s"' % self.last_written,
             '"%s"' % new_speech,
         )
         utt_id = batch[-1][0]
@@ -195,12 +238,34 @@ class Formatter(object):
                 self.dropped_ops += 1
                 self.log(type="fmt_bad_line", line=raw.strip()[:200])
             return 0
+        speech = getattr(self, "_speech", "")
+        name = op.get("op")
+        destructive = name == "delete" or (name == "replace" and not str(op.get("md", "")).strip())
+        if destructive:
+            if not self._op_allowed(op, speech):
+                self.dropped_ops += 1
+                self.log(type="fmt_op_blocked", reason="destructive op without a correction command",
+                         op=str(op)[:150])
+                return 0
+            # one scratch = one addition removed; over-deletion was observed
+            # ("scratch that last part" deleting a whole list) — cap it unless
+            # the speaker asked for a bulk removal
+            bulk = re.search(r"\b(all|everything|whole|both|entire|list|section)\b", speech, re.IGNORECASE)
+            self._destructive_n += 1
+            if self._destructive_n > (6 if bulk else 2):
+                self.dropped_ops += 1
+                self.log(type="fmt_op_blocked", reason="destructive op cap", op=str(op)[:150])
+                return 0
         try:
             norm = self.doc.apply(op)
         except docmod.OpError as e:
             self.dropped_ops += 1
             self.log(type="fmt_op_dropped", reason=str(e)[:200])
             return 0
+        if name in ("new", "append") or (name == "replace" and str(op.get("md", "")).strip()):
+            added = docmod.plain(docmod.parse_md(str(op.get("md", ""))))
+            if added.strip():
+                self._batch_added.append(added.strip())
         await self.send_op(norm, gen, utt_id)
         return 1
 
@@ -231,12 +296,12 @@ class Formatter(object):
 
 
 REVIEW_SYSTEM = """You are the copy editor working behind a live dictation writer. A person spoke; a fast writer already produced the document. Compare the FULL TRANSCRIPT against the DOCUMENT and emit corrective edit operations (same JSONL op format) ONLY where the document is unfaithful or malformed:
-- spoken content that is missing (unless the speaker retracted it, or it is marked (stopped) — never reinstate stopped/scratched material)
+- SUBSTANTIVE spoken content that is missing: facts, names, numbers, tasks, requests, ideas (unless the speaker retracted it, or it is marked (stopped) — never reinstate stopped/scratched material)
 - self-corrections that were not applied
 - quantities/numbers/dates dropped or left in words
 - structure the speaker asked for (lists, headings, new paragraphs) not honored
 - duplicated fragments, punctuation seams, filler words that leaked in, command words typed as text
-Keep every edit minimal and surgical — never rewrite whole lines for style, never add anything unspoken. If the document is faithful, emit NOTHING (empty output).
+The writer DELIBERATELY drops fillers (um, okay so), meta announcements ("here's the opening", "let's draft an email", "quick update on X" when it became the title), transition lead-ins, and spoken commands — their absence is correct, never an omission. Keep every edit minimal and surgical — never rewrite lines for style, never add anything unspoken, never restate a fact that is already on the page in different words. When in doubt, do nothing: a wrong edit is far worse than no edit.
 
 OPERATIONS (one JSON object per line)
 {"op":"new","kind":"h1|h2|h3|p|li|quote|code|small","md":"text","after":7}

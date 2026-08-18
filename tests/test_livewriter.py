@@ -79,6 +79,25 @@ def test_replace_case_insensitive_fallback_and_miss():
         d.apply({"op": "replace", "line": 0, "find": "zebra", "md": "x"})
 
 
+def test_replace_that_empties_a_line_deletes_it():
+    d = docmod.Doc()
+    d.apply({"op": "new", "kind": "li", "md": "One more thing"})
+    norm = d.apply({"op": "replace", "line": 0, "find": "One more thing", "md": ""})
+    assert norm.get("empty_delete") is True
+    assert d.line(0) is None
+
+
+def test_formatter_blocks_unlicensed_destructive_ops():
+    from livewriter.formatter import Formatter
+    f = Formatter.__new__(Formatter)  # only the guard is under test
+    assert not f._op_allowed({"op": "delete", "line": 4}, "One more thing")
+    assert not f._op_allowed({"op": "replace", "line": 4, "find": "x", "md": ""}, "and here is more")
+    assert f._op_allowed({"op": "delete", "line": 4}, "Scratch that last part.")
+    assert f._op_allowed({"op": "replace", "line": 4, "find": "Marcus", "md": ""}, "no wait, not Marcus")
+    assert f._op_allowed({"op": "replace", "line": 4, "find": "a", "md": "b"}, "anything")
+    assert f._op_allowed({"op": "new", "kind": "p", "md": "hi"}, "anything")
+
+
 def test_new_after_inserts_midway():
     d = make_doc()
     norm = d.apply({"op": "new", "kind": "li", "md": "Retest speaker", "after": 2})
@@ -119,13 +138,15 @@ class SegHarness(object):
     def __init__(self):
         self.utts = []
         self.stops = 0
+        self.discarded = []
         self.ghosts = []
         self.seg = Segmenter(lambda t, a, b: self.utts.append(t),
-                             lambda: self._stop(),
+                             lambda d: self._stop(d),
                              lambda p, t: self.ghosts.append(p))
 
-    def _stop(self):
+    def _stop(self, d):
         self.stops += 1
+        self.discarded.append(d)
 
 
 def test_segmenter_punctuation_boundary():
@@ -164,6 +185,7 @@ def test_segmenter_stop_with_punctuation_fires_instantly_and_discards():
     assert h.stops == 1
     assert h.utts == []
     assert h.seg.pending == ""
+    assert h.discarded == ["tell the vendor"]  # handed over for context
 
 
 def test_segmenter_bare_stop_waits_confirm_window():

@@ -206,7 +206,12 @@ class Doc(object):
                 find = text[pos:pos + len(find)]
             new_atoms = parse_md(md)
             line.atoms[pos:pos + len(find)] = new_atoms
-            return {"op": "replace", "line": line.id, "find": find, "md": md}
+            norm = {"op": "replace", "line": line.id, "find": find, "md": md}
+            if not plain(line.atoms).strip():
+                # the replacement emptied the line: no dangling "- " bullets
+                self.lines.remove(line)
+                norm["empty_delete"] = True
+            return norm
         if name == "delete":
             lid = _as_id(op.get("line"))
             for i, l in enumerate(self.lines):

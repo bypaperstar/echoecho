@@ -138,6 +138,7 @@ async def record(args):
     ffmpeg = find_ffmpeg()
     cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat,
            "-itsoffset", str(args.audio_offset), "-i", args.wav,
+           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # libx264 needs even dims
            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
            "-c:a", "aac", "-shortest", args.out]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

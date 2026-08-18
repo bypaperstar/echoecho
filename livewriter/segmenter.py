@@ -117,13 +117,15 @@ class Segmenter(object):
         self.on_utterance(text, t_first, t_last)
 
     def _fire_stop(self):
-        # words before "stop" were interrupted mid-thought: discard them.
+        # words before "stop" were interrupted mid-thought: discard them, but
+        # hand them to on_stop — "scratch that" needs them as context.
+        discarded = re.sub(r"(^|\s)stop\s*[.!?]?\s*$", "", self.pending.strip(), flags=re.IGNORECASE).strip()
         self.pending = ""
         self.t_first = None
         self.t_last = None
         self._stop_armed_at = None
         self._ghost()
-        self.on_stop()
+        self.on_stop(discarded)
 
     def _ghost(self):
         if self.on_ghost is not None:

@@ -443,12 +443,12 @@ Reply ONLY with JSON:
 {"name": "gen_<short_slug>", "task": "<one line: who is dictating what>",
  "voice": "<one of: alloy, echo, shimmer, coral, verse, ballad>",
  "turns": [{"say": "...", "pause_ms": 700}, ...],
- "expects": {"contains": [<3-6 short strings that MUST appear in the final doc — only unambiguous ones, e.g. the corrected name, a converted figure like "$40">],
-             "not_contains": [<2-4 strings that must NOT appear: retracted words, filler like "um", command words like "scratch that">],
+ "expects": {"contains": [<3-6 items, each ONE word or ONE figure (e.g. "Marcia", "$40", "146", "kayaking") that any faithful doc must contain — never multi-word phrases, never full dates/times (formatting varies)>],
+             "not_contains": [<2-4 strings that must NOT appear: a retracted word, " um", a command phrase like "scratch that">],
              "min_list_items": <n or omit>, "has_heading": <true or omit>},
- "judge": {"criteria": "<one line on what good looks like>"}}
+ "judge": {"criteria": "<one line on what good looks like — put format-sensitive expectations (dates, phrasing, structure) here, not in contains>"}}
 
-Make expects extremely reliable: not_contains strings must be things a correct writer would never include; contains strings must be forced by the dictation. Lowercase matching is used."""
+Make expects extremely reliable: not_contains strings must be things a correct writer would never include; contains strings must be forced by the dictation and robust to formatting choices. Lowercase substring matching is used."""
 
 GENRES = ["meeting notes", "cooking recipe", "personal email", "product spec",
           "short story opening", "lecture notes about a science topic", "weekly todo planning",

@@ -300,7 +300,11 @@ function compileOp(o) {
     return [mk({ op: 'nl', id: key, ltype: o.kind, after }), ...stepsForRuns(mdToRuns(o.md))];
   }
   if (op === 'append') return stepsForRuns(mdToRuns(o.md), lineKey(o.line));
-  if (op === 'replace') return repSteps(lineKey(o.line), o.find, mdToRuns(o.md));
+  if (op === 'replace') {
+    const steps = repSteps(lineKey(o.line), o.find, mdToRuns(o.md));
+    if (o.empty_delete) steps.push(mk({ op: 'delLine', line: lineKey(o.line) }));
+    return steps;
+  }
   if (op === 'delete') {
     const key = lineKey(o.line);
     const l = plan.lines.find(x => x.id === key);

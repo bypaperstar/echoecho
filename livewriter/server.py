@@ -253,20 +253,25 @@ class Session(object):
         self._post({"type": "utt", "id": uid, "text": text, "age_ms": age_ms})
         self.fmt.submit(uid, text, t_last)
 
-    def _on_stop(self):
-        self.log.emit(type="halt", source="voice")
-        self._halt()
+    def _on_stop(self, discarded):
+        self.log.emit(type="halt", source="voice", discarded=discarded)
+        self._halt(discarded)
 
-    def _halt(self):
+    def _halt(self, discarded=None):
         queued = {u for u, _, _ in self.fmt._queue} if hasattr(self.fmt, "_queue") else set()
+        pend = discarded or self.seg.pending.strip()
         gen = self.fmt.halt()
         self.seg.clear()
         # utterances whose ops never landed were interrupted by the stop: the
-        # reviewer must not reinstate them
+        # reviewer must not reinstate them — but the writer keeps them as
+        # marked context (that is what "scratch that" refers to)
         unwritten = {u for u, _ in self.ghost_utts} | queued
         for u in self.all_utts:
             if u[0] in unwritten:
                 u[2] = True
+                self.fmt.history.append((u[0], "(stopped) " + u[1]))
+        if pend:
+            self.fmt.history.append((-1, "(stopped) " + pend))
         self.ghost_utts = []
         self._last_activity = _now()
         self._post({"type": "halted", "gen": gen})
