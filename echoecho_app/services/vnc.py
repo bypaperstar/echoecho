@@ -340,6 +340,15 @@ class VncClient:
         self._send(b"\x01")  # shared-session flag: don't boot other viewers
         header = self._recv(24)
         self.width, self.height = struct.unpack(">HH", header[:4])
+        # ServerInit pixel format (16 bytes). We decode in the SERVER's native
+        # format rather than forcing one with SetPixelFormat — Apple's guest
+        # VNC server resets the connection on an unexpected SetPixelFormat.
+        pf = header[4:20]
+        rmax, gmax, bmax = struct.unpack(">HHH", pf[4:10])
+        self.pixfmt = {
+            "bpp": pf[0], "depth": pf[1], "big_endian": pf[2],
+            "true_color": pf[3], "rmax": rmax, "gmax": gmax, "bmax": bmax,
+            "rshift": pf[10], "gshift": pf[11], "bshift": pf[12]}
         name_len = struct.unpack(">I", header[20:24])[0]
         self.name = self._recv(name_len).decode("utf-8", "replace") if \
             name_len else ""
@@ -392,14 +401,9 @@ class VncClient:
     # -- framebuffer capture (what a VNC viewer actually sees) --------------
     # On a headless (--no-display) guest, app windows composite for a
     # connected VNC client but not always for `screencapture` over SSH, so
-    # this is the faithful "what's on screen" grab.
-    def set_pixel_format(self):
-        """Pin a known 32bpp true-colour format so decoding is unambiguous:
-        little-endian, R<<16 G<<8 B<<0 -> bytes come out [B, G, R, x]."""
-        pf = struct.pack(">BBBBHHHBBB", 32, 24, 0, 1, 255, 255, 255,
-                         16, 8, 0) + b"\x00\x00\x00"
-        self._send(b"\x00\x00\x00\x00" + pf)  # SetPixelFormat: type 0 + 3 pad
-
+    # this is the faithful "what's on screen" grab. We decode in the server's
+    # NATIVE pixel format (parsed at ServerInit) — Apple's guest VNC server
+    # resets the connection if a client forces a format via SetPixelFormat.
     def set_encodings(self, encodings):
         msg = struct.pack(">BBH", 2, 0, len(encodings))
         for e in encodings:
@@ -410,12 +414,34 @@ class VncClient:
         self._send(struct.pack(">BBHHHH", 3, incremental, 0, 0,
                                self.width, self.height))
 
+    def _channel_bytes(self, bpp):
+        """For a 32/24bpp true-colour native format, the byte offset (within
+        each pixel) of R, G, B — so a rectangle decodes with C-level slicing
+        instead of a per-pixel Python loop. Returns None for exotic formats
+        (handled by the slow generic path)."""
+        pf = self.pixfmt
+        if not pf.get("true_color") or bpp not in (24, 32):
+            return None
+        if pf["rmax"] != 255 or pf["gmax"] != 255 or pf["bmax"] != 255:
+            return None
+        nbytes = bpp // 8
+
+        def byte_of(shift):
+            idx = shift // 8
+            return (nbytes - 1 - idx) if pf["big_endian"] else idx
+        return byte_of(pf["rshift"]), byte_of(pf["gshift"]), byte_of(pf["bshift"])
+
     def capture_png(self, path, timeout=None):
         """Request the whole framebuffer (raw encoding) and write it to a PNG.
         Blocks until one FramebufferUpdate covering the screen arrives."""
         if timeout:
             self.sock.settimeout(timeout)
-        self.set_pixel_format()
+        bpp = self.pixfmt["bpp"]
+        nbytes = bpp // 8
+        offs = self._channel_bytes(bpp)
+        if offs is None:
+            raise VncError(
+                "unsupported native pixel format for capture: %r" % self.pixfmt)
         self.set_encodings([0])  # raw only — no decoder zoo to maintain
         self._fb_update_request(0)
         buf = bytearray(self.width * self.height * 3)
@@ -429,8 +455,8 @@ class VncClient:
                     x, y, w, h, enc = struct.unpack(">HHHHi", self._recv(12))
                     if enc != 0:
                         raise VncError("server used non-raw encoding %d" % enc)
-                    data = self._recv(w * h * 4)
-                    self._blit(buf, data, x, y, w, h)
+                    data = self._recv(w * h * nbytes)
+                    self._blit(buf, data, x, y, w, h, nbytes, offs)
                     got += w * h
             elif msg_type == 1:  # SetColourMapEntries
                 self._recv(5)
@@ -447,16 +473,18 @@ class VncClient:
         _write_png(path, self.width, self.height, bytes(buf))
         return path
 
-    def _blit(self, buf, data, x, y, w, h):
-        """Copy a raw BGRx rectangle into the RGB framebuffer, row by row via
-        C-level slicing (a per-pixel Python loop over 1080p is too slow)."""
-        line = w * 4
+    def _blit(self, buf, data, x, y, w, h, nbytes, offs):
+        """Copy a raw true-colour rectangle into the RGB framebuffer, row by
+        row via C-level slicing (a per-pixel Python loop over 1080p is too
+        slow). offs = (r,g,b) byte offset within each nbytes-wide pixel."""
+        ro, go, bo = offs
+        line = w * nbytes
         for row in range(h):
             seg = data[row * line:(row + 1) * line]
             rowrgb = bytearray(w * 3)
-            rowrgb[0::3] = seg[2::4]  # R
-            rowrgb[1::3] = seg[1::4]  # G
-            rowrgb[2::3] = seg[0::4]  # B
+            rowrgb[0::3] = seg[ro::nbytes]
+            rowrgb[1::3] = seg[go::nbytes]
+            rowrgb[2::3] = seg[bo::nbytes]
             dst = ((y + row) * self.width + x) * 3
             buf[dst:dst + w * 3] = rowrgb
 
