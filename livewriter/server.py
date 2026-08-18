@@ -131,6 +131,7 @@ class Session(object):
         self._review_task = None
         self._tasks = []
         self.audio_bytes = 0
+        self.audio_peak = 0
 
     # -- lifecycle ----------------------------------------------------------
     async def run(self):
@@ -144,6 +145,12 @@ class Session(object):
             async for message in self.ws:
                 if isinstance(message, bytes):
                     self.audio_bytes += len(message)
+                    # cheap liveness meter: a silent mic (bad fake-capture
+                    # path, muted hardware) is invisible without this
+                    if len(message) >= 2 and self.audio_bytes % 32 == 0:
+                        import struct as _s
+                        vals = _s.unpack("<%dh" % (len(message) // 2), message)
+                        self.audio_peak = max(self.audio_peak, max(abs(v) for v in vals))
                     if self.asr is not None:
                         self.asr.feed_audio(message)
                     continue
@@ -155,6 +162,7 @@ class Session(object):
                 await self.asr.close()
             await self.fmt.close()
             self.log.emit(type="session_end", audio_bytes=self.audio_bytes,
+                          audio_peak=self.audio_peak,
                           calls=self.fmt.calls, dropped_ops=self.fmt.dropped_ops)
             self.log.snapshot_doc(self.doc.to_markdown())
             self.log.close()

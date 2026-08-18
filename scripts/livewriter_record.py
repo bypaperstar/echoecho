@@ -55,7 +55,11 @@ async def record(args):
         "--no-first-run", "--no-default-browser-check",
         "--use-fake-device-for-media-stream",
         "--use-fake-ui-for-media-stream",
-        "--use-file-for-fake-audio-capture=%s%%noloop" % os.path.abspath(args.wav),
+        "--use-file-for-fake-audio-capture=%s%s" % (os.path.abspath(args.wav),
+                                                    "" if args.loop else "%noloop"),
+        # macOS: fake audio capture yields digital silence unless the audio
+        # service runs in-process (observed: audio_peak 0 with 3.2MB streamed)
+        "--disable-features=AudioServiceOutOfProcess,AudioServiceSandbox",
         "--autoplay-policy=no-user-gesture-required",
         "--window-size=%d,%d" % (args.width, args.height + 88),
         "--mute-audio",
@@ -156,6 +160,9 @@ def main():
     ap.add_argument("--width", type=int, default=1360)
     ap.add_argument("--height", type=int, default=850)
     ap.add_argument("--headless", action="store_true")
+    ap.add_argument("--loop", action="store_true",
+                    help="loop the wav instead of %%noloop (Mac Chrome consumes "
+                         "the file from browser start, not mic start)")
     ap.add_argument("--debug-port", type=int, default=9333)
     ap.add_argument("--audio-offset", type=float, default=1.2,
                     help="seconds of video before the mic audio starts")

@@ -253,9 +253,10 @@ class Driver(object):
     async def silence(self, ms, realtime=1.0):
         await self.stream_pcm(b"\x00" * (2 * int(RATE * ms / 1000.0)), realtime)
 
-    async def settle(self, idle_s=4.0, timeout=90.0):
+    async def settle(self, idle_s=9.0, timeout=120.0):
         """Wait until the pipeline goes quiet: no new op/utt/ghost-text events
-        for idle_s (thinking pauses included)."""
+        for idle_s. The window must outlast the editor pass (fires at 3s idle,
+        takes a few seconds) or review fixes never land in test runs."""
         t0 = time.monotonic()
 
         def busy_t():
@@ -448,7 +449,7 @@ Reply ONLY with JSON:
              "min_list_items": <n or omit>, "has_heading": <true or omit>},
  "judge": {"criteria": "<one line on what good looks like — put format-sensitive expectations (dates, phrasing, structure) here, not in contains>"}}
 
-Make expects extremely reliable: not_contains strings must be things a correct writer would never include; contains strings must be forced by the dictation and robust to formatting choices. Lowercase substring matching is used."""
+Make expects extremely reliable: not_contains strings must be things a correct writer would never include; contains strings must be forced by the dictation and robust to formatting choices. Lowercase substring matching is used. Never build expectations on spelled-out codes/IDs/unusual proper nouns — speech recognition spells them unpredictably; use common words and plain figures."""
 
 GENRES = ["meeting notes", "cooking recipe", "personal email", "product spec",
           "short story opening", "lecture notes about a science topic", "weekly todo planning",

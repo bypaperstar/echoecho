@@ -1,0 +1,60 @@
+{
+ "name": "gen_travel_itinerary_kyoto_osaka",
+ "task": "A traveler dictates a clean, formatted 3-day Japan travel itinerary with bookings, budgets, and a packing list.",
+ "voice": "coral",
+ "turns": [
+  {
+   "say": "Heading Japan weekend itinerary, Kyoto plus Osaka, okay, keep it simple and readable.",
+   "pause_ms": 700
+  },
+  {
+   "say": "New paragraph. Dates: March twenty second to March twenty fourth, two nights total.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Day one, arrive Kyoto around eleven thirty a m; no wait, make that ten thirty a m.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Hotel: Sakura Inn, two hundred twenty dollars per night, check in after three.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Afternoon: Fushimi Inari hike, then dinner budget forty five dollars, maybe ramen.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Day two: early Arashiyama bamboo grove, then train to Osaka, fare fifteen dollars.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Make that a list: tickets, passport, charger, reusable bottle, and one rain jacket.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Scratch that, remove reusable bottle. Add note: keep total budget under six hundred dollars.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "kyoto",
+   "osaka",
+   "600",
+   "220",
+   "15"
+  ],
+  "not_contains": [
+   "scratch that",
+   "make that a list",
+   " um"
+  ],
+  "min_list_items": 4,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Output should be a formatted itinerary with a clear heading, date range converted to figures, day-by-day sections, prices as figures with currency, and a bulleted packing list excluding the retracted item."
+ },
+ "generated": true,
+ "genre": "travel itinerary"
+}
