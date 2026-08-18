@@ -142,6 +142,62 @@ class SshGuiDriver(GuiDriver):
         return name
 
 
+class VncGuiDriver(SshGuiDriver):
+    """launch + screenshot over SSH (unchanged), but type/key/click injected
+    over the guest's VNC server as virtual HID — the input path that sidesteps
+    the TCC Accessibility block SSH osascript keystrokes hit.
+
+    The VNC endpoint comes from ECHOECHO_VNC_URL or lume (vm.vnc_url), read
+    lazily on first input event so launch/screenshot still work even if VNC is
+    unavailable. The blocking RFB client runs in a thread so this driver stays
+    async like its SSH sibling."""
+
+    def __init__(self, vm, workspace):
+        super().__init__(vm, workspace)
+        self._client = None
+
+    async def _vnc(self):
+        if self._client is not None:
+            return self._client
+        from echoecho_app.services import vnc as vnc_mod
+        from echoecho_app.services import vm as vm_mod
+        url = config.vnc_url_override()
+        if not url:
+            name = getattr(self.vm, "vm_name", None)
+            url = await asyncio.to_thread(vm_mod.vnc_url, name)
+        host, port, password = vnc_mod.parse_vnc_url(url)
+        try:
+            client = await asyncio.to_thread(
+                lambda: vnc_mod.VncClient(host, port, password).connect())
+        except Exception as exc:
+            raise GuiError("could not reach the guest's VNC server (%s): %s"
+                           % (url, exc))
+        self._client = client
+        return client
+
+    async def type_text(self, text):
+        client = await self._vnc()
+        await asyncio.to_thread(client.type_text, text)
+
+    async def key(self, combo):
+        from echoecho_app.services import vnc as vnc_mod
+        mods, keysym = vnc_mod.combo_to_events(combo)  # validate before connect
+        client = await self._vnc()
+        if mods:
+            await asyncio.to_thread(client.chord, mods, keysym)
+        else:
+            await asyncio.to_thread(client.tap, keysym)
+
+    async def click(self, x, y, button=1):
+        client = await self._vnc()
+        await asyncio.to_thread(client.click, int(x), int(y), button)
+
+    def close(self):
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+
 class FakeGuiDriver(GuiDriver):
     """CI backend: records actions and writes a 1x1 PNG for each screenshot so
     the worker's artifact/viewer path is exercised without a screen."""
@@ -192,5 +248,7 @@ def for_ctx(ctx):
     if sandbox is None and config.sandbox_tier() == "vm":
         sandbox = vm_mod.shared_vm(workspace=ctx.workspace)
     if hasattr(sandbox, "ssh_argv"):  # a LumeVM
+        if config.gui_input_backend() == "vnc":
+            return VncGuiDriver(sandbox, ctx.workspace)
         return SshGuiDriver(sandbox, ctx.workspace)
     return None

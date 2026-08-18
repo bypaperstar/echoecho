@@ -1,0 +1,100 @@
+{
+  "name": "25_grocery_note_live",
+  "task": "Summon echoecho by voice and ask for a grocery list shown on screen: a note lands in the live workspace, the viewer serves it, and a spoken follow-up updates the same note in place — the 'live note that tracks the conversation' promise.",
+  "env": {
+    "ECHOECHO_SILENCE_TIMEOUT": "420"
+  },
+  "turns": [
+    "~wake",
+    "make me a grocery list and show it on the screen. I need eggs, whole milk, and sourdough bread",
+    "~wait-task 180",
+    "add avocados and olive oil to the grocery list",
+    "~wait-task 180",
+    "read me the grocery list",
+    "~end"
+  ],
+  "success_criteria": [
+    "echoecho dispatches a background task for the list instead of refusing or stalling",
+    "a markdown grocery note with the three starter items lands in the workspace",
+    "the spoken follow-up updates the same note (avocados and olive oil appear)",
+    "the note is served by the live viewer",
+    "task completion is woven back into the conversation as an injection"
+  ],
+  "red_flags": [
+    "claims it cannot write or save documents",
+    "says the list was written before the task's done line",
+    "creates a second file instead of updating the grocery note"
+  ],
+  "checks": [
+    {
+      "file_glob": [
+        "*.md",
+        "*rocer*",
+        "*hopping*"
+      ],
+      "contains_any": [
+        "eggs"
+      ],
+      "min_bullets": 3
+    },
+    {
+      "file_glob": [
+        "*.md",
+        "*rocer*",
+        "*hopping*"
+      ],
+      "contains_any": [
+        "avocado"
+      ]
+    },
+    {
+      "file_glob": [
+        "*.md",
+        "*rocer*",
+        "*hopping*"
+      ],
+      "contains_any": [
+        "olive oil"
+      ]
+    }
+  ],
+  "event_checks": [
+    {
+      "type": "tool_call",
+      "where": {
+        "name": "dispatch_task"
+      },
+      "count_min": 1
+    },
+    {
+      "type": "task",
+      "where": {
+        "status": "done"
+      },
+      "count_min": 1
+    },
+    {
+      "type": "injection",
+      "count_min": 1
+    },
+    {
+      "type": "session",
+      "where": {
+        "event": "closed"
+      },
+      "count_min": 1
+    }
+  ],
+  "http_checks": [
+    {
+      "path": "/transcript",
+      "expect_status": 200,
+      "expect_contains": "grocery"
+    }
+  ],
+  "audio_checks": {
+    "assistant_voiced_s_min": 4.0,
+    "meta_assistant_turns_min": 3
+  },
+  "timeout_s": 700
+}

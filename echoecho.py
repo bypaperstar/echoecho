@@ -157,9 +157,17 @@ def make_tool_handler(orch, port):
 
     def _handle(name, args):
         if name == "dispatch_task":
+            task_args = dict(args.get("args") or {})
+            instructions = args.get("instructions", "")
+            if not instructions:
+                # voice models sometimes nest instructions inside args
+                # instead of the top-level field; honor them — otherwise
+                # the worker falls back to its default and the result
+                # looks like echoecho ignored what was asked
+                instructions = task_args.pop("instructions", "")
             task = orch.submit(TaskRequest(kind=args["kind"],
-                                           instructions=args.get("instructions", ""),
-                                           args=args.get("args", {})))
+                                           instructions=instructions,
+                                           args=task_args))
             return {"task_id": task.id, "status": "queued"}
         if name == "check_tasks":
             return {"tasks": orch.summaries(args.get("task_id"))}

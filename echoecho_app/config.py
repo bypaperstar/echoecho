@@ -144,6 +144,27 @@ def vm_pass_env():
     return [n for n in raw.replace(",", " ").split() if n]
 
 
+def gui_input_backend():
+    """How the GUI driver delivers keystrokes/clicks into the guest:
+
+      "vnc"  (default) inject over the guest's VNC server as virtual HID —
+             sidesteps the macOS Accessibility (TCC) block that hangs
+             SSH-invoked osascript keystrokes on a SIP-enabled image.
+      "ssh"  the legacy osascript/System Events path (needs a golden image
+             with Accessibility pre-granted).
+
+    launch (`open -a`) and screenshots (`screencapture`) always go over SSH;
+    only type/key/click honor this."""
+    return os.environ.get("ECHOECHO_GUI_INPUT", "vnc").strip() or "vnc"
+
+
+def vnc_url_override():
+    """ECHOECHO_VNC_URL: an explicit vnc://[:pass@]host:port for the guest,
+    used verbatim by the GUI driver and /vnc-info. Empty -> discover via
+    lume."""
+    return os.environ.get("ECHOECHO_VNC_URL", "").strip()
+
+
 def realtime_model():
     return os.environ.get("ECHOECHO_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 

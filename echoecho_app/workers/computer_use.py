@@ -41,6 +41,13 @@ async def _do_step(driver, step, shot_dir, idx):
     elif action == "key":
         await driver.key(step["combo"])
         label = "pressed %s" % step["combo"]
+    elif action == "click":
+        click = getattr(driver, "click", None)
+        if click is None:
+            raise ValueError("this GUI driver can't click (needs the VNC "
+                             "input backend)")
+        await click(step["x"], step["y"], step.get("button", 1))
+        label = "clicked (%s, %s)" % (step["x"], step["y"])
     elif action == "wait":
         await driver.wait(step.get("seconds", 1))
         label = "waited"
@@ -113,19 +120,24 @@ async def run_computer_use(task, ctx):
 
     shot_dir = "%s/%s" % (SHOT_DIR, task.id)
     done, shots = [], []
-    for idx, step in enumerate(steps):
-        try:
-            label, shot = await _do_step(driver, step, shot_dir, idx)
-        except (gui_mod.GuiError, KeyError, ValueError) as exc:
-            # stop at the failing step, but keep the shots taken so far so the
-            # user can see how far it got
-            return TaskResult(
-                say="Stopped on step %d (%s) of the on-screen task: %s"
-                    % (idx + 1, step.get("action", "?"), exc),
-                data={"error": str(exc), "completed": done,
-                      "screens": shots}, artifacts_touched=shots)
-        done.append(label)
-        shots.append(shot)
+    try:
+        for idx, step in enumerate(steps):
+            try:
+                label, shot = await _do_step(driver, step, shot_dir, idx)
+            except (gui_mod.GuiError, KeyError, ValueError) as exc:
+                # stop at the failing step, but keep the shots taken so far so
+                # the user can see how far it got
+                return TaskResult(
+                    say="Stopped on step %d (%s) of the on-screen task: %s"
+                        % (idx + 1, step.get("action", "?"), exc),
+                    data={"error": str(exc), "completed": done,
+                          "screens": shots}, artifacts_touched=shots)
+            done.append(label)
+            shots.append(shot)
+    finally:
+        close = getattr(driver, "close", None)
+        if close is not None:
+            close()
 
     return TaskResult(
         say="Did %d on-screen step%s in the VM; the screenshots are in your "
