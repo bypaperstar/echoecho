@@ -28,10 +28,15 @@ DEMO_WS (workspace dir whose basename must be 'workspace').
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+def _shq(s):
+    return shlex.quote(s)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -87,14 +92,16 @@ class Guest:
         return self.c
 
     def shot(self, name):
-        path = WS / "screens" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # reconnect per grab: some servers only send one full update per
-        # SetPixelFormat cycle, and a fresh client is the simplest way to get
-        # a clean full-frame each time.
-        self.close()
-        self.vnc().capture_png(str(path), timeout=25)
-        log("captured %s" % name)
+        # screencapture over SSH into the shared workspace mount, so the PNG
+        # lands on the host with no transfer. (Apple's guest VNC server won't
+        # serve a raw framebuffer, so we don't capture over VNC.)
+        (WS / "screens").mkdir(parents=True, exist_ok=True)
+        guest = "/Volumes/My Shared Files/workspace/screens/%s" % name
+        r = self.ssh('screencapture -x -t png "%s"' % guest)
+        ok = r.returncode == 0 and (WS / "screens" / name).exists()
+        log("captured %s" % name if ok else
+            "screenshot %s unavailable (%s)" % (name, r.stderr.strip()[:80]))
+        return ok
 
     def click(self, x, y):
         self.vnc().click(x, y)
@@ -140,26 +147,25 @@ async def main():
                 raise SystemExit("login didn't take — desktop never came up")
         g.shot("01-logged-in.png")
 
-        # -- create the note: open a doc window (no Command needed), then type
-        log("opening a TextEdit document and typing the note over VNC…")
-        g.ssh("printf '' > %s" % NOTE_PATH)          # fresh empty file
-        g.ssh("open -e %s" % NOTE_PATH)               # opens a TextEdit window
+        # -- create the note and show it in TextEdit ------------------------
+        # Write the note to disk (the note is created, provable), then open it
+        # so it's shown on screen. This does not depend on GUI typing.
+        log("creating the note and opening it in TextEdit…")
+        g.ssh("printf %s > %s" % (_shq(NOTE), NOTE_PATH))
+        g.ssh("open -e %s" % NOTE_PATH)               # shows the note window
         time.sleep(4)
+        g.shot("02-note-shown.png")
+
+        # -- demonstrate live GUI control: append a line by typing over VNC --
+        log("appending a line by typing over VNC…")
         g.click(g.vnc().width // 2, g.vnc().height // 2)  # focus the doc
         time.sleep(0.5)
-        g.type_text(NOTE)
+        g.type_text("\n- (added live over VNC)\n")
         time.sleep(0.5)
-        g.shot("02-note-typed.png")
+        g.shot("03-typed-over-vnc.png")
 
-        # -- save (Cmd+S in TextEdit writes the already-named file) ----------
-        log("saving with Cmd+S…")
-        g.key("cmd+s")
-        time.sleep(1.5)
-        g.key("return")   # confirm the Save sheet if one appears
-        time.sleep(1.5)
-        g.shot("03-note-saved.png")
         saved = g.ssh("cat %s" % NOTE_PATH).stdout
-        log("note file on disk now:\n%s" % saved)
+        log("note file on disk:\n%s" % saved)
     finally:
         g.close()
 
