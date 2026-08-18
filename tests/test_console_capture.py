@@ -367,6 +367,50 @@ def test_echoechoctl_creation_uses_secure_helper_and_preserves_victim(tmp_path):
     assert (console / "daemon-current.log").resolve() == created
 
 
+def test_echoechoctl_update_bootstraps_missing_venv_pip(tmp_path):
+    fake_repo = tmp_path / "repo"
+    fake_bin = fake_repo / ".venv" / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_repo / "requirements-mac.txt").write_text("# test\n")
+    calls = tmp_path / "python-calls.txt"
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "printf '%s\\n' \"$*\" >> \"$FAKE_PYTHON_CALLS\"\n"
+        "if [ \"$*\" = '-m pip --version' ]; then exit 1; fi\n"
+        "if [ \"$*\" = '-m ensurepip --upgrade' ]; then exit 0; fi\n"
+        "if [ \"$1 $2 $3\" = '-m pip install' ]; then exit 0; fi\n"
+        "exit 2\n"
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env["FAKE_PYTHON_CALLS"] = str(calls)
+
+    result = subprocess.run(
+        ["bash", "-c",
+         'source "$1" version >/dev/null; REPO="$2"; '
+         "install_python_requirements",
+         "echoechoctl-test", str(REPO / "scripts" / "echoechoctl.sh"),
+         str(fake_repo)],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    recorded = calls.read_text().splitlines()
+    assert recorded == [
+        "-m pip --version",
+        "-m ensurepip --upgrade",
+        "-m pip install -q -r %s" %
+        (fake_repo / "requirements-mac.txt"),
+    ]
+    assert "bootstrapping with ensurepip" in result.stdout
+
+
 def test_echoechoctl_rejects_a_symlink_console_directory(tmp_path):
     diagnostics_dir = tmp_path / "diagnostics"
     diagnostics_dir.mkdir()

@@ -416,6 +416,19 @@ cmd_update() {
     bash "$REPO/scripts/echoechoctl.sh" _update-body
 }
 
+install_python_requirements() {
+  python="$REPO/.venv/bin/python"
+  if [ ! -x "$python" ]; then
+    echo "project virtualenv is missing: $python" >&2
+    return 1
+  fi
+  if ! "$python" -m pip --version >/dev/null 2>&1; then
+    echo "virtualenv pip is missing; bootstrapping with ensurepip"
+    "$python" -m ensurepip --upgrade >/dev/null
+  fi
+  "$python" -m pip install -q -r "$REPO/requirements-mac.txt"
+}
+
 cmd_update_body() {
   echo "update started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   trap 'status=$?; echo "update finished at $(date -u +%Y-%m-%dT%H:%M:%SZ), status=$status"' EXIT
@@ -425,7 +438,7 @@ cmd_update_body() {
   [ -n "$(daemon_pid)" ] && was_daemon=1
   git pull --ff-only origin main
   ( cd app && npm install --no-audit --no-fund >/dev/null )
-  .venv/bin/pip install -q -r requirements-mac.txt || true
+  install_python_requirements
   # stop only: install-app reopens the new bundle, and the app launch starts a
   # fresh daemon tethered to the new app process (never to the dying old one)
   if [ -n "$was_daemon" ]; then cmd_stop_daemon; fi
