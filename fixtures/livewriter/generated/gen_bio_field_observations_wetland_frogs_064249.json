@@ -1,0 +1,61 @@
+{
+ "name": "gen_bio_field_observations_wetland_frogs",
+ "task": "A field biologist dictates live wetland observations into a clean, formatted log entry.",
+ "voice": "echo",
+ "turns": [
+  {
+   "say": "heading marsh transect field notes, okay so, date august twenty third, two thousand twenty six, start time six fifteen a m.",
+   "pause_ms": 700
+  },
+  {
+   "say": "location, willow creek wetland, transect three, gps forty one point seven two nine north, eighty seven point nine one four west.",
+   "pause_ms": 700
+  },
+  {
+   "say": "weather calm, overcast, temperature seventy two fahrenheit, no wait, make that seventy one, light drizzle after ten minutes.",
+   "pause_ms": 700
+  },
+  {
+   "say": "new paragraph first observation, chorus frogs calling from cattails, estimated count about twelve, one juvenile seen near the boardwalk.",
+   "pause_ms": 700
+  },
+  {
+   "say": "make that a list: water depth eight centimeters at stake a, eleven at stake b, p h six point eight, dissolved oxygen five point two.",
+   "pause_ms": 700
+  },
+  {
+   "say": "scratch that, remove the dissolved oxygen value, the meter was uncalibrated.",
+   "pause_ms": 700
+  },
+  {
+   "say": "note a painted turtle basking on log, carapace length about nine centimeters, behavior skittish when i approached within three meters.",
+   "pause_ms": 700
+  },
+  {
+   "say": "add closing line, samples: two water vials, label wcw-t3-08-23, supplies cost twenty five dollars total.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "august 23, 2026",
+   "6:15 am",
+   "71",
+   "12",
+   "$25"
+  ],
+  "not_contains": [
+   "um",
+   "scratch that",
+   "make that a list",
+   "dissolved oxygen"
+  ],
+  "min_list_items": 3,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Final document should be cleanly formatted with a heading, date/time converted to figures, corrected temperature kept, list rendered with at least three items, and retracted/command phrases excluded."
+ },
+ "generated": true,
+ "genre": "biology field observations"
+}

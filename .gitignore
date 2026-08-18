@@ -9,3 +9,5 @@ workspace/*
 !workspace/.gitkeep
 playtest-results/
 voice-playtest-results/
+livewriter-results/
+livewriter-logs/

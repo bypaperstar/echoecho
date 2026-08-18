@@ -1,0 +1,60 @@
+{
+ "name": "gen_support_case_summary",
+ "task": "A support agent dictates a concise customer support case summary document with a heading and a short list of actions.",
+ "voice": "echo",
+ "turns": [
+  {
+   "say": "Heading case summary for nora blanchard, ticket id seven five four two one.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Um okay so she called on march third, twenty twenty five, about a double charge on her pro plan.",
+   "pause_ms": 700
+  },
+  {
+   "say": "The amount was ninety nine dollars, no wait, make that one hundred nine dollars, plus tax.",
+   "pause_ms": 700
+  },
+  {
+   "say": "She said the card ending in four two one one was billed twice after a plan upgrade.",
+   "pause_ms": 700
+  },
+  {
+   "say": "New paragraph. I verified invoices and found two successful captures in stripe for the same order.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Make that a list. One, apologized and confirmed identity. Two, refunded the duplicate charge. Three, emailed receipt.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Change stripe to Stripe in the writeup, and note refund id r f n d nine eight six.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Close with next steps: monitor for three to five business days and reply if it doesn't post.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "nora",
+   "75421",
+   "$109",
+   "4211",
+   "rfnd986"
+  ],
+  "not_contains": [
+   "scratch that",
+   "change stripe to stripe",
+   " um"
+  ],
+  "min_list_items": 3,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Output should be a clean case summary with a visible heading, convert spoken numbers to figures (ticket id, amount, card last4, refund id), remove disfluencies/commands, include a 3+ item numbered list of actions, and capitalize Stripe."
+ },
+ "generated": true,
+ "genre": "customer support case summary"
+}

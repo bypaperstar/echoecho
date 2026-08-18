@@ -1,0 +1,20 @@
+{
+ "name": "30_email",
+ "task": "Dictating a complaint email to a landlord: salutation, 'new paragraph' commands, availability with times, sign-off. Tests register (formal email) and paragraph structure.",
+ "voice": "echo",
+ "turns": [
+  {"say": "Okay, let's draft a short email to my landlord.", "pause_ms": 1200},
+  {"say": "Dear Mister Alvarez,", "pause_ms": 1100},
+  {"say": "I'm writing about the radiator in the back bedroom, which has been leaking since Friday.", "pause_ms": 1300},
+  {"say": "New paragraph. We've placed a bucket under it, but the leak is getting worse, and I'm worried about the floorboards.", "pause_ms": 1400},
+  {"say": "New paragraph. Could you send someone this week? I'm available Tuesday, or Thursday after five PM.", "pause_ms": 1400},
+  {"say": "Best regards, Ben.", "pause_ms": 1400}
+ ],
+ "expects": {
+  "contains": ["Alvarez", "radiator", "bucket", "Best regards"],
+  "not_contains": ["new paragraph", "draft a short email"],
+  "regex": ["(?i)5\\s?(pm|p\\.m\\.)"],
+  "min_words": 50
+ },
+ "judge": {"criteria": "A well-formed email: salutation line, body paragraphs split where commanded, times as figures, sign-off with the name — and the meta instruction ('let's draft an email') not typed as content."}
+}

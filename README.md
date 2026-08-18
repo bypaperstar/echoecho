@@ -190,6 +190,37 @@ whenever echoecho is listening there's a Dock icon saying so, and killing that
 Dock icon always silences the mic. A bare `python echoecho.py --voice` in a
 terminal stays untethered for debugging.
 
+### Live Writer — talk out loud, it writes live
+
+The **Live Writer** button on the control panel (or `bash
+scripts/echoechoctl.sh live-writer`, or `python3 -m livewriter`) opens
+<http://127.0.0.1:8799/>: dictate anything and a document writes itself while
+you talk — the productionized version of `mockups/live-writer-demo.html`,
+deliberately independent of the daemon/orchestrator. A streaming
+transcription model (`gpt-live-transcribe`) hears you word-by-word (the gray
+ghost tail), a server-side segmenter cuts utterances at pauses/punctuation,
+and a formatter LLM (`gpt-5.4-mini`, ~0.7-0.9 s to first ink after an
+utterance closes) streams small edit ops — new line / append / replace /
+delete — that the page types out through the mockup's typewriter engine
+(catch-up speed = backlog ÷ window). Fillers dropped, spoken numbers become
+figures, enumerations become lists, self-corrections edit what's already on
+the page, and "stop", "scratch that", "new paragraph", "make that a list",
+"change X to Y", "heading …" work as commands. Saying **"stop."** halts the
+pen instantly (generation counters cancel in-flight formatting). A typed
+input box does the same keylessly; `LIVEWRITER_FAKE=1` runs the whole
+pipeline with fakes for tests.
+
+Playtests: `python3 scripts/livewriter_playtest.py` synthesizes each scenario
+turn with TTS and streams it over the page's own websocket at mic pace
+(`--browser` goes through headless Chrome's fake-mic path instead), asserts
+objective expectations plus latency gates, and `--judge` adds an LLM grader
+(fidelity / formatting / commands). `--generate N` has a model invent fresh
+dictation scenarios across genres — the proof the mechanics are generic, not
+fixture-tuned. Scenarios in `fixtures/livewriter/`; results in
+`livewriter-results/<stamp>/report.md`; the iteration-by-iteration log lives
+in [`livewriter/TESTING.md`](livewriter/TESTING.md). Keyless unit tests:
+`python3 -m pytest tests/test_livewriter.py`.
+
 Headless merge gate (runs all three scripted demos plus the generic agent.run
 rewrite of them, asserts artifacts + task log, then the full test suite):
 `bash scripts/demo_check.sh`.

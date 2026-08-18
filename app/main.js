@@ -178,7 +178,7 @@ function openControl() {
   }
   controlWin = new BrowserWindow({
     width: 460,
-    height: 560,
+    height: 610,
     resizable: false,
     fullscreenable: false,
     title: 'echoecho',
@@ -444,6 +444,9 @@ const CTL_ACTIONS = {
   'daemon-restart': () => runEchoechoctl('restart-daemon'),
   'vm-boot': () => runEchoechoctl('boot-vm', true),
   'vm-reset': () => runEchoechoctl('reset-vm', true),
+  // starts the standalone Live Writer server if needed and opens the page in
+  // the default browser (the script does the `open`; it blocks until healthy)
+  'live-writer': () => runEchoechoctl('live-writer'),
   'update': () => {
     // the script waits ~2s for us to exit, then pulls, rebuilds, reinstalls
     // the bundle and reopens it

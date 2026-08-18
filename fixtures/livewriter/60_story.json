@@ -1,0 +1,18 @@
+{
+ "name": "60_story",
+ "task": "Dictating literary prose — no structure commands, just faithful, clean paragraphs. Tests that the formatter preserves voice, keeps prose numbers tasteful, and doesn't over-structure.",
+ "voice": "alloy",
+ "turns": [
+  {"say": "Okay, um, here's the opening of the story.", "pause_ms": 1100},
+  {"say": "The lighthouse keeper found the letter on a Tuesday, wedged beneath the door like a secret the sea had finally given up.", "pause_ms": 1400},
+  {"say": "She read it twice before breakfast, and by the third reading her coffee had gone cold.", "pause_ms": 1400},
+  {"say": "New paragraph. Forty years she had kept the light. Nobody had ever written to her before.", "pause_ms": 1500}
+ ],
+ "expects": {
+  "contains": ["lighthouse", "letter", "coffee"],
+  "not_contains": [" um", "new paragraph", "opening of the story"],
+  "regex": ["(?i)(forty|40) years"],
+  "min_words": 45
+ },
+ "judge": {"criteria": "The prose is captured nearly verbatim (it was deliberate dictation, not rambling), split into two paragraphs at the command, no invented content, no bullet lists or headings forced onto literary prose."}
+}

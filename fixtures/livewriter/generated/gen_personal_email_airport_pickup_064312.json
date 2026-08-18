@@ -1,0 +1,60 @@
+{
+ "name": "gen_personal_email_airport_pickup",
+ "task": "A person dictates a personal email to a friend about airport pickup and weekend plans.",
+ "voice": "shimmer",
+ "turns": [
+  {
+   "say": "okay so, write an email to jess. subject, quick favor for friday.",
+   "pause_ms": 700
+  },
+  {
+   "say": "start with, hi jess comma hope your week is going okay.",
+   "pause_ms": 700
+  },
+  {
+   "say": "new paragraph. i'm landing on friday, august ninth at six fifteen pm at laguardia.",
+   "pause_ms": 700
+  },
+  {
+   "say": "could you pick me up at terminal b around six forty five? no wait, make that seven fifteen.",
+   "pause_ms": 700
+  },
+  {
+   "say": "also, my checked bag fee was forty five dollars, which is ridiculous. scratch that, don't say ridiculous.",
+   "pause_ms": 700
+  },
+  {
+   "say": "new paragraph. make that a list. things i can bring: the camping stove, extra flashlights, and the snacks.",
+   "pause_ms": 700
+  },
+  {
+   "say": "change extra flashlights to two lanterns. and add one more item: bug spray.",
+   "pause_ms": 700
+  },
+  {
+   "say": "close with, thanks again exclamation point. see you soon comma alex.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "subject: quick favor for friday",
+   "august 9",
+   "6:15 pm",
+   "7:15",
+   "$45"
+  ],
+  "not_contains": [
+   "um",
+   "scratch that",
+   "ridiculous",
+   "extra flashlights"
+  ],
+  "min_list_items": 4
+ },
+ "judge": {
+  "criteria": "Final document is a clean personal email with the stated subject, converted dates/times/prices, a bullet list of at least four items including 'two lanterns', and excludes retracted/command text."
+ },
+ "generated": true,
+ "genre": "personal email"
+}

@@ -1,0 +1,61 @@
+{
+ "name": "gen_sea_poem",
+ "task": "User dictates a short poem with a title, with live formatting and one quick edit.",
+ "voice": "verse",
+ "turns": [
+  {
+   "say": "Heading tide notes, okay, I'm dictating a short poem, keep it clean and spaced.",
+   "pause_ms": 700
+  },
+  {
+   "say": "New paragraph. I walk the pier at six thirty, um, counting gulls like loose change.",
+   "pause_ms": 700
+  },
+  {
+   "say": "The water says, pay attention, no wait, make that, the water says, be gentle.",
+   "pause_ms": 700
+  },
+  {
+   "say": "New paragraph. On May fifth, twenty twenty four, I promised to call my brother.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Change brother to sister. I did not, and the tide kept the receipt: twelve dollars.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Make that a list. First, salt on my lips. Second, a bell buoy singing. Third, one blue cup.",
+   "pause_ms": 700
+  },
+  {
+   "say": "New paragraph. Scratch that, not the cup line, scratch the word blue; make it plain.",
+   "pause_ms": 700
+  },
+  {
+   "say": "New paragraph. End with a couplet: if morning can forgive, so can I; if not, I'll learn.",
+   "pause_ms": 700
+  }
+ ],
+ "expects": {
+  "contains": [
+   "tide",
+   "sister",
+   "$12",
+   "2024",
+   "pier"
+  ],
+  "not_contains": [
+   "scratch that",
+   "make that a list",
+   " um",
+   "blue"
+  ],
+  "min_list_items": 3,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Document should have a heading/title, poem lines with paragraph breaks, convert spoken date/number/price to figures (e.g., 6:30, 2024, $12), apply the requested word change (sister not brother), and include a 3-item list; commands and disfluencies should not appear."
+ },
+ "generated": true,
+ "genre": "short poem with a title"
+}

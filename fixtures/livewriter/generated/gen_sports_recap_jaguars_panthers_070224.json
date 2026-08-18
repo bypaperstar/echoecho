@@ -1,0 +1,61 @@
+{
+ "name": "gen_sports_recap_jaguars_panthers",
+ "task": "A sports reporter dictates a live match recap with a heading, paragraphs, and a stats list.",
+ "voice": "echo",
+ "turns": [
+  {
+   "say": "heading Week 2 Recap: Jaguars vs Panthers.",
+   "pause_ms": 650
+  },
+  {
+   "say": "Okay so, um, Saturday night in two thousand twenty six, the Jaguars edged Carolina, twenty one to seventeen.",
+   "pause_ms": 800
+  },
+  {
+   "say": "new paragraph Start with the big moment: a fourth-quarter pick-six by Malik Grant.",
+   "pause_ms": 700
+  },
+  {
+   "say": "They were down by ten\u2014no wait, make that seven\u2014entering the final period.",
+   "pause_ms": 750
+  },
+  {
+   "say": "make that a list Key stats: Trevor Lane threw for two hundred eighty four yards and two touchdowns.",
+   "pause_ms": 700
+  },
+  {
+   "say": "Also, Nina Cross hit three field goals, from forty eight, thirty two, and twenty nine yards.",
+   "pause_ms": 700
+  },
+  {
+   "say": "change Panthers to Carolina Panthers, and note the crowd was forty five thousand, give or take.",
+   "pause_ms": 800
+  },
+  {
+   "say": "Close with one line: defense sealed it, and the Jaguars move to two and oh.",
+   "pause_ms": 650
+  }
+ ],
+ "expects": {
+  "contains": [
+   "jaguars",
+   "panthers",
+   "2026",
+   "21",
+   "17"
+  ],
+  "not_contains": [
+   "scratch that",
+   "new paragraph",
+   "make that a list",
+   " um"
+  ],
+  "min_list_items": 3,
+  "has_heading": true
+ },
+ "judge": {
+  "criteria": "Document should render a clear heading, then paragraphs, then a bulleted/numbered stats list; convert spoken numbers to figures (e.g., 2026, 21\u201317, 284, 48/32/29, 45,000, 2\u20130); apply the self-correction to use seven (not ten); omit disfluencies and spoken command phrases."
+ },
+ "generated": true,
+ "genre": "sports match recap"
+}

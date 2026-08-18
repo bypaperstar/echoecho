@@ -109,6 +109,7 @@
   }
 
   $('b-summon').addEventListener('click', () => act('summon'));
+  $('b-livewriter').addEventListener('click', () => act('live-writer', 'starting Live Writer…'));
   $('b-daemon').addEventListener('click', () =>
     act(daemonUp ? 'daemon-stop' : 'daemon-start', daemonUp ? 'stopping daemon…' : 'starting daemon…'));
   $('b-vm').addEventListener('click', () => act('vm-boot', "waking echoecho's Mac (clone + boot takes ~a minute)…"));
