@@ -77,6 +77,10 @@ class GuiDriver:
     async def launch(self, app):
         raise NotImplementedError
 
+    async def open_file(self, path, app="TextEdit"):
+        """Open a workspace-relative file in a guest desktop application."""
+        raise NotImplementedError
+
     async def type_text(self, text):
         raise NotImplementedError
 
@@ -124,6 +128,16 @@ class SshGuiDriver(GuiDriver):
 
     async def launch(self, app):
         await self._run(["open", "-a", app])
+
+    async def open_file(self, path, app="TextEdit"):
+        # `path` is validated by computer.use before it reaches the driver.
+        # Pass an unquoted argv item here: _run quotes each argument while it
+        # builds the remote shell command.
+        guest = config.vm_guest_workspace().rstrip("/") + "/" + path
+        # A fresh macOS guest has no default association for .md, so a plain
+        # `open file.md` fails. TextEdit is present in the base image and is
+        # the right default for EchoEcho's workspace notes.
+        await self._run(["open", "-a", app, guest])
 
     async def type_text(self, text):
         await self._run(_osascript(
@@ -214,6 +228,9 @@ class FakeGuiDriver(GuiDriver):
 
     async def launch(self, app):
         self.actions.append(("launch", app))
+
+    async def open_file(self, path, app="TextEdit"):
+        self.actions.append(("open", path, app))
 
     async def type_text(self, text):
         self.actions.append(("type", text))

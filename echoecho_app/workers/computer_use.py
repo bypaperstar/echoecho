@@ -7,6 +7,7 @@ the run is watchable live in the viewer (PR 10 renders images) — that shot
 trail IS the screen recording. Steps are a list of dicts:
 
     {"action": "launch",     "app": "TextEdit"}
+    {"action": "open",       "path": "notes.md", "app": "TextEdit"}
     {"action": "type",       "text": "Hello from echoecho"}
     {"action": "key",        "combo": "cmd+s"}
     {"action": "wait",       "seconds": 1}
@@ -16,6 +17,8 @@ The VM guarantees isolation, so this runs unconfirmed at voice speed like the
 rest of the tier; only writes back to real user documents still need the
 outbox + spoken approval (PR 13).
 """
+from pathlib import PurePosixPath
+
 from echoecho_app.bus import TaskResult
 from echoecho_app.services import gui as gui_mod
 from echoecho_app.workers.base import register
@@ -30,11 +33,23 @@ def _vm_configured():
     return config.sandbox_tier() == "vm"
 
 
+def _workspace_path(value):
+    """Validate the guest file action cannot escape the shared workspace."""
+    path = PurePosixPath(str(value or ""))
+    if not str(path) or str(path) == "." or path.is_absolute() or ".." in path.parts:
+        raise ValueError("open path must be a workspace-relative file")
+    return path.as_posix()
+
+
 async def _do_step(driver, step, shot_dir, idx):
     action = (step.get("action") or "").lower()
     if action == "launch":
         await driver.launch(step["app"])
         label = "launched %s" % step["app"]
+    elif action == "open":
+        path = _workspace_path(step.get("path"))
+        await driver.open_file(path, step.get("app") or "TextEdit")
+        label = "opened %s" % path
     elif action == "type":
         await driver.type_text(step.get("text", ""))
         label = "typed text"
@@ -66,14 +81,15 @@ async def _do_step(driver, step, shot_dir, idx):
           description="drive a Mac app inside echoecho's VM by a sequence of GUI "
                       "steps, capturing screenshots; REQUIRES args.steps, a "
                       "list like [{'action':'launch','app':'TextEdit'}, "
+                      "{'action':'open','path':'notes.md','app':'TextEdit'}, "
                       "{'action':'type','text':'hi'}, {'action':'key',"
                       "'combo':'cmd+s'}, {'action':'wait','seconds':1}, "
                       "{'action':'screenshot','name':'result'}] — prose in "
                       "instructions alone does nothing",
           arg_schema={"steps": {
               "type": "array",
-              "description": "GUI steps: {action: launch|type|key|wait|"
-                             "screenshot, ...}",
+              "description": "GUI steps: {action: launch|open|type|key|wait|"
+                      "screenshot, ...}",
               "items": {"type": "object"}}},
           # same group as agent.run/doc.edit: both write workspace files AND
           # share the one warm LumeVM — unserialized, an agent.run budget
@@ -96,7 +112,7 @@ async def run_computer_use(task, ctx):
         return TaskResult(
             say="That needs a re-dispatch: call dispatch_task again with "
                 "kind computer.use and args {\"steps\": [{\"action\": "
-                "\"launch\", \"app\": \"TextEdit\"}, {\"action\": "
+                "\"open\", \"path\": \"notes.md\", \"app\": \"TextEdit\"}, {\"action\": "
                 "\"screenshot\", \"name\": \"result\"}]} adjusted to the "
                 "goal — prose instructions can't drive the screen.",
             priority="interrupt", data={"error": "no steps"})
