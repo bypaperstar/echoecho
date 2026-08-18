@@ -50,14 +50,25 @@ def test_index_served(server):
 
 
 def test_version_reported(server):
-    """/version: VERSION-file semver plus git sha + last-commit date — this
-    repo is a checkout, so all three must be real."""
+    """/version: MAJOR.MINOR from the VERSION file + patch = git commit count
+    (every deploy of new commits gets a new number), plus git sha and
+    last-commit date — this repo is a checkout, so all must be real."""
+    import re
+    import subprocess
+    from pathlib import Path
     import echoecho_app
     status, body = get(server, "/version")
     assert status == 200
     info = json.loads(body)
     assert info["version"] == echoecho_app.__version__
-    assert info["version"] != "0.0.0"  # the VERSION file was found
+    assert re.fullmatch(r"\d+\.\d+\.\d+", info["version"])
+    base = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+    if base.count(".") < 2:  # derived patch: must equal the commit count
+        count = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+        assert info["version"] == "%s.%s" % (base, count)
     assert info["sha"]
     assert info["updatedAt"]
 

@@ -34,6 +34,18 @@ if ! command -v node >/dev/null 2>&1 && [ -d "$HOME/.nvm/versions/node" ]; then
 fi
 export PATH
 
+# The deployed version: VERSION holds MAJOR.MINOR (bumped deliberately); the
+# patch is the git commit count, so every deploy of new commits gets a new
+# number automatically. A full MAJOR.MINOR.PATCH written into VERSION wins.
+repo_version() {
+  ver="$(tr -d '[:space:]' < "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
+  case "$ver" in
+    *.*.*) ;;  # explicit full version pinned by hand
+    *) ver="$ver.$(git -C "$REPO" rev-list --count HEAD 2>/dev/null || echo 0)" ;;
+  esac
+  echo "$ver"
+}
+
 daemon_pid() { pgrep -f "echoecho\.py --voice" | head -1 || true; }
 # The packaged app's main process only — helpers live under Contents/Frameworks
 # so this pattern can't match them. Empty for a dev `electron .` orb: that orb
@@ -143,7 +155,7 @@ cmd_build_app() {
   # find its scripts and show what it's running
   node -e "require('fs').writeFileSync('runtime-config.json', JSON.stringify({
     repoRoot: '$REPO',
-    version: require('fs').readFileSync('$REPO/VERSION', 'utf8').trim(),
+    version: '$(repo_version)',
     sha: require('child_process').execSync('git rev-parse --short HEAD', {cwd: '$REPO'}).toString().trim(),
     updatedAt: require('child_process').execSync('git log -1 --format=%cI', {cwd: '$REPO'}).toString().trim(),
     builtAt: new Date().toISOString() }, null, 2))"
@@ -232,7 +244,7 @@ cmd_update() {
   # fresh daemon tethered to the new app process (never to the dying old one)
   if [ -n "$was_daemon" ]; then cmd_stop_daemon; fi
   cmd_install_app
-  echo "update complete: $(git rev-parse --short HEAD)"
+  echo "update complete: v$(repo_version) ($(git rev-parse --short HEAD))"
 }
 
 case "${1:-}" in
