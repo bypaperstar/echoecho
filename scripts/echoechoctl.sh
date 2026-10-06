@@ -3,7 +3,7 @@
 # echoecho.app control panel's buttons and runnable by hand:
 #
 #   bash scripts/echoechoctl.sh status|start-daemon|stop-daemon|restart-daemon
-#                           boot-vm|stop-vm|reset-vm
+#                           boot-vm|open-vm|stop-vm|reset-vm
 #                           build-app|install-app|start-app|stop-app|update
 #                           diagnostics|doctor|logs
 #
@@ -293,6 +293,14 @@ cmd_boot_vm() {
 
 cmd_stop_vm() { lume stop "$VM_NAME" 2>/dev/null || true; echo "vm stopped"; }
 
+cmd_open_vm() {
+  cd "$REPO"
+  # Match the daemon's overrides, then let the VM service prepare its usual
+  # guest and mounts. The native viewer is a movable, minimizable window.
+  [ -f "$DAEMON_ENV" ] && set -a && . "$DAEMON_ENV" && set +a
+  "$(diagnostics_python)" "$REPO/scripts/open_vm.py"
+}
+
 cmd_reset_vm() {
   # the ladder's "undo": throw the scratch Mac away; next boot re-clones golden
   lume stop "$VM_NAME" 2>/dev/null || true
@@ -315,9 +323,15 @@ cmd_build_app() {
     builtAt: new Date().toISOString() }, null, 2))"
   npx --yes @electron/packager . echoecho --platform=darwin --arch=arm64 \
     --app-bundle-id app.echoecho.desktop \
+    --extend-info resources/usage-descriptions.plist \
     --icon build/icon.icns --out dist --overwrite \
     --ignore '^/prototypes' --ignore '^/test' --ignore '^/dist' --ignore '^/build/echoecho.iconset' \
     >/dev/null
+  # Packager leaves Electron's linker signature behind. Give this app a
+  # valid, stable identity so macOS can apply its own privacy permissions.
+  bundle="$APP_DIR/dist/echoecho-darwin-arm64/echoecho.app"
+  codesign --force --deep --sign - --identifier app.echoecho.desktop "$bundle"
+  codesign --verify --deep --strict "$bundle"
   rm -f runtime-config.json
   echo "built $APP_DIR/dist/echoecho-darwin-arm64/echoecho.app"
 }
@@ -491,6 +505,7 @@ case "${1:-}" in
   stop-daemon)     cmd_stop_daemon ;;
   restart-daemon)  cmd_stop_daemon; cmd_start_daemon ;;
   boot-vm)         cmd_boot_vm ;;
+  open-vm)         cmd_open_vm ;;
   stop-vm)         cmd_stop_vm ;;
   reset-vm)        cmd_reset_vm ;;
   build-app)       cmd_build_app ;;
@@ -505,5 +520,5 @@ case "${1:-}" in
   diagnostics)     shift; cmd_diagnostics "$@" ;;
   doctor)          shift; cmd_doctor "$@" ;;
   logs)            shift; cmd_logs "$@" ;;
-  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|version|live-writer|stop-live-writer|diagnostics|doctor|logs}"; exit 2 ;;
+  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|open-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|version|live-writer|stop-live-writer|diagnostics|doctor|logs}"; exit 2 ;;
 esac

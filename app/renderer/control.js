@@ -159,6 +159,7 @@
   $('b-daemon').addEventListener('click', () =>
     act(daemonUp ? 'daemon-stop' : 'daemon-start', daemonUp ? 'stopping daemon…' : 'starting daemon…'));
   $('b-vm').addEventListener('click', () => act('vm-boot', "waking echoecho's Mac (clone + boot takes ~a minute)…"));
+  $('b-open-vm').addEventListener('click', () => act('vm-open', 'opening the shared VM…'));
   $('b-reset').addEventListener('click', () => {
     if (confirm("Reset echoecho's Mac? The VM is deleted and re-cloned fresh from the golden image. Workspace files on your Mac are untouched.")) {
       act('vm-reset', 'resetting: delete + fresh clone + boot…');
