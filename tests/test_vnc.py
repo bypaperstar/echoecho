@@ -252,6 +252,25 @@ def test_client_handshake_and_input():
     assert ("pointer", 1, 10, 20) in pointers  # button-1 press at (10,20)
 
 
+def test_shortcut_holds_all_keys_together_and_releases_after_failure(monkeypatch):
+    client = VncClient("127.0.0.1", 5900)
+    events = []
+    monkeypatch.setattr(client, "key_event",
+                        lambda key, down: events.append((key, down)))
+    def hold(seconds):
+        events.append(("hold", seconds))
+        if seconds == 0.3:
+            raise RuntimeError("interrupted shortcut")
+    monkeypatch.setattr(vnc_mod.time, "sleep", hold)
+    cmd = vnc_mod.MODIFIER_KEYSYMS["cmd"]
+    shift = vnc_mod.MODIFIER_KEYSYMS["shift"]
+    with pytest.raises(RuntimeError, match="interrupted shortcut"):
+        client.chord([cmd, shift], ord("a"))
+    assert events == [(cmd, True), (shift, True), (ord("a"), True),
+                      ("hold", 0.3), (ord("a"), False),
+                      (shift, False), (cmd, False)]
+
+
 def test_password_client_rejects_unauthenticated_downgrade():
     server = NoneOnlyRfbServer().start()
     try:

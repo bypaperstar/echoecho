@@ -568,8 +568,8 @@ class VncClient:
                 self.key_event(keysym, False)
         time.sleep(hold)
 
-    def chord(self, modifiers, keysym, hold=0.03):
-        """Press modifier keysyms, tap the key, release modifiers (reverse)."""
+    def chord(self, modifiers, keysym, hold=0.3):
+        """Hold a shortcut long enough for the macOS virtual keyboard."""
         pressed_modifiers = []
         key_pressed = False
         primary_error = None
@@ -578,7 +578,6 @@ class VncClient:
             for modifier in modifiers:
                 self.key_event(modifier, True)
                 pressed_modifiers.append(modifier)
-            time.sleep(hold)
             self.key_event(keysym, True)
             key_pressed = True
             time.sleep(hold)
@@ -590,7 +589,6 @@ class VncClient:
                     self.key_event(keysym, False)
                 except BaseException as exc:
                     release_error = release_error or exc
-            time.sleep(hold)
             for modifier in reversed(pressed_modifiers):
                 try:
                     self.key_event(modifier, False)
@@ -600,7 +598,7 @@ class VncClient:
             raise primary_error
         if release_error is not None:
             raise release_error
-        time.sleep(hold)
+        time.sleep(0.05)
 
     def type_text(self, text, delay=0.03):
         if not isinstance(text, str):
@@ -630,7 +628,8 @@ class VncClient:
                     keysym = ord(ch)  # printable ASCII keysym == code point
                     shift = ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?'
                     if shift:
-                        self.chord([MODIFIER_KEYSYMS["shift"]], keysym)
+                        self.chord([MODIFIER_KEYSYMS["shift"]], keysym,
+                                   hold=0.03)
                     else:
                         self.tap(keysym)
                     sent += 1
