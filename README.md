@@ -170,16 +170,14 @@ Electron) — and an **interactive portal into echoecho's Mac**. echoecho lives 
 menu bar as a code-drawn orb; clicking it (or saying "echoecho" — the wake
 event arrives over the same SSE feed the web viewer uses) pours a black
 procedural blob out of the menu bar, genie-style, into a transparent
-always-on-top scene. Documents and transcript wisps emerge from the blob; the
-"echoecho's Mac" item is a live VNC view of the Lume VM — interactive by default
-(it's echoecho's Mac; the blast radius is the sandbox, and your shared folders stay
-read-only) with a view-only toggle. Lume already runs a password-protected VNC
-server even under `--no-display`, so the portal needs no VM changes: the app
-asks the viewer's new `/vnc-info` endpoint (or `ECHOECHO_VNC_URL`) for the
-endpoint, bridges WebSocket↔TCP locally, and renders it with noVNC. Because
-VNC input lands at the virtual-hardware level, *you* can type in the VM even
-where the agent's `osascript` keystrokes are still TCC-blocked (see the PR 14
-caveat). Run it with `cd app && npm install && npm start`; the blob look-lab
+always-on-top scene. Documents and transcript wisps emerge from the blob.
+The **Open shared VM** button and orb double-click open Lume's native desktop
+in a normal window you can move and minimize. You and Echoecho use the same
+configured `ECHOECHO_VM_NAME` (default `echoecho-vm`), workspace, and desktop.
+Opening the viewer prepares that guest if needed and attaches to it. Native
+attachment requires **Lume 0.6 or later**. The app retains its VNC bridge for
+the demo and display diagnostics.
+Run it with `cd app && npm install && npm start`; the blob look-lab
 lives in `app/prototypes/`. The web viewer at :8765 is unchanged.
 
 The Orb installs as a real **echoecho.app** (Dock icon, Launchpad, Spotlight):
@@ -187,11 +185,13 @@ The Orb installs as a real **echoecho.app** (Dock icon, Launchpad, Spotlight):
 zero-dependency PNG encoder in `app/lib/icon.js`, `iconutil` → icns), packages
 with `@electron/packager`, and drops it in `/Applications`. Opening echoecho.app
 shows a **control panel** — daemon / VM / orb status plus Summon, Start/Stop
-daemon, Wake / Reset echoecho's Mac, Update & relaunch (git pull → reinstall →
+daemon, Wake / Open / Reset the shared Mac, Update & relaunch (git pull → reinstall →
 rebuild → reopen), and a start-at-login toggle. The same lifecycle commands
 work from a terminal: `scripts/echoechoctl.sh {status|start-daemon|stop-daemon|
-boot-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
-`ECHOECHO_INPUT_DEVICE`) live in `~/.echo/daemon.env`.
+boot-vm|open-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
+`ECHOECHO_INPUT_DEVICE`) live in `~/.echoecho/daemon.env`. The packaged bundle
+declares microphone and Local Network access and is signed with its stable
+`app.echoecho.desktop` identity so macOS can apply its privacy permissions.
 
 **The app and the wake word live and die together.** Launching echoecho.app
 starts the wake-word daemon; quitting — or force-quitting — the app takes the

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Echoecho listens for its wake phrase and your spoken requests.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Echoecho connects to its own local virtual Mac to run your tasks and show its desktop.</string>
+</dict>
+</plist>

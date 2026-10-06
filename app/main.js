@@ -355,7 +355,7 @@ function openControl() {
   }
   controlWin = new BrowserWindow({
     width: 460,
-    height: 610,
+    height: 655,
     resizable: false,
     fullscreenable: false,
     title: 'echoecho',
@@ -590,7 +590,7 @@ function rendererSurface(sender) {
 
 const RENDERER_TOKEN_VALUES = {
   action: new Set(['summon', 'live-writer', 'daemon-start', 'daemon-stop', 'daemon-restart',
-                   'vm-boot', 'vm-reset', 'update', 'quit-app']),
+                   'vm-boot', 'vm-open', 'vm-reset', 'update', 'quit-app']),
   operation: new Set(['pose-read', 'pose-write']),
   transition: new Set(['reveal-received', 'dismiss-received', 'hidden-ack', 'revealed']),
   reason: new Set(['wake', 'tray', 'dock', 'menu', 'control', 'smoke', 'demo', 'unknown']),
@@ -902,6 +902,7 @@ const CTL_ACTIONS = {
   'daemon-stop': () => runEchoechoctl('stop-daemon'),
   'daemon-restart': () => runEchoechoctl('restart-daemon'),
   'vm-boot': () => runEchoechoctl('boot-vm', true),
+  'vm-open': () => { dismiss(); return runEchoechoctl('open-vm'); },
   'vm-reset': () => runEchoechoctl('reset-vm', true),
   // starts the standalone Live Writer server if needed and opens the page in
   // the default browser (the script does the `open`; it blocks until healthy)

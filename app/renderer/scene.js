@@ -430,14 +430,20 @@ addEventListener('keydown', (e) => {
   else window.orb.dismissRequest();
 });
 
-// clicking the companion blob restores; double-click summons echoecho's Mac
+// Double-click opens the shared Mac in a normal window instead of expanding
+// the guest inside the always-on-top orb overlay.
 canvas.addEventListener('click', (e) => {
   if (!expanded) return;
   if (Math.hypot(e.clientX - pose.x, e.clientY - pose.y) < pose.r * 1.8) restore();
 });
 canvas.addEventListener('dblclick', (e) => {
   if (expanded || rv.value < 0.99 || now() - lastDragEnd < 0.4) return;
-  if (Math.hypot(e.clientX - pose.x, e.clientY - pose.y) < pose.r * 1.8) spawnMac();
+  if (Math.hypot(e.clientX - pose.x, e.clientY - pose.y) < pose.r * 1.8) {
+    if (DEMO) spawnMac();
+    else window.ctl.action('vm-open').catch((err) => {
+      report('scene.vnc_open_failed', errorMeta(err));
+    });
+  }
 });
 
 // ---------------------------------------------- tight hit region + dragging
