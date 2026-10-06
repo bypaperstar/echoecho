@@ -1,15 +1,15 @@
 # echoecho — always-on voice agent prototype
 
-echoecho is a quick-and-dirty always-on voice agent for your Mac. Say **"echoecho"** to start a session, talk back and forth like ChatGPT voice, and echoecho farms out real work (writing a doc with you live, building a grocery list while searching recipes, tutoring you on a new topic) to background worker agents — weaving results back into the conversation as they land. The session ends when you say **"that's it"** or after 10 minutes of silence.
+echoecho is a voice assistant and shared workspace for your Mac. Say **"echoecho"** to start a session, talk back and forth like ChatGPT voice, and echoecho farms out real work (writing a doc with you live, building a grocery list while searching recipes, tutoring you on a new topic) to background worker agents — weaving results back into the conversation as they land. The session ends when you say **"that's it"** or after 10 minutes of silence.
 
 See **[PLAN.md](PLAN.md)** for the full architecture, decisions (and what was rejected and why), the stacked-PR breakdown, demo scripts, and risks.
 
 ## Big pieces
 
 1. **Wake word** — Vosk keyword spotting for "echoecho" (open source, no keys, no training).
-2. **Voice loop** — OpenAI Realtime API speech-to-speech (`gpt-realtime-2.1[-mini]`), semantic VAD, barge-in, reconnect-with-backoff so the daemon never dies.
-3. **Orchestrator** — a generic in-process task queue: the voice agent dispatches tasks, async workers do them, results are ranked (interrupt / ambient / silent) and injected back into the live conversation at safe turn boundaries. Tasks that finish while echoecho is asleep are surfaced on the next wake as a "[since last session]" note.
-4. **Live workspace** — everything workers produce lands in `workspace/` (any file type, subdirectories welcome), rendered live in a browser tab via a tiny SSE auto-refresh viewer: a file tree, type-aware rendering (markdown, code, images, downloads), changed markdown sections flash briefly.
+2. **Voice loop** — GPT-Live (`gpt-live-1`) handles full-duplex conversation, with GPT-6 Luna delegating to the existing task tools. GPT-Realtime 2.1 is the automatic fallback when the account lacks Live access; Realtime retains semantic VAD, barge-in and bounded reconnects. Wake-word capture stays local until a voice session starts.
+3. **Orchestrator** — a persistent task queue with cancellation, three execution slots, a bounded backlog, and shared workspace write locks: the voice agent dispatches tasks, async workers do them, results are ranked (interrupt / ambient / silent) and injected back into the live conversation at safe turn boundaries. Tasks that finish while echoecho is asleep are surfaced on the next wake as a "[since last session]" note.
+4. **Live workspace** — everything workers produce lands in `workspace/` (any file type, subdirectories welcome), rendered live in a browser tab via an SSE viewer that preserves your selected document: a file tree, type-aware rendering (markdown, code, images, downloads), changed markdown sections flash briefly.
 
 ## Mac runbook (from zero to talking)
 
@@ -69,11 +69,12 @@ happening" view, in two panes:
   and results being handed back into the live conversation. A collapsible
   "How echoecho works" box sits at the top. Driven by an append-only
   `workspace/.events.jsonl` feed (truncated on each run) served at
-  `/transcript`; the header shows the session state badge, connected Realtime
+  `/transcript`; the header shows the session state badge, connected voice
   model, and a running-task counter.
 - **Right — workspace docs.** One tab per `workspace/*.md` file, rendered
-  with marked.js, auto-focusing the most recently modified file and flashing
-  changed sections — exactly as before.
+  with marked.js, following the newest file until you select one. Your
+  selection stays pinned through transcript and task updates; **Follow newest**
+  restores automatic selection. Markdown falls back to safe plain text offline.
 
 Both panes update from the same SSE stream; `--text` and `--script` runs
 populate the transcript the same way voice does, so the whole UI works
@@ -81,13 +82,25 @@ keyless and headless.
 
 ### Model / cost flags
 
-- Default model is **`gpt-realtime-2.1-mini`** (~3x cheaper audio; use it for
-  all development and rehearsal).
-- Demo day: `python3 echoecho.py --voice --model gpt-realtime-2.1` for the best
-  voice + tool-calling quality. Sessions only exist between wake and
-  "that's it", so even 2.1 is cents per demo.
-- Worker LLM calls use the Responses API (`gpt-4o-mini` class); override with
-  `ECHOECHO_WORKER_MODEL`.
+- The voice default is **`gpt-live-1`**, using its dedicated Live endpoint and
+  Responses delegation. [OpenAI documents GPT-Live](https://developers.openai.com/api/docs/models/gpt-live-1)
+  at **$0.05 per session minute plus backend usage**. Live supports simultaneous
+  caller and assistant speech; captions are grouped independently by speaker.
+- Delegation, text conversations and optional worker LLM calls default to
+  **`gpt-6-luna`**. Override with `ECHOECHO_BACKEND_MODEL`,
+  `ECHOECHO_TEXT_MODEL` or `ECHOECHO_WORKER_MODEL`. External agent CLI models
+  retain their own runtime configuration.
+- Choose **GPT-Live**, **GPT-Realtime 2.1**, or **GPT-Realtime 2.1 Mini** in
+  **Voice & app settings**, or use `--model`. `ECHOECHO_VOICE_MODEL` sets the
+  default; legacy `ECHOECHO_REALTIME_MODEL` pins are still honored.
+- Only a Live model access failure triggers automatic Realtime fallback,
+  before microphone upload or tool dispatch. Configuration errors stay visible.
+  Realtime startup also waits for accepted session settings before upload.
+  Neither Live availability nor microphone capture is inferred from an app icon.
+- Saved model, device and recording choices live in private, secret-free
+  `~/.echoecho/preferences.json`. They override daemon environment pins; CLI
+  options override preferences. Changes made during a conversation apply to
+  its next session. Wake-word listening does not open a billable API session.
 
 ### The three demo one-liners
 
@@ -120,8 +133,10 @@ and resumable.
 PR 12 adds the sandbox ladder's tier 2 — **echoecho's own macOS VM**. `ECHOECHO_SANDBOX=vm`
 (or a per-task `args.sandbox="vm"`) runs the agent inside a macOS guest managed by
 [Lume](https://github.com/trycua/cua) over SSH, with `workspace/` shared read-write
-so the viewer and touched-file detection keep working unchanged. Scratch VMs are
-APFS-clones of a golden image, so rollback ("undo that") is a delete + re-clone.
+so the viewer and touched-file detection keep working unchanged. The shared guest is an
+APFS-clone of a golden image. Explicit **Reset shared VM** deletes and re-clones
+its disk. Forced task cleanup stops the guest and preserves its disk; a stop can
+interrupt unsaved work in open guest apps. Agent and GUI tasks share a write lock.
 Build the golden image once on the Mac: `AGENT=1 bash scripts/vm_golden.sh` (pulls a
 ~18 GB base image, installs echoecho's SSH key, allows model API keys through the guest
 `sshd`, and installs the `claude` CLI in the guest). The default tier stays `shell`
@@ -167,10 +182,10 @@ folders shared, `outbox.apply` isn't even advertised and the approval flow is ab
 
 PR 15 adds the **echoecho Orb** — a menu-bar app face for the viewer (`app/`,
 Electron) — and an **interactive portal into echoecho's Mac**. echoecho lives in the
-menu bar as a code-drawn orb; clicking it (or saying "echoecho" — the wake
-event arrives over the same SSE feed the web viewer uses) pours a black
-procedural blob out of the menu bar, genie-style, into a transparent
-always-on-top scene. Documents and transcript wisps emerge from the blob.
+menu bar as a code-drawn orb. Clicking the tray or **Show the orb** brings
+its transparent scene onto the desktop. A wake word starts a conversation
+without opening an overlay, and the production orb is not always on top.
+Documents and transcript wisps emerge from the blob when explicitly shown.
 The **Open shared VM** button and orb double-click open Lume's native desktop
 in a normal window you can move and minimize. You and Echoecho use the same
 configured `ECHOECHO_VM_NAME` (default `echoecho-vm`), workspace, and desktop.
@@ -184,21 +199,28 @@ The Orb installs as a real **echoecho.app** (Dock icon, Launchpad, Spotlight):
 `bash scripts/echoechoctl.sh install-app` generates the icon procedurally (a
 zero-dependency PNG encoder in `app/lib/icon.js`, `iconutil` → icns), packages
 with `@electron/packager`, and drops it in `/Applications`. Opening echoecho.app
-shows a **control panel** — daemon / VM / orb status plus Summon, Start/Stop
-daemon, Wake / Open / Reset the shared Mac, Update & relaunch (git pull → reinstall →
-rebuild → reopen), and a start-at-login toggle. The same lifecycle commands
+shows a **control panel** with live microphone level and device labels,
+**Talk now**, pause/resume listening, typed tasks, progress and cancellation.
+Pause closes microphone capture while background tasks continue. Voice settings
+include model, microphone, output and recording controls, plus links to macOS
+privacy settings. Workspace, Live Writer and the same shared VM are one click
+away. Updates rebuild and verify a staged app before replacing the installed
+bundle; start-at-login remains optional. The same lifecycle commands
 work from a terminal: `scripts/echoechoctl.sh {status|start-daemon|stop-daemon|
-boot-vm|open-vm|reset-vm|install-app|update|…}`; daemon env pins (e.g.
+boot-vm|open-vm|reset-vm|install-app|install-app-closed|update|…}`; daemon env pins (e.g.
 `ECHOECHO_INPUT_DEVICE`) live in `~/.echoecho/daemon.env`. The packaged bundle
 declares microphone and Local Network access and is signed with its stable
 `app.echoecho.desktop` identity so macOS can apply its privacy permissions.
+Use **`install-app-closed`** to build and install an update, stop listening and
+leave the app closed for later testing. Builds require Node 22.12 or newer.
 
-**The app and the wake word live and die together.** Launching echoecho.app
+**The app owns microphone capture.** Launching echoecho.app
 starts the wake-word daemon; quitting — or force-quitting — the app takes the
 daemon down with it (the daemon tethers to the app's pid via
 `ECHOECHO_TETHER_PID` and exits when that process disappears). The reverse
 holds too: `start-daemon` from a terminal launches the app first if needed, so
-whenever echoecho is listening there's a Dock icon saying so, and killing that
+whenever echoecho is listening there is a Dock icon, while the control panel
+confirms fresh capture and allows listening to be paused, and killing that
 Dock icon always silences the mic. A bare `python echoecho.py --voice` in a
 terminal stays untethered for debugging.
 
@@ -233,9 +255,16 @@ fixture-tuned. Scenarios in `fixtures/livewriter/`; results in
 in [`livewriter/TESTING.md`](livewriter/TESTING.md). Keyless unit tests:
 `python3 -m pytest tests/test_livewriter.py`.
 
-Headless merge gate (runs all three scripted demos plus the generic agent.run
-rewrite of them, asserts artifacts + task log, then the full test suite):
-`bash scripts/demo_check.sh`.
+Checks run on pull requests and main through [App checks](.github/workflows/checks.yml):
+Python tests, Electron unit tests, dependency audit and shell syntax. Locally:
+`python -m pytest tests/ -q` and `cd app && npm ci && npm test`.
+Headless desktop and workspace interaction checks use
+`cd app && npx playwright install chromium && npm run test:ui`.
+They use simulated daemon data and do not capture or play audio; screenshots
+land under `.context/review/`. Native microphone and shared-VM interaction
+still require a Mac.
+The optional `bash scripts/demo_check.sh` runs the scripted demos and tests but
+replaces workspace demo artifacts; use it only in a disposable checkout.
 
 ### Developer diagnostics
 

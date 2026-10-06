@@ -539,30 +539,34 @@ def test_reset_defers_diagnostics_until_cleanup_boundary(monkeypatch):
 
 # -- forced-kill disposes the VM (guest orphans can't outlive the budget) -----
 
-def test_budget_kill_discards_the_vm_via_reset(tmp_path, monkeypatch):
-    """On a budget breach the local ssh dies but can't reap guest children,
-    so the worker must dispose the whole VM. Proven with a FakeVM whose
-    reset() records it, driven through the real timeout+kill path."""
+@pytest.mark.parametrize('process_state',['running','closed_pipes','leader_exited'])
+def test_budget_kill_stops_the_shared_vm_and_preserves_disk(tmp_path, monkeypatch,process_state):
+    """The deadline covers both a closed pipe and an exited process leader."""
     monkeypatch.setenv("ECHOECHO_AGENT_TIMEOUT", "0.3")
 
     class RecordingVM(FakeVM):
         def __init__(self, root):
             super().__init__(root)
-            self.reset_calls = 0
+            self.stop_calls = 0
+
+        async def stop(self):
+            self.stop_calls += 1
 
         async def reset(self):
-            self.reset_calls += 1
+            raise AssertionError('Must not delete the shared VM')
 
         def command(self, argv, workspace):
             # ignore the (hanging) agent argv: simulate an ssh that hangs
-            return ["sh", "-c", "sleep 30"], Path(workspace)
+            script = {'running':'sleep 30', 'closed_pipes':'exec 1>&-; exec 2>&-; sleep 30',
+                      'leader_exited':'sleep 30 & exit 0'}[process_state]
+            return ["sh", "-c", script], Path(workspace)
 
     vm = RecordingVM(tmp_path / "guest")
     orch, _, _ = run_orch(
         [TaskRequest(kind="agent.run", instructions="loop", args={"sandbox": "vm"})],
         tmp_path, extra={"agent_cli": ClaudeCLI(), "sandbox": vm}, timeout=10.0)
     assert "budget" in orch.tasks["t1"].result.say
-    assert vm.reset_calls == 1  # the VM was thrown away on the kill
+    assert vm.stop_calls == 1
 
 
 def test_discard_clears_the_warm_singleton(monkeypatch):
@@ -575,10 +579,10 @@ def test_discard_clears_the_warm_singleton(monkeypatch):
     async def fake_reset():
         fake_reset.called = True
     fake_reset.called = False
-    warm.reset = fake_reset
+    warm.stop = fake_reset
     asyncio.run(vm_mod.discard(warm))
     assert fake_reset.called
-    assert vm_mod._shared_vm is None  # next task re-clones a clean guest
+    assert vm_mod._shared_vm is None  # next task prepares the preserved guest
 
 
 def test_clean_completion_does_not_discard(tmp_path):

@@ -18,9 +18,8 @@ is identical across tiers:
 Warm policy: one shared LumeVM per process, booted on first use and left
 running between tasks (clone ~seconds, cold boot ~30s, warm exec ~instant).
 Teardown on a forced kill (budget breach) can't reach guest children over a
-dead ssh, so the worker calls discard() — reset() throws the whole disposable
-VM away and the next task re-clones a clean one; that, not SIGHUP, is what
-guarantees no guest orphan outlives its budget.
+dead ssh, so discard() stops the guest and preserves its disk. The next
+task prepares that same shared Mac again. Only explicit reset deletes it.
 """
 import asyncio
 import json
@@ -413,6 +412,20 @@ class LumeVM:
             return False
         return proc.returncode == 0
 
+    async def stop(self):
+        """Stop runaway guest processes without deleting the shared Mac's disk."""
+        self._cleanup_lume_depth += 1
+        try:
+            rc, out = await self._lume("stop", self.vm_name)
+            if rc != 0:
+                record = await self._get()
+                if record and record.get("status") == "running":
+                    raise SandboxUnavailable("Could not stop the VM after canceling its agent")
+            self.ip = None
+            self._runner = None
+        finally:
+            self._cleanup_lume_depth -= 1
+
     async def reset(self):
         """Snapshot rollback: throw the scratch VM away; the next prepare()
         re-clones from the golden image (APFS clone: seconds). Loud when the
@@ -576,19 +589,18 @@ def shared_vm(workspace=None):
 
 
 async def discard(sandbox):
-    """Called by the worker after it had to FORCE-KILL an agent (budget
-    breach, exception): a dead local ssh can't reap guest children, so throw
-    the whole disposable VM away. reset() is a no-op tier for shell (host
-    process-group kill already took the tree). Clears the warm singleton so
-    the next task re-clones a clean guest."""
+    """Stop guest orphans after forced agent exit, preserving the shared disk.
+    Shell process groups are already reaped. Legacy disposable fakes retain
+    their reset port. Clear the connection cache so the next task prepares
+    the preserved VM again."""
     global _shared_vm
-    reset = getattr(sandbox, "reset", None)
+    reset = getattr(sandbox, "stop", None) or getattr(sandbox, "reset", None)
     if reset is not None:
         try:
             await reset()
         except Exception as exc:
             # discard runs in kill/error paths and must not raise, but a
-            # swallowed failed delete means the next task may inherit a
+            # swallowed failed stop means the next task may inherit a
             # dirty VM — say so where the operator can see it
             diagnostics.exception("vm.discard.failed", exc=exc,
                                   sandbox=getattr(sandbox, "name", "sandbox"))

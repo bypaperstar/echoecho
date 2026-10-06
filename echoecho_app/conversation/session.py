@@ -105,6 +105,13 @@ class Session:
             return self.begin_ending("silence_timeout")
         return False
 
+    def note_activity(self):
+        self._last_activity = self.clock()
+
+    def allow_live_injections(self):
+        """Full-duplex engines have no completed-response event to open the gate."""
+        self._at_turn_boundary = True
+
     def seconds_of_silence(self):
         return self.clock() - self._last_activity
 

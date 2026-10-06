@@ -1,198 +1,184 @@
-// Control panel logic: poll ctl:status, render the three status rows, and
-// map the buttons onto ctl:action names. Deliberately dumb — all real work
-// happens in main / echoechoctl.sh.
 'use strict';
-
 (() => {
   const $ = (id) => document.getElementById(id);
-  const report = (event, fields) => {
-    try { if (window.echoDiagnostics) window.echoDiagnostics.report(event, fields); } catch { /* diagnostics never break controls */ }
-  };
-  const errorMeta = (err) => ({
-    error_name: (err && err.name) || 'Error', error_code: (err && err.code) || '',
-    message: (err && err.message) || String(err || ''), stack: (err && err.stack) || '',
-  });
+  const api = window.ctl;
+  let status = {};
+  let refreshing = false;
   let busy = false;
-  let daemonUp = false;
-  let vmUp = false;
+  let settingsDirty = false;
+  let settingsFromVoice = false;
+  let tasksSignature = '';
   let refreshFailures = 0;
-  let refreshFailureStarted = 0;
-  let lastStatus = null;
-
-  // tiny animated orb in the header — same organism, 52px
+  const report = (event, fields) => {
+    try { window.echoDiagnostics?.report(event, fields); } catch { /* optional */ }
+  };
+  const note = (text, error = false) => {
+    $('note').textContent = text;
+    $('note').classList.toggle('error', error);
+  };
   const cv = $('icon');
-  const cx2 = cv.getContext('2d');
-  let t0 = performance.now();
-  (function tick(now) {
-    const t = (now - t0) / 1000;
-    const S = cv.width;
-    cx2.clearRect(0, 0, S, S);
-    const cx = S / 2, cy = S / 2;
-    cx2.beginPath();
-    for (let a = 0; a <= Math.PI * 2 + 0.05; a += 0.12) {
-      const r = S * 0.36 * (1 + Math.sin(a * 3 + t * 0.9) * 0.07 + Math.sin(a * 5 - t * 1.4) * 0.045);
-      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-      a === 0 ? cx2.moveTo(x, y) : cx2.lineTo(x, y);
+  const ctx = cv.getContext('2d');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  function draw(now = 0) {
+    const size = cv.width, center = size / 2;
+    ctx.clearRect(0, 0, size, size);
+    ctx.beginPath();
+    for (let a = 0; a <= Math.PI * 2 + 0.08; a += 0.08) {
+      const r = size * .34 * (1 + Math.sin(a * 3 + now / 1300) * .07);
+      const x = center + Math.cos(a) * r, y = center + Math.sin(a) * r;
+      if (a === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-    cx2.closePath();
-    const g = cx2.createLinearGradient(0, 0, 0, S);
-    g.addColorStop(0, '#1c1d26');
-    g.addColorStop(1, '#07070a');
-    cx2.fillStyle = g;
-    cx2.fill();
-    cx2.strokeStyle = 'rgba(126,168,255,0.35)';
-    cx2.lineWidth = 1.2;
-    cx2.stroke();
-    const sx = cx - S * 0.11, sy = cy - S * 0.15;
-    const rg = cx2.createRadialGradient(sx, sy, 0, sx, sy, S * 0.15);
-    rg.addColorStop(0, 'rgba(235,240,255,0.5)');
-    rg.addColorStop(1, 'rgba(235,240,255,0)');
-    cx2.fillStyle = rg;
-    cx2.fill();
-    requestAnimationFrame(tick);
-  })(t0);
+    ctx.closePath();
+    const gradient = ctx.createRadialGradient(center - 12, center - 18, 2, center, center, 45);
+    gradient.addColorStop(0, '#d5f6e5'); gradient.addColorStop(.22, '#93cbb1'); gradient.addColorStop(1, '#20372a');
+    ctx.fillStyle = gradient; ctx.fill();
+    if (!reduceMotion.matches && !document.hidden) requestAnimationFrame(draw);
+  }
+  draw();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { draw(); refresh(); } });
 
-  function fmtAgo(ts) {
-    if (!ts) return 'no events yet';
-    const s = Math.max(0, Date.now() / 1000 - ts);
-    if (s < 90) return `${Math.round(s)}s ago`;
-    if (s < 5400) return `${Math.round(s / 60)}m ago`;
-    return `${Math.round(s / 3600)}h ago`;
+  function setDevices(id, devices, input, selected) {
+    const select = $(id);
+    const names = [...new Set(devices.filter((d) => input ? d.input : d.output).map((d) => d.name))];
+    if (selected && !names.includes(selected)) names.unshift(selected);
+    const signature = JSON.stringify(names);
+    if (select.dataset.devices !== signature) {
+      select.replaceChildren();
+      const add = (value, label) => { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); };
+      add('', 'System default');
+      names.forEach((name) => add(name, name));
+      select.dataset.devices = signature;
+    }
+    select.value = selected || '';
   }
 
-  function setDot(id, on) {
-    $(id).className = 'dot ' + (on ? 'on' : 'off');
+  function renderTasks(tasks) {
+    const running = tasks.filter((t) => ['queued', 'running'].includes(t.status));
+    $('task-count').textContent = running.length ? `${running.length} active ${running.length === 1 ? 'task' : 'tasks'}` : 'No active tasks';
+    const shown = [...running, ...tasks.filter((t) => !['queued', 'running'].includes(t.status)).reverse().slice(0, 3)];
+    const signature = JSON.stringify(shown);
+    if (signature === tasksSignature) return;
+    tasksSignature = signature;
+    $('tasks').replaceChildren();
+    if (!shown.length) {
+      const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Ask for something out loud or type it here. Progress will appear as it happens.'; $('tasks').append(empty);
+    }
+    for (const task of shown) {
+      const row = document.createElement('div'); row.className = `task ${task.status}`;
+      const copy = document.createElement('div'); copy.className = 'task-copy';
+      const state = document.createElement('div'); state.className = 'task-state'; state.textContent = ({ queued: 'Queued', running: 'Working', done: 'Completed', error: 'Needs attention', cancelled: 'Canceled' })[task.status] || task.status;
+      const title = document.createElement('div'); title.className = 'task-title'; title.textContent = task.title;
+      const detail = document.createElement('div'); detail.className = 'task-detail'; detail.textContent = (task.status === 'running' ? task.progress || 'Starting the agent…' : task.say || '') .slice(0, 500);
+      copy.append(state, title, detail); row.append(copy);
+      if (['queued', 'running'].includes(task.status)) {
+        const cancel = document.createElement('button'); cancel.textContent = 'Cancel'; cancel.setAttribute('aria-label', `Cancel ${task.title}`);
+        cancel.addEventListener('click', () => perform(() => api.command({ action: 'cancel', task_id: task.id }), 'Canceling task…', 'Task canceled. Partial work stays in your workspace.'));
+        row.append(cancel);
+      }
+      $('tasks').append(row);
+    }
+  }
+
+  function render(st) {
+    status = st;
+    const voice = st.voice || {};
+    const view = window.echoControlState.voiceState(st);
+    $('voice-heading').textContent = view.title;
+    $('voice-detail').textContent = view.detail;
+    $('connection').textContent = view.badge;
+    $('connection').classList.toggle('on', view.healthy);
+    $('voice-dot').classList.toggle('on', view.healthy);
+    $('input-name').textContent = voice.inputDevice || 'Microphone unavailable';
+    $('input-meter').value = Number(voice.inputLevel) || 0;
+    $('model-label').textContent = voice.model ? `${voice.model} · ${voice.outputDevice || 'system audio'}` : 'Voice connects when you start a conversation';
+    $('notice').hidden = !voice.error && !st.startupError;
+    $('notice').textContent = voice.error || st.startupError || '';
+    $('vm-state').textContent = st.vm === null ? 'Checking VM…' : st.vm ? 'Shared Mac is running' : 'VM opens when you need it';
+    $('b-talk').textContent = voice.session === 'ACTIVE' ? 'End conversation' : st.viewer ? 'Talk now' : 'Start listening';
+    $('b-talk').disabled = busy || voice.phase === 'connecting' || voice.session === 'ENDING';
+    $('b-pause').textContent = voice.phase === 'paused' ? 'Resume listening' : 'Pause listening';
+    $('b-pause').disabled = busy || !st.viewer || voice.phase === 'connecting' || voice.session === 'ENDING';
+    $('b-send').disabled = busy || !st.viewer;
+    $('b-daemon').textContent = st.viewer ? 'Restart voice' : 'Start voice';
+    $('version').textContent = `v${st.version || '?'}`;
+    $('version').title = `${st.sha || ''}${st.builtAt ? ` · built ${new Date(st.builtAt).toLocaleString()}` : ''}`;
+    $('login').checked = !!st.loginItem;
+    renderTasks(voice.tasks || []);
+    if (!settingsDirty) {
+      const prefs = st.preferences || {};
+      if (!settingsFromVoice || voice.configuredVoiceModel) $('voice-model').value = voice.configuredVoiceModel || prefs.voiceModel || 'gpt-live-1';
+      setDevices('input-device', voice.devices || [], true, voice.configuredInputDevice ?? prefs.inputDevice);
+      setDevices('output-device', voice.devices || [], false, voice.configuredOutputDevice ?? prefs.outputDevice);
+      $('record').checked = voice.recordSessions ?? prefs.recordSessions ?? true;
+      settingsFromVoice = !!voice.configuredVoiceModel;
+    }
   }
 
   async function refresh() {
-    const started = performance.now();
-    let st;
+    if (refreshing) return;
+    refreshing = true;
     try {
-      st = await window.ctl.status();
+      const next = await api.status();
+      refreshFailures = 0;
+      render(next);
     } catch (err) {
       refreshFailures++;
-      if (!refreshFailureStarted) refreshFailureStarted = Date.now();
-      if (refreshFailures === 1 || (refreshFailures & (refreshFailures - 1)) === 0) {
-        report('control.refresh_failed', {
-          consecutive: refreshFailures, duration_ms: Math.round(performance.now() - started),
-          ...errorMeta(err),
-        });
-      }
-      return;
-    }
-    if (refreshFailures) {
-      report('control.refresh_recovered', {
-        failed_attempts: refreshFailures,
-        downtime_ms: refreshFailureStarted ? Date.now() - refreshFailureStarted : null,
-      });
-      refreshFailures = 0;
-      refreshFailureStarted = 0;
-    }
-    daemonUp = st.viewer;
-    vmUp = st.vm;
-    const nextStatus = {
-      daemon: !!st.viewer, vm: !!st.vm, orb_visible: !!st.orbVisible,
-    };
-    if (!lastStatus || Object.keys(nextStatus).some((k) => nextStatus[k] !== lastStatus[k])) {
-      report('control.status_transition', nextStatus);
-      lastStatus = nextStatus;
-    }
-    // "v0.1.0 · a1b2c3d · updated 8/12/2026" — plus build time when packaged,
-    // "dev checkout" otherwise; tooltip carries the full timestamps
-    const bits = [`v${st.version || '?'}`];
-    if (st.sha) bits.push(st.sha);
-    if (st.updatedAt) bits.push(`updated ${new Date(st.updatedAt).toLocaleDateString()}`);
-    bits.push(st.builtAt ? `built ${new Date(st.builtAt).toLocaleDateString()}` : 'dev checkout');
-    $('version').textContent = bits.join(' · ');
-    $('version').title = [
-      st.updatedAt && `last change: ${new Date(st.updatedAt).toLocaleString()}`,
-      st.builtAt && `built: ${new Date(st.builtAt).toLocaleString()}`,
-    ].filter(Boolean).join('\n');
-    setDot('d-daemon', daemonUp);
-    $('v-daemon').textContent = daemonUp ? `listening · last event ${fmtAgo(st.lastEventTs)}` : 'stopped';
-    setDot('d-vm', vmUp);
-    $('v-vm').textContent = vmUp ? 'running — portal live' : 'asleep';
-    setDot('d-orb', true);
-    $('v-orb').textContent = st.orbVisible ? 'revealed' : 'in the menu bar';
-    $('b-daemon').textContent = daemonUp ? 'Stop daemon' : 'Start daemon';
-    $('b-vm').textContent = vmUp ? "echoecho's Mac is awake" : "Wake echoecho's Mac";
-    $('b-vm').disabled = vmUp || busy;  // the 3s poll must not undo the busy grey-out
-    $('login').checked = !!st.loginItem;
+      if (refreshFailures === 1) report('control.refresh_failed', { message: err.message });
+      render({ ...status, viewer: false, voice: null, startupError: 'The app could not refresh its status. Try restarting voice.' });
+    } finally { refreshing = false; }
   }
 
-  // grey the whole action grid while one runs: double-clicks were already
-  // ignored via `busy`, but nothing showed the user that
-  function setActionsDisabled(on) {
-    document.querySelectorAll('.actions button').forEach((b) => { b.disabled = on; });
-  }
-
-  async function act(name, noteText) {
+  async function perform(fn, pending = '', success = '') {
     if (busy) return;
-    const started = performance.now();
     busy = true;
-    report('control.action_start', { action: name });
-    setActionsDisabled(true);
-    $('note').textContent = noteText || '';
+    document.querySelectorAll('main button:not(#b-quit)').forEach((b) => { b.disabled = true; });
+    note(pending);
     try {
-      const res = await window.ctl.action(name);
-      if (res && res.output) $('note').textContent = res.output.split('\n').pop();
-      else if (res && res.ok && !noteText) $('note').textContent = '';
-      report('control.action_done', {
-        action: name, ok: !res || res.ok !== false, detached: !!(res && res.detached),
-        duration_ms: Math.round(performance.now() - started),
-      });
+      const result = await fn();
+      if (result?.ok === false || result?.error) throw new Error(result.output || result.error || 'The action did not finish. Try again.');
+      note(success);
+      return result;
     } catch (err) {
-      report('control.action_failed', {
-        action: name, duration_ms: Math.round(performance.now() - started),
-        ...errorMeta(err),
-      });
-      $('note').textContent = 'action failed — see diagnostics';
+      note((err.message || 'The action failed. Try again.').slice(0, 800), true);
+      report('control.action_failed', { message: err.message });
     } finally {
       busy = false;
-      setActionsDisabled(false);
-      refresh();
+      document.querySelectorAll('main button').forEach((b) => { b.disabled = false; });
+      render(status); await refresh();
     }
   }
 
-  $('b-summon').addEventListener('click', () => act('summon'));
-  $('b-livewriter').addEventListener('click', () => act('live-writer', 'starting Live Writer…'));
-  $('b-daemon').addEventListener('click', () =>
-    act(daemonUp ? 'daemon-stop' : 'daemon-start', daemonUp ? 'stopping daemon…' : 'starting daemon…'));
-  $('b-vm').addEventListener('click', () => act('vm-boot', "waking echoecho's Mac (clone + boot takes ~a minute)…"));
-  $('b-open-vm').addEventListener('click', () => act('vm-open', 'opening the shared VM…'));
+  const action = (id, name, pending, success = '') => $(id).addEventListener('click', () => perform(() => api.action(name), pending, success));
+  action('b-open-vm', 'vm-open', 'Opening your shared Mac. The first boot can take a moment.', 'Shared VM opened. You can move or minimize its window.');
+  action('b-workspace', 'workspace', 'Opening your workspace…');
+  action('b-livewriter', 'live-writer', 'Opening Live Writer…');
+  action('b-summon', 'summon', '', 'Press Escape or ⌘⇧E to hide the orb.');
+  action('b-daemon', 'daemon-restart', 'Restarting voice…', 'Voice restarted.');
+  action('b-mic-settings', 'microphone-settings', 'Opening microphone permissions…');
+  action('b-network-settings', 'network-settings', 'Opening Local Network permissions…');
+  $('b-talk').addEventListener('click', () => perform(() => !status.viewer ? api.action('daemon-start') : api.command({ action: status.voice?.session === 'ACTIVE' ? 'end' : 'wake' }), !status.viewer ? 'Starting voice…' : 'Opening conversation…'));
+  $('b-pause').addEventListener('click', () => perform(() => api.command({ action: status.voice?.phase === 'paused' ? 'resume' : 'pause' }), 'Updating listening…'));
+  $('task-form').addEventListener('submit', (event) => {
+    event.preventDefault(); const text = $('task-input').value.trim();
+    if (!text) return;
+    perform(async () => { const result = await api.command({ action: 'submit', text }); if (result.ok) $('task-input').value = ''; return result; }, 'Starting your task…', 'Task queued. You can keep talking while it works.');
+  });
+  ['voice-model', 'input-device', 'output-device', 'record'].forEach((id) => $(id).addEventListener('change', () => { settingsDirty = true; }));
+  $('b-save').addEventListener('click', () => perform(async () => {
+    await api.preferences({ voiceModel: $('voice-model').value, inputDevice: $('input-device').value, outputDevice: $('output-device').value, recordSessions: $('record').checked });
+    if (status.viewer) await api.command({ action: 'configure' });
+    settingsDirty = false;
+    return { ok: true };
+  }, 'Saving voice settings…', 'Saved. During a conversation, model and device changes apply to the next one.'));
   $('b-reset').addEventListener('click', () => {
-    if (confirm("Reset echoecho's Mac? The VM is deleted and re-cloned fresh from the golden image. Workspace files on your Mac are untouched.")) {
-      act('vm-reset', 'resetting: delete + fresh clone + boot…');
-    } else report('control.action_cancelled', { action: 'vm-reset' });
+    if (confirm('Reset the shared VM? This replaces its disk with a fresh copy and removes apps and files stored only inside the VM. Shared workspace files stay on your Mac.')) perform(() => api.action('vm-reset'), 'Resetting the shared VM…', 'Shared VM reset.');
   });
-  $('b-update').addEventListener('click', () => {
-    if (confirm('Update echoecho? Pulls the latest main, reinstalls, rebuilds the app, restarts the daemon, and relaunches. echoecho will quit now and reopen when done.')) {
-      $('note').textContent = 'updating — echoecho will reopen itself…';
-      const started = performance.now();
-      report('control.action_start', { action: 'update' });
-      window.ctl.action('update').then((res) => report('control.action_done', {
-        action: 'update', ok: !res || res.ok !== false, detached: !!(res && res.detached),
-        duration_ms: Math.round(performance.now() - started),
-      })).catch((err) => report('control.action_failed', {
-        action: 'update', duration_ms: Math.round(performance.now() - started),
-        ...errorMeta(err),
-      }));
-    } else report('control.action_cancelled', { action: 'update' });
+  action('b-update', 'update', 'Updating. Echoecho will reopen when the new build is ready.');
+  $('b-quit').addEventListener('click', () => api.action('quit-app').catch((err) => note(err.message, true)));
+  $('login').addEventListener('change', async (event) => {
+    const enabled = event.target.checked;
+    try { await api.setLoginItem(enabled); } catch (err) { event.target.checked = !enabled; note('Could not change start-at-login. Try again.', true); }
   });
-  $('b-quit').addEventListener('click', () => {
-    report('control.action_start', { action: 'quit-app' });
-    window.ctl.action('quit-app').catch((err) => report('control.action_failed', {
-      action: 'quit-app', ...errorMeta(err),
-    }));
-  });
-  $('login').addEventListener('change', (e) => {
-    const enabled = e.target.checked;
-    window.ctl.setLoginItem(enabled).catch((err) => {
-      e.target.checked = !enabled;
-      report('control.login_item_failed', { enabled, ...errorMeta(err) });
-    });
-  });
-
   refresh();
-  setInterval(refresh, 3000);
+  setInterval(() => { if (!document.hidden) refresh(); }, 750);
 })();

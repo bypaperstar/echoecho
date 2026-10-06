@@ -8,13 +8,14 @@
 // vnc-proxy.js only when the renderer asks for echoecho's Mac.
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, globalShortcut, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, screen, globalShortcut, nativeImage, shell, systemPreferences } = require('electron');
 const { spawn, execFile, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { trayIcon } = require('./lib/trayicon');
 const { ViewerClient } = require('./lib/backend');
 const { iconPng } = require('./lib/icon');
+const preferences = require('./lib/preferences');
 const {
   createDiagnostics, errorFields, fingerprint, boundedFingerprint,
 } = require('./lib/diagnostics');
@@ -141,6 +142,11 @@ let viewer = null;
 let viewerConnectionState = null;
 let vncProxy = null; // lazy require, holds { start, stop }
 let visible = false;
+let daemonStartError = '';
+let vmStatus = null;
+let vmCheckAt = 0;
+let vmCheckPending = false;
+let statusPending = null;
 
 function attachWindowDiagnostics(browserWindow, surface) {
   const log = diagnostics.child(surface);
@@ -148,6 +154,8 @@ function attachWindowDiagnostics(browserWindow, surface) {
   let loadStartedAt = 0;
   let unresponsiveAt = 0;
   log.info('window.created', {});
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('will-navigate', (event) => event.preventDefault());
   wc.on('did-start-loading', () => {
     loadStartedAt = Date.now();
     log.info('window.load_started', {});
@@ -250,7 +258,7 @@ function createWindow() {
     hasShadow: false,
     resizable: true,
     skipTaskbar: true,
-    alwaysOnTop: true,
+    alwaysOnTop: DEMO,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -258,7 +266,7 @@ function createWindow() {
     },
   });
   attachWindowDiagnostics(win, 'orb-renderer');
-  win.setAlwaysOnTop(true, 'floating');
+  if (DEMO) win.setAlwaysOnTop(true, 'floating');
   // The window spans most of the screen but only the blob and its items may
   // eat clicks. Start click-through; the renderer toggles it from hover
   // (forward:true keeps mousemove flowing while ignored, so hover works).
@@ -354,9 +362,11 @@ function openControl() {
     return;
   }
   controlWin = new BrowserWindow({
-    width: 460,
-    height: 655,
-    resizable: false,
+    width: 660,
+    height: 820,
+    minWidth: 540,
+    minHeight: 600,
+    resizable: true,
     fullscreenable: false,
     title: 'echoecho',
     backgroundColor: '#101116',
@@ -385,6 +395,7 @@ function ensureDaemon() {
   runEchoechoctl('start-daemon').then((r) => {
     // The Dock icon promises "echoecho is listening" — a silent start failure
     // (missing .venv, stale repoRoot, no API key) would make it lie.
+    daemonStartError = r.ok ? '' : 'Voice could not start. Check microphone permission, your API key, and the local setup.';
     if (!r.ok) console.error('[daemon] start-daemon failed; see diagnostics/control panel');
   });
 }
@@ -444,8 +455,12 @@ app.whenReady().then(() => {
   createWindow();
 
   viewer = new ViewerClient(VIEWER_BASE, { diagnostics: viewerDiag });
-  viewer.on('events', (evts) => sendToScene('viewer:events', evts));
-  viewer.on('wake', () => summon('wake'));
+  viewer.on('events', (evts) => {
+    sendToScene('viewer:events', evts);
+    const state = evts.filter((ev) => ev.type === 'state').at(-1);
+    if (tray && state) tray.setToolTip(state.to === 'ACTIVE' ? 'echoecho · conversation active' : 'echoecho');
+    // A wake word must never cover the user's current work.
+  });
   viewer.on('connected', () => {
     if (viewerConnectionState !== true) mainDiag.info('viewer.connected', {});
     viewerConnectionState = true;
@@ -830,6 +845,10 @@ function runEchoechoctl(cmd, detached) {
       resolve({ ok: true, detached: true });
       return;
     }
+    const commandTimer = setTimeout(() => {
+      child.kill('SIGTERM');
+      finish({ok:false,output:'This action timed out. Check the status and try again.'});
+    }, cmd === 'open-vm' ? 240000 : 90000);
     let out = '';
     let capturedBytes = 0;
     let totalBytes = 0;
@@ -848,6 +867,7 @@ function runEchoechoctl(cmd, detached) {
     const finish = (result, err) => {
       if (settled) return;
       settled = true;
+      clearTimeout(commandTimer);
       const fields = {
         command: cmd, ok: !!result.ok, duration_ms: Date.now() - started,
         parent_run_id: diagnostics.runId,
@@ -867,43 +887,57 @@ function runEchoechoctl(cmd, detached) {
   });
 }
 
-ipcMain.handle('ctl:status', async () => {
+async function controlStatus() {
   const status = {
-    version: RUNTIME.version,
-    sha: RUNTIME.sha,
-    updatedAt: RUNTIME.updatedAt,
-    builtAt: RUNTIME.builtAt,
-    orbVisible: visible,
-    viewer: false,
-    lastEventTs: null,
-    vm: false,
-    loginItem: app.getLoginItemSettings().openAtLogin,
+    version: RUNTIME.version, sha: RUNTIME.sha, updatedAt: RUNTIME.updatedAt,
+    builtAt: RUNTIME.builtAt, orbVisible: visible, viewer: false,
+    vm: vmStatus, loginItem: app.getLoginItemSettings().openAtLogin,
+    microphonePermission: process.platform === 'darwin' ?
+      systemPreferences.getMediaAccessStatus('microphone') : 'unavailable',
+    preferences: { ...preferences.DEFAULTS, ...preferences.read() },
+    startupError: daemonStartError,
   };
   try {
-    const events = await viewer.transcript();
-    status.viewer = true; // the viewer lives inside the daemon: up == daemon up
-    const last = events[events.length - 1];
-    if (last && typeof last.ts === 'number') status.lastEventTs = last.ts;
-  } catch { /* daemon down */ }
-  try {
-    await viewer.vncInfo();
-    status.vm = true;
-  } catch { /* VM asleep or no token */ }
+    status.voice = await viewer.status();
+    status.viewer = true;
+    daemonStartError = '';
+    status.startupError = '';
+  } catch { /* retain an honest unavailable state */ }
+  if (!vmCheckPending && Date.now() - vmCheckAt > 15000) {
+    vmCheckPending = true;
+    vmCheckAt = Date.now();
+    viewer.vncInfo().then(() => { vmStatus = true; }).catch(() => { vmStatus = false; })
+      .finally(() => { vmCheckPending = false; });
+  }
   return status;
+}
+ipcMain.handle('ctl:status', () => {
+  if (!statusPending) statusPending = controlStatus().finally(() => { statusPending = null; });
+  return statusPending;
 });
+
+ipcMain.handle('ctl:command', (_event, data) => viewer.control(data));
+ipcMain.handle('ctl:preferences', (_event, data) => preferences.write(data));
 
 const CTL_ACTIONS = {
   // in-process
   'summon': () => { summon('control'); return { ok: true }; },
+  'workspace': () => { dismiss(); return shell.openExternal(VIEWER_BASE).then(() => ({ok:true})); },
+  'microphone-settings': () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone').then(() => ({ok:true})),
+  'network-settings': () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork').then(() => ({ok:true})),
   'dismiss': () => { dismiss(); return { ok: true }; },
   'quit-app': () => { setTimeout(() => app.quit(), 150); return { ok: true }; },
   // echoechoctl-backed (long ones run detached; the panel re-polls status)
-  'daemon-start': () => runEchoechoctl('start-daemon'),
+  'daemon-start': async () => {
+    const result = await runEchoechoctl('start-daemon');
+    daemonStartError = result.ok ? '' : 'Voice could not start. Check microphone permission and your API key.';
+    return result;
+  },
   'daemon-stop': () => runEchoechoctl('stop-daemon'),
   'daemon-restart': () => runEchoechoctl('restart-daemon'),
-  'vm-boot': () => runEchoechoctl('boot-vm', true),
+  'vm-boot': () => runEchoechoctl('boot-vm'),
   'vm-open': () => { dismiss(); return runEchoechoctl('open-vm'); },
-  'vm-reset': () => runEchoechoctl('reset-vm', true),
+  'vm-reset': () => runEchoechoctl('reset-vm'),
   // starts the standalone Live Writer server if needed and opens the page in
   // the default browser (the script does the `open`; it blocks until healthy)
   'live-writer': () => runEchoechoctl('live-writer'),
@@ -918,7 +952,7 @@ const CTL_ACTIONS = {
 
 ipcMain.handle('ctl:action', async (_e, name) => {
   const action = String(name);
-  const fn = CTL_ACTIONS[action];
+  const fn = Object.hasOwn(CTL_ACTIONS, action) ? CTL_ACTIONS[action] : null;
   const started = Date.now();
   if (!fn) {
     mainDiag.warn('ctl.action_rejected', {

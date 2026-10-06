@@ -17,6 +17,26 @@ from livewriter.segmenter import Segmenter, PAUSE_S, STOP_CONFIRM_S
 HAS_WS = importlib.util.find_spec("websockets") is not None
 
 
+def test_formatter_failure_keeps_unwritten_speech_unacknowledged():
+    from livewriter.formatter import Formatter
+    async def go():
+        sent=[]; done=[]; failed=asyncio.Event()
+        async def send(op,gen,utt):sent.append(op);failed.set()
+        async def acknowledge(utt,gen):done.append(utt)
+        formatter=Formatter(docmod.Doc(),send,on_batch_done=acknowledge)
+        async def interrupted(batch,gen):raise RuntimeError('connection interrupted')
+        formatter._run_batch=interrupted
+        formatter.start();formatter.submit('u1','Keep this thought',time.monotonic())
+        await asyncio.wait_for(failed.wait(),1)
+        await formatter.close()
+        assert not done
+        assert not formatter.history
+        assert sent[0]['op']=='chip'
+        assert 'interrupted' in sent[0]['text']
+        assert 'retrying' not in sent[0]['text']
+    asyncio.run(go())
+
+
 # -- inline markdown ----------------------------------------------------------
 
 def test_md_roundtrip_basic():

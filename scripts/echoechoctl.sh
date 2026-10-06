@@ -185,6 +185,16 @@ daemon_pid() { pgrep -f "echoecho\.py --voice" | head -1 || true; }
 # so this pattern can't match them. Empty for a dev `electron .` orb: that orb
 # starts its own daemon and passes ECHOECHO_TETHER_PID itself.
 app_pid() { pgrep -f "echoecho\.app/Contents/MacOS/echoecho" | head -1 || true; }
+stop_dev_apps() {
+  # A development Electron command may use relative paths. Check its cwd
+  # before signaling it so other projects' Electron apps keep running.
+  command -v lsof >/dev/null 2>&1 || return 0
+  local dev_pid dev_cwd
+  for dev_pid in $(pgrep -f 'node_modules/(\.bin/electron|electron/dist/Electron\.app)' || true); do
+    dev_cwd="$(lsof -a -p "$dev_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+    [ "$dev_cwd" != "$APP_DIR" ] || kill "$dev_pid" 2>/dev/null || true
+  done
+}
 app_bundle() {
   if [ -d "/Applications/echoecho.app" ]; then echo "/Applications/echoecho.app";
   elif [ -d "$HOME/Applications/echoecho.app" ]; then echo "$HOME/Applications/echoecho.app";
@@ -315,13 +325,18 @@ cmd_build_app() {
   iconutil -c icns build/echoecho.iconset -o build/icon.icns
   # bake the repo location + version into the bundle so the packaged app can
   # find its scripts and show what it's running
-  node -e "require('fs').writeFileSync('runtime-config.json', JSON.stringify({
-    repoRoot: '$REPO',
-    version: '$(repo_version)',
-    sha: require('child_process').execSync('git rev-parse --short HEAD', {cwd: '$REPO'}).toString().trim(),
-    updatedAt: require('child_process').execSync('git log -1 --format=%cI', {cwd: '$REPO'}).toString().trim(),
-    builtAt: new Date().toISOString() }, null, 2))"
-  npx --yes @electron/packager . echoecho --platform=darwin --arch=arm64 \
+  node - "$REPO" "$(repo_version)" <<'JS'
+const { writeFileSync } = require('fs');
+const { execFileSync } = require('child_process');
+const repoRoot = process.argv[2];
+const version = process.argv[3];
+const git = (...args) => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim();
+writeFileSync('runtime-config.json', JSON.stringify({ repoRoot, version,
+  sha: git('rev-parse', '--short', 'HEAD'), updatedAt: git('log', '-1', '--format=%cI'),
+  builtAt: new Date().toISOString() }, null, 2));
+JS
+  ./node_modules/.bin/electron-packager . echoecho --platform=darwin --arch=arm64 \
+    --app-version "$(repo_version)" --build-version "$(repo_version)" \
     --app-bundle-id app.echoecho.desktop \
     --extend-info resources/usage-descriptions.plist \
     --icon build/icon.icns --out dist --overwrite \
@@ -341,17 +356,57 @@ cmd_install_app() {
   target="/Applications/echoecho.app"
   [ -w "/Applications" ] || target="$HOME/Applications/echoecho.app"
   mkdir -p "$(dirname "$target")"
+  # Prepare and verify the replacement before touching the installed app.
+  # Both renames stay on the destination volume; a failed copy leaves the
+  # working bundle available and a failed replacement can be rolled back.
+  local install_dir
+  install_dir="$(mktemp -d "$(dirname "$target")/.echoecho-install.XXXXXX")"
+  if ! ditto "$APP_DIR/dist/echoecho-darwin-arm64/echoecho.app" "$install_dir/echoecho.app"; then
+    rm -rf "$install_dir"
+    echo "could not stage the new app; existing installation preserved" >&2
+    return 1
+  fi
+  if ! codesign --verify --deep --strict "$install_dir/echoecho.app"; then
+    rm -rf "$install_dir"
+    echo "new app signature did not verify; existing installation preserved" >&2
+    return 1
+  fi
   pkill -f "echoecho\.app/Contents/MacOS/echoecho" 2>/dev/null || true
-  # dev orb: its cmdline is relative, so match the stable node_modules paths
-  pkill -f "node_modules/\.bin/electron" 2>/dev/null || true
-  pkill -f "node_modules/electron/dist/Electron\.app" 2>/dev/null || true
+  stop_dev_apps
   # wait for the old instance to actually exit: `open` on a bundle id whose
   # process is still dying gets coalesced into it and no new app launches
   for _ in $(seq 1 10); do [ -z "$(app_pid)" ] && break; sleep 1; done
-  rm -rf "$target"
-  ditto "$APP_DIR/dist/echoecho-darwin-arm64/echoecho.app" "$target"
+  if [ -n "$(app_pid)" ]; then
+    rm -rf "$install_dir"
+    echo "the old app is still closing; existing installation preserved" >&2
+    return 1
+  fi
+  if [ -e "$target" ]; then
+    if ! mv "$target" "$install_dir/previous.app"; then
+      rm -rf "$install_dir"
+      echo "could not move the installed app; existing installation preserved" >&2
+      return 1
+    fi
+  fi
+  if ! mv "$install_dir/echoecho.app" "$target"; then
+    if [ -e "$install_dir/previous.app" ]; then
+      mv "$install_dir/previous.app" "$target" || {
+        echo "restore the previous app from $install_dir/previous.app" >&2
+        return 1
+      }
+    fi
+    rm -rf "$install_dir"
+    echo "installation failed; previous app restored" >&2
+    return 1
+  fi
+  rm -rf "$install_dir"
   echo "installed $target"
-  open "$target"
+  if [ "${ECHOECHO_LEAVE_CLOSED:-0}" = "1" ]; then
+    cmd_stop_daemon
+    echo "installed and left closed"
+  else
+    open "$target"
+  fi
 }
 
 cmd_start_app() {
@@ -367,8 +422,7 @@ cmd_start_app() {
 
 cmd_stop_app() {
   pkill -f "echoecho\.app/Contents/MacOS/echoecho" 2>/dev/null || true
-  pkill -f "node_modules/\.bin/electron" 2>/dev/null || true
-  pkill -f "node_modules/electron/dist/Electron\.app" 2>/dev/null || true
+  stop_dev_apps
   echo "app stopped"
 }
 
@@ -451,7 +505,7 @@ cmd_update_body() {
   was_daemon=""
   [ -n "$(daemon_pid)" ] && was_daemon=1
   git pull --ff-only origin main
-  ( cd app && npm install --no-audit --no-fund >/dev/null )
+  ( cd app && npm ci --no-audit --no-fund >/dev/null )
   install_python_requirements
   # stop only: install-app reopens the new bundle, and the app launch starts a
   # fresh daemon tethered to the new app process (never to the dying old one)
@@ -510,6 +564,7 @@ case "${1:-}" in
   reset-vm)        cmd_reset_vm ;;
   build-app)       cmd_build_app ;;
   install-app)     cmd_install_app ;;
+  install-app-closed) ECHOECHO_LEAVE_CLOSED=1 cmd_install_app ;;
   start-app)       cmd_start_app ;;
   stop-app)        cmd_stop_app ;;
   update)          cmd_update ;;
@@ -520,5 +575,5 @@ case "${1:-}" in
   diagnostics)     shift; cmd_diagnostics "$@" ;;
   doctor)          shift; cmd_doctor "$@" ;;
   logs)            shift; cmd_logs "$@" ;;
-  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|open-vm|stop-vm|reset-vm|build-app|install-app|start-app|stop-app|update|version|live-writer|stop-live-writer|diagnostics|doctor|logs}"; exit 2 ;;
+  *) echo "usage: echoechoctl.sh {status|start-daemon|stop-daemon|restart-daemon|boot-vm|open-vm|stop-vm|reset-vm|build-app|install-app|install-app-closed|start-app|stop-app|update|version|live-writer|stop-live-writer|diagnostics|doctor|logs}"; exit 2 ;;
 esac

@@ -50,12 +50,22 @@ def test_index_served(server):
     assert b"marked" in body and b"EventSource" in body
 
 
-def test_unknown_request_path_is_not_copied_into_diagnostics(server, tmp_path):
+def test_unknown_request_path_is_not_copied_into_diagnostics(server, tmp_path, monkeypatch):
+    finished = threading.Event()
+    original_info = diagnostics.info
+    def observe(event, **fields):
+        original_info(event, **fields)
+        if event == 'viewer.request.finished' and fields.get('route') == '/unknown':
+            finished.set()
+    monkeypatch.setattr(diagnostics, 'info', observe)
     diagnostics.configure("viewer-test", log_dir=tmp_path / "diagnostics")
     path = diagnostics.get_log_path()
     try:
         status, _ = get(server, "/private-canary-path")
         assert status == 404
+        # The response body can reach the client before the handler's finally
+        # block writes diagnostics. Do not shut the logger down mid-request.
+        assert finished.wait(2)
     finally:
         diagnostics.shutdown()
     raw = path.read_text(encoding="utf-8")

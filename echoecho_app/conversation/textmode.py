@@ -52,7 +52,7 @@ class RealConversationLLM:
     """One Responses API call per round; returns normalized item dicts."""
 
     def __init__(self, model=None):
-        self.model = model or os.environ.get("ECHOECHO_TEXT_MODEL", "gpt-4o-mini")
+        self.model = model or os.environ.get("ECHOECHO_TEXT_MODEL", config.backend_model())
         self._client = None
 
     async def turn(self, history):
@@ -63,7 +63,7 @@ class RealConversationLLM:
         try:
             if self._client is None:
                 from openai import AsyncOpenAI  # lazy: keyless paths never import
-                self._client = AsyncOpenAI()
+                self._client = AsyncOpenAI(timeout=60.0, max_retries=2)
             phase = "request"
             resp = await self._client.responses.create(
                 model=self.model, instructions=config.system_prompt(),

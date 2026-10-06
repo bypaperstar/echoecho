@@ -109,7 +109,7 @@ def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
                    {"action": "bogus"},                     # unknown action
                    {"action": "type", "text": "never runs"}]},
         tmp_path, extra={"gui_driver": FakeGuiDriver(tmp_path / "ws")})
-    assert task.status == "done"  # a bad step is reported, not a crash
+    assert task.status == "error"  # failed GUI work must not look completed
     assert task.result.data["error"]
     assert "Stopped on step 2" in task.result.say
     # the first step's shot was still captured
@@ -308,7 +308,7 @@ def test_computer_use_prepares_a_cold_vm_before_stepping(tmp_path):
     broken = BrokenVmFake(tmp_path / "ws")
     task, _ = run_task({"steps": [{"action": "launch", "app": "TextEdit"}]},
                        tmp_path, extra={"gui_driver": broken})
-    assert task.status == "done"  # a reported failure, not a worker crash
+    assert task.status == "error"  # setup failure is surfaced as failed work
     assert "couldn't start my Mac VM" in task.result.say
     assert "PRIVATE-VM-ERROR-CANARY" not in task.result.say
     assert "PRIVATE-VM-ERROR-CANARY" not in repr(task.result.data)

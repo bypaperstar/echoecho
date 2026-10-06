@@ -190,6 +190,13 @@
   @media (prefers-reduced-motion: reduce) {
     .badge.active .pip, .flash { animation: none; }
   }
+  :root { --bg:#101414; --panel:#182020; --panel-2:#23312b; --border:#2a3634;
+    --text:#edf4ef; --muted:#9bacaa; --accent:#b8ecd3; --green:#95d4b4;
+    --user-bubble:#234d3b; --echoecho-bubble:#222e29; }
+  #follow { font:inherit; font-size:11px; border:1px solid var(--border); padding:3px 8px;
+    color:var(--accent); border-radius:6px; background:transparent; cursor:pointer; }
+  button:focus-visible,a:focus-visible,summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @media(prefers-reduced-motion:reduce) { * { animation:none!important; transition:none!important; } }
 </style>
 </head>
 <body>
@@ -223,6 +230,7 @@
       <div id="docpane">
         <div id="filebar">
           <span id="filename"></span>
+          <button id="follow" type="button" aria-pressed="true">Following newest</button>
           <span class="spacer"></span>
           <a id="fopen" target="_blank" rel="noopener">Open in new tab ↗</a>
           <a id="fdownload">Download</a>
@@ -236,7 +244,9 @@
 <script>
 /* ============ right pane: workspace file tree + type-aware view ============ */
 let active = null;      // currently shown file (relative path)
-let pinned = false;     // user clicked a file; stop auto-switching until reload picks a newer file
+let pinned = false;     // selection stays yours until Follow newest is enabled
+let shownVersion = null;
+let showGeneration = 0;
 let files = [];
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
@@ -265,7 +275,7 @@ function renderTree() {
       b.textContent = f.name.slice(dir ? dir.length + 1 : 0);
       b.title = f.name;
       b.className = (f.name === active ? 'active' : '') + (dir ? ' nested' : '');
-      b.onclick = () => { pinned = true; show(f.name); };
+      b.onclick = () => { pinned = true; updateFollow(); show(f.name); };
       tree.appendChild(b);
     }
   }
@@ -309,7 +319,7 @@ function showMarkdown(name, text) {
   const content = document.getElementById('content');
   // workspace markdown is agent-written = untrusted: sanitize before it
   // touches innerHTML; with no sanitizer (offline), render as plain text
-  if (window.DOMPurify) {
+  if (window.DOMPurify && window.marked) {
     content.innerHTML = DOMPurify.sanitize(marked.parse(text));
   } else {
     const pre = document.createElement('pre');
@@ -346,7 +356,12 @@ function updateFilebar(name, url) {
 }
 
 async function show(name) {
+  const meta = files.find(f => f.name === name);
+  const version = JSON.stringify([name, meta ? meta.mtime : null]);
+  if (active === name && shownVersion === version) return;
+  const generation = ++showGeneration;
   active = name;
+  shownVersion = version;
   renderTree();
   const url = '/doc?f=' + encodeURIComponent(name);
   updateFilebar(name, url);
@@ -362,19 +377,24 @@ async function show(name) {
     content.appendChild(img);
     return;
   }
-  const r = await fetch(url);
+  let r;
+  try { r = await fetch(url); }
+  catch { if (generation === showGeneration) { shownVersion = null; content.textContent = 'Could not load the file. Select it again to retry.'; } return; }
   // stale-load guard: show() can be re-entered (SSE auto-focus racing a tree
   // click) — only the newest call may fill the pane, or the content could
   // disagree with the filebar's name/download links
-  if (!r.ok || active !== name) return;
+  if (active !== name || generation !== showGeneration) return;
+  if (!r.ok) { shownVersion = null; content.textContent = 'This file is unavailable. Select it again to retry.'; return; }
   const ctype = r.headers.get('Content-Type') || '';
+  let text;
+  if (ext === 'md' || ctype.startsWith('text/')) {
+    try { text = await r.text(); }
+    catch { if (generation === showGeneration) { shownVersion = null; content.textContent = 'Could not load the file. Select it again to retry.'; } return; }
+    if (active !== name || generation !== showGeneration) return;
+  }
   if (ext === 'md') {
-    const text = await r.text();
-    if (active !== name) return;
     showMarkdown(name, text);
   } else if (ctype.startsWith('text/')) {  // code/config/CSV: highlighted
-    const text = await r.text();
-    if (active !== name) return;
     const pre = document.createElement('pre');
     pre.className = 'raw';
     const code = document.createElement('code');
@@ -435,6 +455,10 @@ function activityLine(ev) {
       return ['♻️ Connection dropped — reconnecting', ev.detail || null];
     if (ev.event === 'closed')
       return ['🔌 Voice line closed', ev.detail || null];
+    if (ev.event === 'error')
+      return ['Voice needs attention', ev.detail || null];
+    if (ev.event === 'fallback')
+      return ['Voice model fallback', ev.detail || null];
     return null;
   }
   if (t === 'audio')
@@ -447,6 +471,8 @@ function activityLine(ev) {
             ev.detail || null];
   if (t === 'tool_call') {
     const args = ev.args || {};
+    if (ev.name === 'dispatch_task' && args.args && args.args.cancel)
+      return ['Canceling the requested task', null];
     if (ev.name === 'dispatch_task')
       return ['🔧 Dispatched background task ' + (args.kind || '?') +
               ' — the conversation keeps going while a worker handles it',
@@ -473,6 +499,8 @@ function activityLine(ev) {
               (ev.say || '') + '"', PRIORITY_NOTES[ev.priority] || null];
     if (ev.status === 'error')
       return ['❌ ' + kind + ' failed: "' + (ev.say || '') + '"', null];
+    if (ev.status === 'cancelled')
+      return [kind + ' canceled. Partial work stays in the workspace.', null];
     return null;
   }
   if (t === 'injection')
@@ -615,12 +643,27 @@ es.onopen = () => { document.getElementById('conn').className = ''; };
 es.addEventListener('reload', ev => {
   refreshTranscript();  // events feed may have changed (it's in the poll)
   files = JSON.parse(ev.data).files;
-  if (!files.length) return;
+  renderTree();
+  if (!files.length) {
+    ++showGeneration;
+    active = null; shownVersion = null; pinned = false; updateFollow();
+    document.getElementById('filebar').className = '';
+    document.getElementById('content').textContent = 'Waiting for workspace files…';
+    return;
+  }
   const latest = files.reduce((a, b) => (b.mtime > a.mtime ? b : a));
-  // auto-focus the most recently modified file (a change unpins the view);
-  // otherwise just re-fetch whatever is showing
-  if (!pinned || latest.name !== active) { pinned = false; show(latest.name); }
+  // A user's selection survives unrelated task and transcript updates.
+  if (!pinned || !files.some(f => f.name === active)) { pinned = false; updateFollow(); show(latest.name); }
   else show(active);
+});
+function updateFollow() {
+  const button = document.getElementById('follow');
+  button.textContent = pinned ? 'Follow newest' : 'Following newest';
+  button.setAttribute('aria-pressed', String(!pinned));
+}
+document.getElementById('follow').addEventListener('click', () => {
+  pinned = !pinned; updateFollow();
+  if (!pinned && files.length) show(files.reduce((a,b) => b.mtime > a.mtime ? b : a).name);
 });
 refreshTranscript();
 </script>

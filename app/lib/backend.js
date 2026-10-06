@@ -117,7 +117,7 @@ class ViewerClient extends EventEmitter {
     s.count = 0; s.failed = 0; s.totalMs = 0; s.maxMs = 0; s.lastSummaryAt = now;
   }
 
-  async _request(rawPath, responseType, headers) {
+  async _request(rawPath, responseType, headers, body) {
     const endpoint = this._endpoint(rawPath);
     const started = Date.now();
     const controller = new AbortController();
@@ -128,6 +128,7 @@ class ViewerClient extends EventEmitter {
     try {
       const res = await fetch(this.base + rawPath, {
         ...(headers ? { headers } : {}), signal: controller.signal,
+        ...(body === undefined ? {} : {method: 'POST', body: JSON.stringify(body)}),
       });
       status = res.status;
       if (!res.ok) {
@@ -164,6 +165,20 @@ class ViewerClient extends EventEmitter {
 
   doc(relpath) {
     return this.text('/doc?f=' + encodeURIComponent(relpath));
+  }
+
+  _authHeaders() {
+    const file = process.env.ECHOECHO_VIEWER_TOKEN_FILE ||
+      path.join(os.homedir(), '.echoecho', 'viewer.token');
+    return { Authorization: `Bearer ${fs.readFileSync(file, 'utf8').trim()}` };
+  }
+
+  status() { return this.json('/status', this._authHeaders()); }
+
+  control(data) {
+    return this._request('/control', 'json', {
+      ...this._authHeaders(), 'Content-Type': 'application/json',
+    }, data);
   }
 
   // /vnc-info serves credentials, so it alone requires the viewer token the

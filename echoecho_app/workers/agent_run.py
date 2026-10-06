@@ -117,7 +117,9 @@ def _kill_tree(proc):
     its own), so children it spawned die with it. Falls back to the direct
     process if the group is already gone."""
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        # start_new_session=True makes the child's PID its group ID. The
+        # leader may already have exited while descendants hold its pipes.
+        os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         try:
             proc.kill()
@@ -350,27 +352,25 @@ async def run_agent(task, ctx):
     kill_reason = None
     try:
         try:
-            await asyncio.wait_for(asyncio.gather(pump, drain), budget)
-            rc = await proc.wait()
+            await asyncio.wait_for(asyncio.gather(pump, drain, proc.wait()), budget)
+            rc = proc.returncode
         except asyncio.TimeoutError:
             timed_out = True
-            if proc.returncode is None:
-                kill_reason = "timeout"
-                _kill_tree(proc)
+            kill_reason = "timeout"
     finally:
         # a worker exception must NEVER orphan a live agent: nobody would be
         # reading its pipes, so it would block forever, still burning tokens
         pump.cancel()
         drain.cancel()
         await asyncio.gather(pump, drain, return_exceptions=True)
-        if proc.returncode is None:
+        if rc is None:
             kill_reason = kill_reason or (
                 "timeout" if timed_out else "worker_exit")
             _kill_tree(proc)  # tier 1: the agent tree. tier 2: only local ssh
             await proc.wait()
-            # tier 2's real agent runs in the guest, unreachable over the now
-            # dead ssh — dispose the whole VM so no guest child outlives the
-            # budget (no-op for shell/fake without a reset())
+        if kill_reason is not None:
+            # Stop guest children even if the local SSH process was already
+            # reaped while the pipe readers were being canceled.
             await vm_mod.discard(sandbox)
 
     if timed_out:

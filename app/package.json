@@ -13,11 +13,13 @@
     "smoke:demo": "ECHOECHO_ORB_SMOKE=1 ECHOECHO_ORB_DEMO=1 xvfb-run -a electron --no-sandbox .",
     "smoke:control": "ECHOECHO_ORB_SMOKE_CONTROL=1 xvfb-run -a electron --no-sandbox .",
     "icon": "node tools/make-iconset.js",
-    "test:vnc-e2e": "bash test/vnc-e2e.sh"
+    "test:vnc-e2e": "bash test/vnc-e2e.sh",
+    "test:ui": "node test/desktop-ui.e2e.cjs && node test/workspace-ui.e2e.cjs"
   },
   "devDependencies": {
-    "@electron/packager": "^18.3.6",
-    "electron": "^38.2.0"
+    "@electron/packager": "20.3.0",
+    "electron": "44.5.1",
+    "playwright": "1.63.0"
   },
   "dependencies": {
     "@novnc/novnc": "^1.5.0",

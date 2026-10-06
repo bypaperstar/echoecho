@@ -106,6 +106,8 @@ class Orchestrator:
         self.ctx.extra.setdefault("tasks", self.tasks)
         self._seq = 0
         self._running = set()
+        self._running_by_id = {}
+        self._slots = None
         self._serial_locks = {}  # kind -> asyncio.Lock for serialize=True kinds
         # PR 11 announcement watermark: which task results have been spoken.
         # live=True means on_injection reaches an ACTIVE session, so a result
@@ -125,6 +127,8 @@ class Orchestrator:
 
     def submit(self, request):  # type: (TaskRequest) -> Task
         """Enqueue a task and return it immediately (never blocks the voice turn)."""
+        if self.inbox.qsize() + len(self._running) >= 128:
+            raise ValueError("Too many queued tasks; wait for current work to finish")
         self._seq += 1
         task = Task(id="t%d" % self._seq, request=request, created_at=time.time(),
                     title=_title(request.instructions))
@@ -184,7 +188,7 @@ class Orchestrator:
         return ["%s (%s): %s" % (t.id, t.kind, t.result.say)
                 for t in sorted(done, key=lambda t: t.finished_at)]
 
-    def collect_missed(self):
+    def collect_missed(self, mark=True):
         """Speech-ready lines for every non-silent finished task not yet
         announced, oldest first; marks them announced (persisted) so they are
         spoken exactly once — even if the finish and the next wake straddle a
@@ -195,7 +199,8 @@ class Orchestrator:
                    and t.finished_at is not None and t.result is not None
                    and rank(t.result) != "silent"]
         pending.sort(key=lambda t: t.finished_at)
-        self._mark_announced(pending)
+        if mark:
+            self._mark_announced(pending)
         return ["%s (%s): %s" % (t.id, t.kind, t.result.say) for t in pending]
 
     def _mark_announced(self, tasks):
@@ -231,7 +236,7 @@ class Orchestrator:
                 task.session_id = e.get("session_id") or task.session_id
             elif e.get("event") == "announced":
                 self._announced.add(tid)  # already spoken in a prior run
-            elif e.get("event") in ("done", "error"):
+            elif e.get("event") in ("done", "error", "cancelled"):
                 task.status = e["event"]
                 task.finished_at = e.get("ts")
                 task.session_id = e.get("session_id") or task.session_id
@@ -266,13 +271,60 @@ class Orchestrator:
 
     # -- main loop ----------------------------------------------------------
 
+    def cancel(self, task_id):
+        task = self.tasks.get(task_id)
+        if task is None or task.status not in ("queued", "running"):
+            return False
+        handle = self._running_by_id.get(task_id)
+        if handle:
+            handle.cancel()
+        self._record_stopped(task)
+        return True
+
+    def _record_stopped(self, task, interrupted=False):
+        if task.status == "cancelled":
+            return
+        task.status = "error" if interrupted else "cancelled"
+        task.finished_at = time.time()
+        task.result = TaskResult(
+            say=("Interrupted when Echoecho closed. Partial work remains in the workspace."
+                 if interrupted else "Canceled. Partial work remains in the workspace."),
+            priority="interrupt" if interrupted else "silent",
+            data={"error":"interrupted", "session_id":task.session_id}
+                 if interrupted else {"cancelled":True})
+        tasklog.append_event(self.log_path,task.status,task_id=task.id,
+                             kind=task.kind,say=task.result.say,
+                             session_id=task.session_id,priority=task.result.priority)
+        events.emit("task",task_id=task.id,kind=task.kind,status=task.status,
+                    say=task.result.say)
+        diagnostics.info("task.interrupted" if interrupted else "task.cancelled",task_id=task.id)
+
     async def run(self):
-        while True:
-            task = await self.inbox.get()
-            handle = asyncio.create_task(self._run_task(task),
-                                         name="worker-%s" % task.id)
-            self._running.add(handle)
-            handle.add_done_callback(self._on_task_done)
+        self._slots = asyncio.Semaphore(3)
+        try:
+            while True:
+                task = await self.inbox.get()
+                if task.status == "cancelled":
+                    continue
+                handle = asyncio.create_task(self._execute(task),
+                                             name="worker-%s" % task.id)
+                self._running.add(handle)
+                self._running_by_id[task.id] = handle
+                handle.add_done_callback(self._on_task_done)
+        finally:
+            for handle in list(self._running):
+                handle.cancel()
+            await asyncio.gather(*self._running, return_exceptions=True)
+
+    async def _execute(self, task):
+        try:
+            async with self._slots:
+                if task.status != "cancelled":
+                    await self._run_task(task)
+        except asyncio.CancelledError:
+            self._record_stopped(task, interrupted=True)
+        finally:
+            self._running_by_id.pop(task.id,None)
 
     def _on_task_done(self, handle):
         """Retrieve every spawned task exception. Worker exceptions are
@@ -369,7 +421,7 @@ class Orchestrator:
                           "traceback": traceback.format_exc()})
                 task.status = "error"
             else:
-                task.status = "done"
+                task.status = "error" if result.data.get("error") else "done"
             finally:
                 if lock is not None:
                     lock.release()

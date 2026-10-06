@@ -178,8 +178,10 @@ class Formatter(object):
                 batch = self._queue[:]
                 self._queue = []
                 self.on_think(True, 0)
+                succeeded = False
                 try:
                     await self._run_batch(batch, gen)
+                    succeeded = True
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -189,12 +191,12 @@ class Formatter(object):
                                           batch_size=len(batch))
                     if self.gen == gen:
                         try:
-                            await self.send_op({"op": "chip", "text": "formatter hiccup — retrying"}, gen, batch[-1][0])
+                            await self.send_op({"op": "chip", "text": "Formatting interrupted. Please repeat the last thought."}, gen, batch[-1][0])
                         except Exception:
                             pass
                 finally:
                     self.on_think(False, len(self._queue))
-                if self.gen == gen:
+                if self.gen == gen and succeeded:
                     self.history.extend((u, t) for u, t, _ in batch)
                     del self.history[:-12]
                     if self._batch_added:
@@ -315,7 +317,7 @@ class Formatter(object):
     async def _create_stream(self, prompt):
         if self._client is None:
             from openai import AsyncOpenAI
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            self._client = AsyncOpenAI(api_key=self.api_key, timeout=45.0, max_retries=1)
         kwargs = dict(model=self.model, instructions=SYSTEM, input=prompt,
                       stream=True, max_output_tokens=1200)
         efforts = [self._effort] if self._effort else (
@@ -392,7 +394,7 @@ class Reviewer(object):
         )
         if self._client is None:
             from openai import AsyncOpenAI
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            self._client = AsyncOpenAI(api_key=self.api_key, timeout=45.0, max_retries=1)
         self.passes += 1
         t0 = time.monotonic()
         diagnostics.info(
