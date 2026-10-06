@@ -37,8 +37,16 @@ def _vm_configured():
 
 def _workspace_path(value):
     """Validate the guest file action cannot escape the shared workspace."""
+    from echoecho_app import config
     path = PurePosixPath(str(value or ""))
-    if not str(path) or str(path) == "." or path.is_absolute() or ".." in path.parts:
+    if ".." in path.parts:
+        raise ValueError("open path must stay in the shared workspace")
+    if path.is_absolute():
+        try:
+            path = path.relative_to(PurePosixPath(config.vm_guest_workspace()))
+        except ValueError:
+            raise ValueError("open path must stay in the shared workspace") from None
+    if not str(path) or str(path) == ".":
         raise ValueError("open path must be a workspace-relative file")
     return path.as_posix()
 
@@ -87,7 +95,12 @@ async def _do_step(driver, step, shot_dir, idx):
                       "{'action':'type','text':'hi'}, {'action':'key',"
                       "'combo':'cmd+s'}, {'action':'wait','seconds':1}, "
                       "{'action':'screenshot','name':'result'}] — prose in "
-                      "instructions alone does nothing",
+                      "instructions alone does nothing. For a known shared "
+                      "file use action open with its workspace-relative path "
+                      "or full path under the guest workspace; do not use an "
+                      "Open dialog. Include type/key/screenshot steps in the "
+                      "same task. Screenshots are visible to the user; "
+                      "read_artifact reads text only, not screenshot pixels.",
           arg_schema={"steps": {
               "type": "array",
               "description": "GUI steps: {action: launch|open|type|key|wait|"

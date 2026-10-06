@@ -252,6 +252,25 @@ def test_client_handshake_and_input():
     assert ("pointer", 1, 10, 20) in pointers  # button-1 press at (10,20)
 
 
+def test_shortcut_holds_all_keys_together_and_releases_after_failure(monkeypatch):
+    client = VncClient("127.0.0.1", 5900)
+    events = []
+    monkeypatch.setattr(client, "key_event",
+                        lambda key, down: events.append((key, down)))
+    def hold(seconds):
+        events.append(("hold", seconds))
+        if seconds == 0.3:
+            raise RuntimeError("interrupted shortcut")
+    monkeypatch.setattr(vnc_mod.time, "sleep", hold)
+    cmd = vnc_mod.MODIFIER_KEYSYMS["cmd"]
+    shift = vnc_mod.MODIFIER_KEYSYMS["shift"]
+    with pytest.raises(RuntimeError, match="interrupted shortcut"):
+        client.chord([cmd, shift], ord("a"))
+    assert events == [(cmd, True), (shift, True), (ord("a"), True),
+                      ("hold", 0.3), (ord("a"), False),
+                      (shift, False), (cmd, False)]
+
+
 def test_password_client_rejects_unauthenticated_downgrade():
     server = NoneOnlyRfbServer().start()
     try:
@@ -342,7 +361,7 @@ def test_vnc_gui_driver_selected_by_default(monkeypatch, tmp_path):
 
 
 def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
-    """launch/screenshot stay on SSH; type/key/click go to the VNC client."""
+    """Launch stays on SSH; input and visible screenshots use VNC."""
     import asyncio
 
     from echoecho_app.services import gui as gui_mod
@@ -356,6 +375,10 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     calls = []
 
     class FakeClient:
+        def capture_png(self, path, timeout):
+            calls.append(('screenshot', path, timeout))
+            path.write_bytes(b'visible framebuffer')
+
         def type_text(self, text):
             calls.append(("type", text))
 
@@ -386,11 +409,47 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     asyncio.run(driver.type_text("hi"))
     asyncio.run(driver.key("cmd+s"))
     asyncio.run(driver.click(5, 6))
+    asyncio.run(driver.screenshot('screens/visible.png'))
+    assert (tmp_path / 'screens/visible.png').read_bytes() == b'visible framebuffer'
+    assert len(ssh_argvs) == 1
+    with pytest.raises(ValueError):
+        asyncio.run(driver.screenshot('../outside.png'))
 
     assert ("type", "hi") in calls
     assert any(c[0] == "chord" for c in calls)  # cmd+s -> chord
     assert ("click", 5, 6, 1) in calls
     assert ssh_argvs[0] == ["open", "-a", "TextEdit"]  # launch stayed on SSH
+
+
+def test_static_desktop_can_be_captured_repeatedly(tmp_path):
+    """Lume may suppress a second unchanged full frame on one connection."""
+    import asyncio
+    from echoecho_app.services.gui import VncGuiDriver
+    from echoecho_app.services.vm import LumeVM
+    driver = VncGuiDriver(LumeVM(), tmp_path)
+
+    class StaticDesktop:
+        captured = False
+
+        def capture_png(self, path, timeout):
+            if self.captured:
+                raise TimeoutError('no second unchanged frame')
+            self.captured = True
+            path.write_bytes(b'visible static desktop')
+
+        def close(self):
+            pass
+
+    async def connect():
+        if driver._client is None:
+            driver._client = StaticDesktop()
+        return driver._client
+
+    driver._vnc = connect
+    asyncio.run(driver.screenshot('screens/first.png'))
+    asyncio.run(driver.screenshot('screens/second.png'))
+    assert (tmp_path / 'screens/first.png').read_bytes() == b'visible static desktop'
+    assert (tmp_path / 'screens/second.png').read_bytes() == b'visible static desktop'
 
 
 def test_vnc_gui_driver_never_echoes_credential_url(monkeypatch, tmp_path):

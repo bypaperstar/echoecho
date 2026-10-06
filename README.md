@@ -162,6 +162,9 @@ or add another app to the Dock. **Back** closes only the display connection,
 leaving the guest and its documents running. The window is normally movable
 and resizable. `echoechoctl.sh prepare-vm` prepares that guest without a viewer;
 `open-vm` remains available for a deliberate standalone Lume display.
+Computer-use screenshots capture the actual VNC framebuffer, including app
+windows, rather than relying on SSH screen-capture permissions. File-opening
+steps accept relative paths or full guest paths confined to the shared workspace.
 
 PR 14 adds **GUI computer-use** — the sandbox ladder's GUI tier. The
 `computer.use` kind (advertised when `ECHOECHO_SANDBOX=vm`) drives real Mac apps
