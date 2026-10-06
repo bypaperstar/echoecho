@@ -415,6 +415,12 @@ cmd_prepare_vm() {
   "$(diagnostics_python)" "$REPO/scripts/open_vm.py" --prepare-only
 }
 
+cmd_vm_info() {
+  cd "$REPO"
+  [ -f "$DAEMON_ENV" ] && set -a && . "$DAEMON_ENV" && set +a
+  "$(diagnostics_python)" "$REPO/scripts/open_vm.py" --connection-info
+}
+
 cmd_start_app() {
   b="$(app_bundle)"
   if [ -n "$b" ]; then
@@ -567,6 +573,7 @@ case "${1:-}" in
   boot-vm)         cmd_boot_vm ;;
   open-vm)         cmd_open_vm ;;
   prepare-vm)      cmd_prepare_vm ;;
+  vm-info)         cmd_vm_info ;;
   stop-vm)         cmd_stop_vm ;;
   reset-vm)        cmd_reset_vm ;;
   build-app)       cmd_build_app ;;

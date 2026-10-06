@@ -14,7 +14,7 @@ from echoecho_app.bus import TaskRequest
 
 
 class DaemonControl:
-    def __init__(self, loop, session, mic, orchestrator, manual_wake):
+    def __init__(self, loop, session, mic, orchestrator, manual_wake, paused=False):
         self.loop = loop
         self.session = session
         self.mic = mic
@@ -23,7 +23,7 @@ class DaemonControl:
         self.client = None
         self.audio = None
         self.phase = 'ready'
-        self.paused = False
+        self.paused = paused
         self.error = ''
         self.model = config.voice_model()
         self.devices = []
