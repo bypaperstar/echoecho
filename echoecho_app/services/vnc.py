@@ -52,13 +52,12 @@ KEYSYMS = {
     "left": 0xFF51, "up": 0xFF52, "right": 0xFF53, "down": 0xFF54,
     "home": 0xFF50, "end": 0xFF57, "pageup": 0xFF55, "pagedown": 0xFF56,
 }
-# Modifier keysyms. On macOS VNC, Command is delivered as Meta and Option as
-# Alt; Super_L works for Command on some servers, so it's the documented knob
-# if a guest maps it differently (ECHOECHO_VNC_CMD_KEYSYM).
+# Lume 0.5.3's Virtualization VNC server maps Alt_L to Command. Other servers
+# can select a different mapping through ECHOECHO_VNC_CMD_KEYSYM.
 MODIFIER_KEYSYMS = {
     "shift": 0xFFE1, "control": 0xFFE3, "ctrl": 0xFFE3,
     "option": 0xFFE9, "opt": 0xFFE9, "alt": 0xFFE9,
-    "command": 0xFFE7, "cmd": 0xFFE7,
+    "command": 0xFFE9, "cmd": 0xFFE9,
 }
 
 
@@ -796,7 +795,10 @@ class VncClient:
                 active_timeout = min(active_timeout, previous_socket_timeout)
             self.sock.settimeout(active_timeout)
             check_deadline()
-            self.set_encodings([0])  # raw only — no decoder zoo to maintain
+            # Apple's Virtualization VNC server can terminate the VM when a
+            # viewer omits DesktopSize support. Pixels still use raw encoding;
+            # size notifications use the same allocation and transfer limits.
+            self.set_encodings([0, -223])
             check_deadline()
             self._fb_update_request(0)
             while covered < total_pixels:
@@ -824,6 +826,22 @@ class VncClient:
                     for _ in range(nrects):
                         x, y, w, h, enc = struct.unpack(
                             ">HHHHi", recv(12))
+                        if enc == -223:  # DesktopSize, no pixel payload
+                            resized_pixels = w * h
+                            if (w <= 0 or h <= 0 or
+                                    resized_pixels > MAX_FRAMEBUFFER_PIXELS):
+                                raise VncError(
+                                    "VNC framebuffer dimensions exceed capture limits")
+                            rect_count += 1
+                            if (w, h) != (self.width, self.height):
+                                self.width, self.height = w, h
+                                total_pixels = resized_pixels
+                                buf = bytearray(total_pixels * 3)
+                                coverage = [[] for _ in range(self.height)]
+                                covered = 0
+                                max_wire_pixels = max(max_wire_pixels,
+                                                      total_pixels * 4)
+                            continue
                         if enc != 0:
                             raise VncError(
                                 "server used non-raw encoding %d" % enc)

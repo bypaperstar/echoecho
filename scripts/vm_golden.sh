@@ -135,7 +135,11 @@ if ! gssh "grep -q '^AcceptEnv $ACCEPT_ENV' /etc/ssh/sshd_config" 2>/dev/null; t
      && launchctl kickstart -k system/com.openssh.sshd 2>/dev/null || true'"
 fi
 
-# -- 5. optional: the agent runtime inside the guest -----------------------------
+# -- 5. the desktop must stay usable without a login/unlock prompt --------------
+say "configuring automatic login and disabling the guest's lock/sleep timers"
+python3 "$(dirname "${BASH_SOURCE[0]}")/vm_unattended.py" --vm "$GOLDEN"
+
+# -- 6. optional: the agent runtime inside the guest -----------------------------
 if [ "$AGENT" = "1" ]; then
   if ! gssh "test -x /usr/local/bin/claude || command -v claude" >/dev/null 2>&1; then
     say "installing node $NODE_VERSION + claude CLI inside the guest"
@@ -154,9 +158,19 @@ if [ "$AGENT" = "1" ]; then
   fi
 fi
 
-# -- 6. freeze the golden image ---------------------------------------------------
+# -- 7. freeze the golden image ---------------------------------------------------
 say "stopping $GOLDEN (scratch VMs clone from it at task time)"
-lume stop "$GOLDEN" || true
+# Let macOS flush preferences and finish its filesystem writes before the
+# template is cloned. An immediate hypervisor stop can lose recent settings.
+printf '%s\n' "$GUEST_PASS" | gssh "sudo -k -S -p '' /sbin/shutdown -h now" || true
+for _ in $(seq 1 60); do
+  [ "$(vm_field status)" = "stopped" ] && break
+  sleep 1
+done
+if [ "$(vm_field status)" != "stopped" ]; then
+  echo "guest did not shut down cleanly; golden image is not ready" >&2
+  exit 1
+fi
 
 cat <<DONE
 

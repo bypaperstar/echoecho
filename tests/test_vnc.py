@@ -86,9 +86,9 @@ def test_combo_to_events():
 
 
 def test_combo_cmd_keysym_override(monkeypatch):
-    monkeypatch.setenv("ECHOECHO_VNC_CMD_KEYSYM", str(0xFFEB))
+    monkeypatch.setenv("ECHOECHO_VNC_CMD_KEYSYM", str(0xFFE7))
     mods, _ = combo_to_events("cmd+s")
-    assert mods == [0xFFEB]
+    assert mods == [0xFFE7]
 
 
 # -- a fake RFB server, end to end -------------------------------------------
@@ -473,7 +473,8 @@ def test_write_png_atomically_replaces_symlink_without_touching_target(tmp_path)
     assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_capture_png_over_fake_server(tmp_path):
+@pytest.mark.parametrize("desktop_size", [None, (2, 2), (3, 2), (65535, 65535)])
+def test_capture_png_over_fake_server(tmp_path, desktop_size):
     """A fake server that answers a FramebufferUpdateRequest with one raw
     full-screen rect; the client must assemble and write a PNG."""
     class CapServer(FakeRfbServer):
@@ -496,13 +497,19 @@ def test_capture_png_over_fake_server(tmp_path):
                 # SetEncodings: 4-byte header + n*4
                 hdr = self._recvn(conn, 4)
                 n = struct.unpack(">H", hdr[2:4])[0]
-                self._recvn(conn, n * 4)
+                self.encodings = struct.unpack(">" + "i" * n, self._recvn(conn, n * 4))
                 self._recvn(conn, 10)  # FramebufferUpdateRequest
                 # one raw rect covering the 2x2 screen; BGRx pixels
                 px = bytes([0, 0, 255, 0,   0, 255, 0, 0,     # red, green
                             255, 0, 0, 0,   255, 255, 255, 0])  # blue, white
-                msg = struct.pack(">BBH", 0, 0, 1)
-                msg += struct.pack(">HHHHi", 0, 0, 2, 2, 0) + px
+                msg = struct.pack(">BBH", 0, 0, 2 if desktop_size else 1)
+                if desktop_size:
+                    msg += struct.pack(">HHHHi", 0, 0, *desktop_size, -223)
+                width, height = desktop_size or (2, 2)
+                if desktop_size == (65535, 65535):
+                    width, height = 2, 2
+                pixels = (px * ((width * height + 3) // 4))[:width * height * 4]
+                msg += struct.pack(">HHHHi", 0, 0, width, height, 0) + pixels
                 conn.sendall(msg)
                 time.sleep(0.2)
             except (EOFError, OSError):
@@ -513,10 +520,16 @@ def test_capture_png_over_fake_server(tmp_path):
     server = CapServer(password="").start()
     try:
         with VncClient("127.0.0.1", server.port, "", timeout=5) as c:
+            if desktop_size == (65535, 65535):
+                with pytest.raises(VncError, match="dimensions exceed"):
+                    c.capture_png(str(tmp_path / "screen.png"))
+                assert not (tmp_path / "screen.png").exists()
+                return
             out = c.capture_png(str(tmp_path / "screen.png"))
+        assert server.encodings == (0, -223)
         data = open(out, "rb").read()
         assert data[:8] == b"\x89PNG\r\n\x1a\n"
-        assert struct.unpack(">II", data[16:24]) == (2, 2)
+        assert struct.unpack(">II", data[16:24]) == (desktop_size or (2, 2))
     finally:
         server.stop()
 

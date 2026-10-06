@@ -285,6 +285,56 @@ def test_prepare_preflights_the_ssh_key(monkeypatch, tmp_path):
     assert "ECHOECHO_VM_SSH_KEY" in str(err.value)
 
 
+@pytest.mark.parametrize("returncode,ready", [(0, True), (255, False)])
+def test_readiness_requires_key_authenticated_ssh(monkeypatch, returncode, ready):
+    vm = LumeVM(vm_name="proof")
+    vm.ip = "192.168.64.9"
+    calls = []
+
+    class Process:
+        async def wait(self):
+            return returncode
+
+    process = Process()
+    process.returncode = returncode
+
+    async def spawn(*argv, **kwargs):
+        calls.append((argv, kwargs))
+        return process
+
+    monkeypatch.setattr(vm_mod.asyncio, "create_subprocess_exec", spawn)
+    assert asyncio.run(vm._ssh_up()) is ready
+    argv, kwargs = calls[0]
+    assert argv[0] == "ssh" and argv[-1] == "true"
+    assert "BatchMode=yes" in argv  # readiness can never prompt for a password
+    assert kwargs["stdout"] == asyncio.subprocess.DEVNULL
+    assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
+
+
+def test_readiness_timeout_reaps_ssh_probe(monkeypatch):
+    vm = LumeVM(vm_name="proof")
+    vm.ip = "192.168.64.9"
+
+    class Process:
+        killed = False
+
+        async def wait(self):
+            if not self.killed:
+                raise asyncio.TimeoutError
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+
+    async def spawn(*_argv, **_kwargs):
+        return process
+
+    monkeypatch.setattr(vm_mod.asyncio, "create_subprocess_exec", spawn)
+    assert asyncio.run(vm._ssh_up()) is False
+    assert process.killed
+
+
 def test_dead_boot_fails_fast_with_lume_error(monkeypatch, tmp_path):
     """`lume run` exiting nonzero surfaces its own words immediately instead
     of burning the whole boot timeout in silence."""
