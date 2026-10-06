@@ -9,6 +9,7 @@
   let settingsFromVoice = false;
   let tasksSignature = '';
   let refreshFailures = 0;
+  let vmGeneration = 0;
   const report = (event, fields) => {
     try { window.echoDiagnostics?.report(event, fields); } catch { /* optional */ }
   };
@@ -149,7 +150,45 @@
   }
 
   const action = (id, name, pending, success = '') => $(id).addEventListener('click', () => perform(() => api.action(name), pending, success));
-  action('b-open-vm', 'vm-open', 'Opening your shared Mac. The first boot can take a moment.', 'Shared VM opened. You can move or minimize its window.');
+  async function openVm() {
+    const generation = ++vmGeneration;
+    window.echoVnc.close();
+    $('control-content').hidden = true;
+    $('vm-panel').hidden = false;
+    document.body.classList.add('vm-open');
+    $('vm-detail').textContent = 'Opening our shared Mac…';
+    $('b-vm-retry').hidden = true;
+    $('vm-desktop').replaceChildren();
+    try {
+      const result = await api.action('vm-open');
+      if (generation !== vmGeneration) return;
+      if (result?.ok === false) throw new Error(result.output || 'Our shared Mac could not start.');
+      await window.echoVnc.open($('vm-desktop'), { onDisconnect: () => {
+        if (generation !== vmGeneration) return;
+        $('vm-detail').textContent = 'Our shared Mac disconnected. Reconnect when you’re ready.';
+        $('b-vm-retry').hidden = false;
+      }});
+      if (generation !== vmGeneration) return;
+      $('vm-detail').textContent = 'Connected · Click the desktop to use it.';
+    } catch (err) {
+      if (generation !== vmGeneration) return;
+      const message = (err.message || 'Our shared Mac could not connect.').slice(0, 800);
+      $('vm-detail').textContent = message;
+      note(message, true);
+      $('b-vm-retry').hidden = false;
+    }
+  }
+  $('b-open-vm').addEventListener('click', openVm);
+  $('b-vm-retry').addEventListener('click', openVm);
+  $('b-vm-back').addEventListener('click', () => {
+    vmGeneration++;
+    window.echoVnc.close();
+    $('vm-panel').hidden = true;
+    $('control-content').hidden = false;
+    document.body.classList.remove('vm-open');
+    $('b-open-vm').focus();
+  });
+  window.addEventListener('beforeunload', () => window.echoVnc.close());
   action('b-workspace', 'workspace', 'Opening your workspace…');
   action('b-livewriter', 'live-writer', 'Opening Live Writer…');
   action('b-summon', 'summon', '', 'Press Escape or ⌘⇧E to hide the orb.');

@@ -155,6 +155,14 @@ file in TextEdit, types and saves a unique line through VNC, independently
 reads back the file, and captures the actual desktop. `--stop-first` also
 checks a cold boot; use a preserved VM clone for before/after comparisons.
 
+**Open shared VM** shows the live, interactive desktop inside Echoecho's
+existing window. It prepares the same guest and shared workspace as the
+workers, with Lume running headlessly; it does not launch a separate viewer
+or add another app to the Dock. **Back** closes only the display connection,
+leaving the guest and its documents running. The window is normally movable
+and resizable. `echoechoctl.sh prepare-vm` prepares that guest without a viewer;
+`open-vm` remains available for a deliberate standalone Lume display.
+
 PR 14 adds **GUI computer-use** — the sandbox ladder's GUI tier. The
 `computer.use` kind (advertised when `ECHOECHO_SANDBOX=vm`) drives real Mac apps
 inside the VM by a sequence of steps (`launch` / `type` / `key` / `wait` /

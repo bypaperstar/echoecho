@@ -46,6 +46,26 @@ def test_old_lume_cannot_start_a_guest_it_cannot_show(monkeypatch):
         asyncio.run(opener.open_vm())
 
 
+def test_embedded_display_prepares_shared_guest_without_external_viewer(monkeypatch, tmp_path):
+    monkeypatch.setattr(opener.config, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(opener.config, "load_env_local", lambda: None)
+    monkeypatch.setattr(opener.shutil, "which", lambda name: "/bin/lume")
+    events = []
+
+    class VM:
+        def __init__(self, workspace):
+            assert workspace == tmp_path
+
+        async def prepare(self):
+            events.append("prepared")
+
+    monkeypatch.setattr(opener, "NativeDisplayVM", VM)
+    monkeypatch.setattr(opener.subprocess, "run",
+                        lambda *args, **kwargs: pytest.fail("must not open another app"))
+    asyncio.run(opener.open_vm(show_native=False))
+    assert events == ["prepared"]
+
+
 def test_missing_lume_reports_installation_requirement(monkeypatch):
     monkeypatch.setattr(opener.config, "load_env_local", lambda: None)
     monkeypatch.setattr(opener.shutil, "which", lambda name: None)

@@ -155,12 +155,20 @@
           return;
         }
         let settled = false;
+        const connectTimer = setTimeout(() => {
+          if (settled || gen !== openGen) return;
+          settled = true;
+          setStatus('The shared Mac did not connect. Please reconnect.');
+          try { rfb?.disconnect(); } catch { /* timed out */ }
+          reject(new Error('The shared Mac did not connect. Please reconnect.'));
+        }, 20000);
         const rfbStarted = performance.now();
         try {
           rfb = new RFB(screenEl, info.wsUrl, {
             credentials: { password: info.password || '' },
           });
         } catch (err) {
+          clearTimeout(connectTimer);
           report('vnc.stage', {
             stage: 'rfb-create', outcome: 'failed',
             duration_ms: Math.round(performance.now() - rfbStarted), ...errorMeta(err),
@@ -180,6 +188,7 @@
         rfb.viewOnly = viewOnly;
 
         rfb.addEventListener('connect', () => {
+          clearTimeout(connectTimer);
           if (gen !== openGen) {
             if (!settled) { settled = true; reject(new Error('superseded')); }
             return;
@@ -195,6 +204,7 @@
           if (!settled) { settled = true; resolve(); }
         });
         rfb.addEventListener('disconnect', (e) => {
+          clearTimeout(connectTimer);
           if (gen !== openGen) {
             if (!settled) { settled = true; reject(new Error('superseded')); }
             return;
@@ -207,6 +217,7 @@
           });
           connectedAt = 0;
           setStatus(clean ? "echoecho's Mac closed the session" : "echoecho's Mac is asleep");
+          if (settled && typeof opts.onDisconnect === 'function') opts.onDisconnect();
           if (!settled) {
             settled = true;
             reject(new Error('VNC disconnected before the session came up'));

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ws://127.0.0.1:*" />
   <title>echoecho</title>
   <link rel="stylesheet" href="control.css" />
 </head>
@@ -14,6 +14,17 @@
       <span id="connection" class="badge">Connecting</span>
     </header>
 
+    <section id="vm-panel" hidden aria-labelledby="vm-heading">
+      <div class="vm-toolbar">
+        <button id="b-vm-back" aria-label="Back to Echoecho">← Back</button>
+        <div class="vm-title"><h2 id="vm-heading">Our shared Mac</h2><p id="vm-detail" role="status">The same desktop you and echoecho use.</p></div>
+        <button id="b-vm-retry" hidden>Reconnect</button>
+      </div>
+      <div id="vm-desktop" aria-label="Shared VM desktop"></div>
+      <p class="hint">Click the desktop to use it. Going back keeps your VM and documents open.</p>
+    </section>
+
+    <div id="control-content">
     <section class="voice-card" aria-labelledby="voice-heading">
       <div class="eyebrow">VOICE</div>
       <h2 id="voice-heading">Getting ready…</h2>
@@ -56,8 +67,10 @@
       <p class="hint">Reset replaces the VM with a fresh copy. Files in the shared workspace stay on your Mac.</p>
     </details>
     <footer><label class="check"><input type="checkbox" id="login" /> Start at login</label><span id="version" class="quiet">—</span><button id="b-quit">Quit</button></footer>
+    </div>
   </main>
   <script src="control-state.js"></script>
+  <script src="vnc.js"></script>
   <script src="control.js"></script>
 </body>
 </html>
