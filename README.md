@@ -128,6 +128,18 @@ Build the golden image once on the Mac: `AGENT=1 bash scripts/vm_golden.sh` (pul
 (host subprocess); the whole VM code path is exercised keyless/Linux via a `FakeVM`
 behind the same port, so CI never needs a Mac.
 
+Golden-image setup also verifies automatic login and disables the guest's
+screen lock, idle screensaver, and sleep timers. These settings travel with
+every clone and survive resets. To repair an existing running guest, use
+`python3 scripts/vm_unattended.py --vm echoecho-vm` with its
+`ECHOECHO_VM_PASSWORD` (default `lume`). This configures only the guest.
+For a live proof, run `scripts/vm_unattended_proof.py` on the Mac with
+`--workspace /path/to/workspace --output /path/to/evidence --screensaver`.
+It wakes the guest screensaver without entering a password, opens an empty
+file in TextEdit, types and saves a unique line through VNC, independently
+reads back the file, and captures the actual desktop. `--stop-first` also
+checks a cold boot; use a preserved VM clone for before/after comparisons.
+
 PR 14 adds **GUI computer-use** — the sandbox ladder's GUI tier. The
 `computer.use` kind (advertised when `ECHOECHO_SANDBOX=vm`) drives real Mac apps
 inside the VM by a sequence of steps (`launch` / `type` / `key` / `wait` /

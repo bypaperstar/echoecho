@@ -392,13 +392,26 @@ class LumeVM:
                "; lume run said: " + tail if tail else ""))
 
     async def _ssh_up(self):
+        # Test the same authenticated SSH path tasks use. A Python socket can
+        # be denied access to the guest subnet by macOS Local Network controls
+        # even while the system ssh executable works. A listening port also
+        # does not prove that Echoecho's key is accepted.
         try:
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(self.ip, 22), 2.0)
-        except (OSError, asyncio.TimeoutError):
+            proc = await asyncio.create_subprocess_exec(
+                *self.ssh_argv("true"), stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+        except OSError:
             return False
-        writer.close()
-        return True
+        try:
+            await asyncio.wait_for(proc.wait(), 3.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            return False
+        return proc.returncode == 0
 
     async def reset(self):
         """Snapshot rollback: throw the scratch VM away; the next prepare()
