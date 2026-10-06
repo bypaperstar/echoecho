@@ -153,7 +153,8 @@ def gui_input_backend():
       "ssh"  the legacy osascript/System Events path (needs a golden image
              with Accessibility pre-granted).
 
-    launch (`open -a`) and screenshots (`screencapture`) always go over SSH;
+    launch (`open -a`) always goes over SSH; VNC screenshots read the real
+    framebuffer, while the SSH backend uses `screencapture`;
     only type/key/click honor this."""
     return os.environ.get("ECHOECHO_GUI_INPUT", "vnc").strip() or "vnc"
 

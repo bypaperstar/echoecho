@@ -402,6 +402,37 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     assert ssh_argvs[0] == ["open", "-a", "TextEdit"]  # launch stayed on SSH
 
 
+def test_static_desktop_can_be_captured_repeatedly(tmp_path):
+    """Lume may suppress a second unchanged full frame on one connection."""
+    import asyncio
+    from echoecho_app.services.gui import VncGuiDriver
+    from echoecho_app.services.vm import LumeVM
+    driver = VncGuiDriver(LumeVM(), tmp_path)
+
+    class StaticDesktop:
+        captured = False
+
+        def capture_png(self, path, timeout):
+            if self.captured:
+                raise TimeoutError('no second unchanged frame')
+            self.captured = True
+            path.write_bytes(b'visible static desktop')
+
+        def close(self):
+            pass
+
+    async def connect():
+        if driver._client is None:
+            driver._client = StaticDesktop()
+        return driver._client
+
+    driver._vnc = connect
+    asyncio.run(driver.screenshot('screens/first.png'))
+    asyncio.run(driver.screenshot('screens/second.png'))
+    assert (tmp_path / 'screens/first.png').read_bytes() == b'visible static desktop'
+    assert (tmp_path / 'screens/second.png').read_bytes() == b'visible static desktop'
+
+
 def test_vnc_gui_driver_never_echoes_credential_url(monkeypatch, tmp_path):
     from echoecho_app.services import gui as gui_mod
     from echoecho_app.services.vm import LumeVM

@@ -206,8 +206,8 @@ class VncGuiDriver(SshGuiDriver):
     the TCC Accessibility block SSH osascript keystrokes hit.
 
     The VNC endpoint comes from ECHOECHO_VNC_URL or lume (vm.vnc_url), read
-    lazily on first input event so launch/screenshot still work even if VNC is
-    unavailable. The blocking RFB client runs in a thread so this driver stays
+    lazily on first input event. Screenshots capture the actual framebuffer;
+    the blocking RFB client runs in a thread so this driver stays
     async like its SSH sibling."""
 
     def __init__(self, vm, workspace):
@@ -304,8 +304,14 @@ class VncGuiDriver(SshGuiDriver):
         from echoecho_app.services import artifacts
         target = artifacts.resolve(self.workspace, name)
         target.parent.mkdir(parents=True, exist_ok=True)
-        await self._input('screenshot',
-                          lambda client: client.capture_png(target, timeout=15))
+        try:
+            await self._input('screenshot',
+                              lambda client: client.capture_png(target, timeout=15))
+        finally:
+            # Lume may suppress a repeated full-frame request if the screen
+            # has not changed. A fresh connection gives the next snapshot a
+            # complete initial frame; all key chords release their modifiers.
+            self.close()
         return name
 
     async def key(self, combo):
