@@ -492,7 +492,10 @@ async def voice_main(args):
     diagnostics.install_asyncio(loop)
     with diagnostics.span("voice.setup"):
         detector = WakeDetector()
-        mic = WakeMic(device=config.input_device()).start()
+        start_paused = os.environ.get('ECHOECHO_START_PAUSED') == '1'
+        mic = WakeMic(device=config.input_device())
+        if not start_paused:
+            mic.start()
     manual_wake = threading.Event()
 
     def stdin_watcher():  # any line (enter, or spacebar+enter) forces a wake
@@ -533,7 +536,7 @@ async def voice_main(args):
 
     from echoecho_app.control import DaemonControl
     from echoecho_app.conversation.factory import connect_voice
-    control = DaemonControl(loop,session,mic,orch,manual_wake)
+    control = DaemonControl(loop,session,mic,orch,manual_wake,paused=start_paused)
     control.refresh_devices()
     if viewer:
         viewer.control = control
@@ -546,8 +549,8 @@ async def voice_main(args):
     # collect_missed() draws from a persisted announcement watermark, so tasks
     # that finished while echoecho was asleep — including across a restart — are
     # each announced on the next wake exactly once
-    print("[wake] listening for '%s' (or press enter to wake)"
-          % config.WAKE_PHRASE)
+    print("[wake] paused — resume listening when ready" if start_paused else
+          "[wake] listening for '%s' (or press enter to wake)" % config.WAKE_PHRASE)
     diagnostics.info("wake.listening", model=model, viewer=viewer is not None)
     try:
         heartbeat_s = max(5.0, float(os.environ.get(

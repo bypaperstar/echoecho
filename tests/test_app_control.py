@@ -24,6 +24,26 @@ def test_wake_queue_is_bounded_and_retains_recent_audio():
     assert mic.telemetry()['last_capture_at']>0
 
 
+def test_paused_startup_serves_status_without_opening_microphone(monkeypatch):
+    async def go():
+        mic = WakeMic(device='test mic')
+        started = []
+        monkeypatch.setattr(mic, 'start', lambda: started.append(True))
+        from echoecho_app.conversation import audio
+        monkeypatch.setattr(audio, 'refresh_devices', lambda: True)
+        session = SimpleNamespace(state='IDLE')
+        orch = SimpleNamespace(tasks={})
+        control = DaemonControl(asyncio.get_running_loop(), session, mic, orch,
+                                threading.Event(), paused=True)
+        assert control.snapshot()['phase'] == 'paused'
+        assert not control.snapshot()['captureActive']
+        assert not started
+        await control._command({'action': 'resume'})
+        assert started == [True]
+        assert not control.paused
+    asyncio.run(go())
+
+
 def test_secret_free_preferences_override_env_and_reject_untrusted_fields(tmp_path,monkeypatch):
     file=tmp_path/'preferences.json'; monkeypatch.setenv('ECHOECHO_PREFERENCES_FILE',str(file))
     file.write_text(json.dumps({'inputDevice':'MacBook Pro Microphone','voiceModel':'gpt-live-1','recordSessions':False}))

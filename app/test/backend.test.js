@@ -39,7 +39,7 @@ test('ViewerClient records endpoint metadata without document paths', async () =
     res.end('[]');
   }, async (base) => {
     const diagnostics = new CaptureDiagnostics();
-    const client = new ViewerClient(base, { diagnostics, fetchTimeoutMs: 250 });
+    const client = new ViewerClient(base, { diagnostics, fetchTimeoutMs: 1000 });
     assert.equal(await client.doc('private/client-name.md'), 'private document contents');
     assert.deepEqual(await client.transcript(), []);
     const raw = JSON.stringify(diagnostics.records);

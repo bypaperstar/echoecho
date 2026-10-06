@@ -224,6 +224,9 @@ declares microphone and Local Network access and is signed with its stable
 `app.echoecho.desktop` identity so macOS can apply its privacy permissions.
 Use **`install-app-closed`** to build and install an update, stop listening and
 leave the app closed for later testing. Builds require Node 22.12 or newer.
+For a desktop-only session, launch the daemon with `ECHOECHO_START_PAUSED=1`;
+the workspace and embedded VM remain available without opening a microphone.
+Use **Resume listening** when ready. VM discovery also works while voice is offline.
 
 **The app owns microphone capture.** Launching echoecho.app
 starts the wake-word daemon; quitting — or force-quitting — the app takes the

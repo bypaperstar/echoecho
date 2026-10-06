@@ -2,6 +2,7 @@
 """Open the same warm VM used by Echoecho's workers in Lume's normal window."""
 import asyncio
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from echoecho_app import config
-from echoecho_app.services.vm import LumeVM, SandboxUnavailable
+from echoecho_app.services.vm import LumeVM, SandboxUnavailable, vnc_url
 
 
 class NativeDisplayVM(LumeVM):
@@ -49,9 +50,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare-only', action='store_true',
                         help='Prepare the shared guest for the embedded app display')
+    parser.add_argument('--connection-info', action='store_true',
+                        help='Return private display connection data to the app')
     args = parser.parse_args()
     try:
-        asyncio.run(open_vm(show_native=not args.prepare_only))
+        if args.connection_info:
+            config.load_env_local()
+            print(json.dumps({'url': vnc_url()}))
+        else:
+            asyncio.run(open_vm(show_native=not args.prepare_only))
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

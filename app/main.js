@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { trayIcon } = require('./lib/trayicon');
 const { ViewerClient } = require('./lib/backend');
+const { displayTarget } = require('./lib/vm-display');
 const { iconPng } = require('./lib/icon');
 const preferences = require('./lib/preferences');
 const {
@@ -751,7 +752,7 @@ ipcMain.on('orb:passthrough', (_e, on) => {
 });
 
 // Renderer asks for echoecho's Mac: resolve the VNC endpoint (env override first,
-// then the viewer's /vnc-info), start the WS<->TCP bridge, hand back a local
+// then the viewer's /vnc-info or local Lume discovery), start the WS<->TCP bridge, hand back a local
 // WebSocket URL + password for noVNC. Failure ("asleep") is marshalled as a
 // value — an IPC rejection would console.error in main, and an unreachable
 // Mac is expected degradation, not an error. preload rethrows it, so the
@@ -761,11 +762,11 @@ ipcMain.handle('vnc:connect', async () => {
   const source = process.env.ECHOECHO_VNC_URL ? 'environment' : 'viewer';
   mainDiag.info('vnc.connect_started', { source });
   try {
-    let target = process.env.ECHOECHO_VNC_URL || null;
-    if (!target) {
-      const info = await viewer.vncInfo(); // throws -> renderer shows "asleep"
-      target = info.url;
-    }
+    const target = await displayTarget({
+      override: process.env.ECHOECHO_VNC_URL,
+      viewerInfo: () => viewer.vncInfo(),
+      localInfo: () => runEchoechoctl('vm-info'),
+    });
     if (!vncProxy) {
       vncProxy = require('./vnc-proxy');
       if (vncProxy.setDiagnostics) vncProxy.setDiagnostics(diagnostics.child('vnc-proxy'));
