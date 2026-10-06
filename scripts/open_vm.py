@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Open the same warm VM used by Echoecho's workers in Lume's normal window."""
 import asyncio
+import argparse
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,7 @@ class NativeDisplayVM(LumeVM):
             raise SandboxUnavailable("The shared VM could not start")
 
 
-async def open_vm():
+async def open_vm(show_native=True):
     config.load_env_local()
     lume = shutil.which("lume")
     if not lume:
@@ -30,21 +31,27 @@ async def open_vm():
     # Check before preparing: an older Lume must not boot a VM whose native
     # desktop it cannot attach to. Keep the VM identity and shares identical
     # to the daemon; opening a viewer never creates an alternate guest.
-    check = subprocess.run([lume, "attach", "--help"],
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
-    if check.returncode:
-        raise RuntimeError("Opening the shared VM requires Lume 0.6 or newer")
+    if show_native:
+        check = subprocess.run([lume, "attach", "--help"],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=10)
+        if check.returncode:
+            raise RuntimeError("Opening the shared VM requires Lume 0.6 or newer")
     vm = NativeDisplayVM(workspace=config.WORKSPACE_DIR)
     await vm.prepare()
-    subprocess.run([lume, "attach", vm.vm_name, "--display", "native"],
-                   check=True, timeout=30)
-    print("Opened the shared VM")
+    if show_native:
+        subprocess.run([lume, "attach", vm.vm_name, "--display", "native"],
+                       check=True, timeout=30)
+    print("Opened the shared VM" if show_native else "Shared VM ready")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prepare-only', action='store_true',
+                        help='Prepare the shared guest for the embedded app display')
+    args = parser.parse_args()
     try:
-        asyncio.run(open_vm())
+        asyncio.run(open_vm(show_native=not args.prepare_only))
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

@@ -220,6 +220,32 @@ def test_ssh_gui_driver_builds_guest_commands(monkeypatch, tmp_path):
     assert "/Volumes/Shared/ws/screens/t1/a.png" in argvs[3][-1]
 
 
+def test_guest_screenshot_writes_to_actual_shared_path(monkeypatch, tmp_path):
+    """Execute the real shell command; quoting must survive two shell layers."""
+    import os
+    from echoecho_app.services.vm import LumeVM
+    shared = tmp_path / "My Shared Files 'test'" / "workspace"
+    shared.mkdir(parents=True)
+    monkeypatch.setenv("ECHOECHO_VM_GUEST_WORKSPACE", str(shared))
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    capture = tools / "screencapture"
+    capture.write_text('#!/bin/sh\nfor target in "$@"; do :; done\nprintf PNG > "$target"\n')
+    capture.chmod(0o755)
+    driver = SshGuiDriver(LumeVM(), tmp_path)
+
+    async def local_shell(argv, capture=False):
+        proc = await asyncio.create_subprocess_exec(
+            *argv, env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]})
+        assert await proc.wait() == 0
+        return b""
+
+    driver._run = local_shell
+    name = "screens/t1/hello 'proof'.png"
+    asyncio.run(driver.screenshot(name))
+    assert (shared / name).read_bytes() == b"PNG"
+
+
 def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
     """A keystroke blocked on an Accessibility TCC prompt never returns; the
     driver must bound it and raise, not hang the whole task. Simulated with a

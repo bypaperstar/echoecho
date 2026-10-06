@@ -848,7 +848,7 @@ function runEchoechoctl(cmd, detached) {
     const commandTimer = setTimeout(() => {
       child.kill('SIGTERM');
       finish({ok:false,output:'This action timed out. Check the status and try again.'});
-    }, cmd === 'open-vm' ? 240000 : 90000);
+    }, ['open-vm', 'prepare-vm'].includes(cmd) ? 240000 : 90000);
     let out = '';
     let capturedBytes = 0;
     let totalBytes = 0;
@@ -936,7 +936,7 @@ const CTL_ACTIONS = {
   'daemon-stop': () => runEchoechoctl('stop-daemon'),
   'daemon-restart': () => runEchoechoctl('restart-daemon'),
   'vm-boot': () => runEchoechoctl('boot-vm'),
-  'vm-open': () => { dismiss(); return runEchoechoctl('open-vm'); },
+  'vm-open': () => { dismiss(); return runEchoechoctl('prepare-vm'); },
   'vm-reset': () => runEchoechoctl('reset-vm'),
   // starts the standalone Live Writer server if needed and opens the page in
   // the default browser (the script does the `open`; it blocks until healthy)

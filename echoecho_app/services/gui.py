@@ -190,7 +190,9 @@ class SshGuiDriver(GuiDriver):
     async def screenshot(self, name):
         # screencapture writes straight to the shared workspace mount, so the
         # PNG lands on the host (virtiofs) with no separate transfer
-        guest = self.vm.guest_path(name)
+        # guest_path() is shell-quoted for SSH callers; this command needs a
+        # raw path before quoting its directory and filename below.
+        guest = config.vm_guest_workspace().rstrip('/') + '/' + name
         directory = shlex.quote(guest.rsplit('/', 1)[0])
         await self._run(["sh", "-c",
                          "mkdir -p %s && screencapture -x -t png %s"
