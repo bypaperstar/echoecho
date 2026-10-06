@@ -28,7 +28,9 @@ profile) for type/key to work. launch + screenshot need no such grant.
 """
 import asyncio
 import ipaddress
+import os
 import shlex
+import signal
 import time
 
 from echoecho_app import config, diagnostics
@@ -113,7 +115,7 @@ class SshGuiDriver(GuiDriver):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *ssh, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE)
+                stderr=asyncio.subprocess.PIPE, start_new_session=True)
         except Exception as exc:
             diagnostics.exception(
                 "gui.command.spawn_failed", exc=exc, operation=operation,
@@ -123,12 +125,21 @@ class SshGuiDriver(GuiDriver):
                 % (operation, type(exc).__name__)) from None
         try:
             out, err = await asyncio.wait_for(proc.communicate(), GUI_TIMEOUT)
-        except asyncio.TimeoutError:
+        except BaseException as exc:
             try:
-                proc.kill()
-                await proc.wait()
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except OSError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            # Descendants must close inherited pipes before asyncio can
+            # finish reaping the transport, including on task cancellation.
+            await proc.wait()
+            if not isinstance(exc, asyncio.TimeoutError):
+                raise
             diagnostics.warning(
                 "gui.command.timed_out", operation=operation,
                 timeout_s=GUI_TIMEOUT,
@@ -180,9 +191,10 @@ class SshGuiDriver(GuiDriver):
         # screencapture writes straight to the shared workspace mount, so the
         # PNG lands on the host (virtiofs) with no separate transfer
         guest = self.vm.guest_path(name)
+        directory = shlex.quote(guest.rsplit('/', 1)[0])
         await self._run(["sh", "-c",
-                         "mkdir -p \"$(dirname %s)\" && screencapture -x -t png %s"
-                         % (guest, guest)])
+                         "mkdir -p %s && screencapture -x -t png %s"
+                         % (directory, shlex.quote(guest))])
         return name
 
 

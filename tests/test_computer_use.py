@@ -229,7 +229,12 @@ def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
     monkeypatch.setattr(gm, "GUI_TIMEOUT", 0.3)
     vm = LumeVM(vm_name="echoecho-vm")
     vm.ip = "10.0.0.9"
-    vm.ssh_argv = lambda remote: ["sh", "-c", "sleep 30"]  # "hung" guest cmd
+    import sys
+    # Explicitly fork a child so every platform exercises inherited-pipe
+    # cleanup; some shells optimize a lone sleep by replacing themselves.
+    vm.ssh_argv = lambda remote: [sys.executable, '-c',
+        'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",'
+        '"import time; time.sleep(30)"]); time.sleep(30)']
     driver = SshGuiDriver(vm, tmp_path)
     import time
     t0 = time.monotonic()
