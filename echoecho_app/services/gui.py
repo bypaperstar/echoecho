@@ -298,6 +298,16 @@ class VncGuiDriver(SshGuiDriver):
             "type", lambda client: client.type_text(text),
             requested_chars=len(text) if isinstance(text, str) else None)
 
+    async def screenshot(self, name):
+        # macOS can let SSH screencapture succeed while hiding every app
+        # window. Capture the same framebuffer the user actually sees.
+        from echoecho_app.services import artifacts
+        target = artifacts.resolve(self.workspace, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await self._input('screenshot',
+                          lambda client: client.capture_png(target, timeout=15))
+        return name
+
     async def key(self, combo):
         from echoecho_app.services import vnc as vnc_mod
         try:

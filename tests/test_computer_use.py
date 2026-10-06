@@ -103,6 +103,22 @@ def test_computer_use_opens_only_workspace_relative_files(tmp_path):
     assert rejected.result.data["error_type"] == "ValueError"
 
 
+def test_computer_use_accepts_full_guest_paths_only_inside_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv('ECHOECHO_VM_GUEST_WORKSPACE', '/Volumes/My Shared Files/workspace')
+    fake = FakeGuiDriver(tmp_path / 'ws')
+    task, _ = run_task({'steps': [{'action': 'open', 'path':
+        '/Volumes/My Shared Files/workspace/hello-test.txt'}]}, tmp_path,
+        extra={'gui_driver': fake})
+    assert task.status == 'done'
+    assert ('open', 'hello-test.txt', 'TextEdit') in fake.actions
+    for path in ['/Users/lume/private.txt', '/Volumes/My Shared Files/workspace',
+                 '/Volumes/My Shared Files/workspace/../private.txt',
+                 '/Volumes/My Shared Files/workspace-other/private.txt']:
+        with pytest.raises(ValueError):
+            from echoecho_app.workers.computer_use import _workspace_path
+            _workspace_path(path)
+
+
 def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
     task, ws = run_task(
         {"steps": [{"action": "launch", "app": "TextEdit"},

@@ -342,7 +342,7 @@ def test_vnc_gui_driver_selected_by_default(monkeypatch, tmp_path):
 
 
 def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
-    """launch/screenshot stay on SSH; type/key/click go to the VNC client."""
+    """Launch stays on SSH; input and visible screenshots use VNC."""
     import asyncio
 
     from echoecho_app.services import gui as gui_mod
@@ -356,6 +356,10 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     calls = []
 
     class FakeClient:
+        def capture_png(self, path, timeout):
+            calls.append(('screenshot', path, timeout))
+            path.write_bytes(b'visible framebuffer')
+
         def type_text(self, text):
             calls.append(("type", text))
 
@@ -386,6 +390,11 @@ def test_vnc_gui_driver_routes_input_over_vnc(monkeypatch, tmp_path):
     asyncio.run(driver.type_text("hi"))
     asyncio.run(driver.key("cmd+s"))
     asyncio.run(driver.click(5, 6))
+    asyncio.run(driver.screenshot('screens/visible.png'))
+    assert (tmp_path / 'screens/visible.png').read_bytes() == b'visible framebuffer'
+    assert len(ssh_argvs) == 1
+    with pytest.raises(ValueError):
+        asyncio.run(driver.screenshot('../outside.png'))
 
     assert ("type", "hi") in calls
     assert any(c[0] == "chord" for c in calls)  # cmd+s -> chord
