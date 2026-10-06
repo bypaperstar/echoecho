@@ -24,7 +24,7 @@ class TaskResult:
 class Task:
     id: str
     request: TaskRequest
-    status: str = "queued"  # "queued" | "running" | "done" | "error"
+    status: str = "queued"  # "queued" | "running" | "done" | "error" | "cancelled"
     result: Optional[TaskResult] = None
     created_at: float = 0.0
     finished_at: Optional[float] = None

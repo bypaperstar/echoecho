@@ -109,7 +109,7 @@ def test_computer_use_stops_at_failing_step_keeps_shots(tmp_path):
                    {"action": "bogus"},                     # unknown action
                    {"action": "type", "text": "never runs"}]},
         tmp_path, extra={"gui_driver": FakeGuiDriver(tmp_path / "ws")})
-    assert task.status == "done"  # a bad step is reported, not a crash
+    assert task.status == "error"  # failed GUI work must not look completed
     assert task.result.data["error"]
     assert "Stopped on step 2" in task.result.say
     # the first step's shot was still captured
@@ -229,7 +229,12 @@ def test_ssh_gui_driver_run_times_out_instead_of_hanging(monkeypatch, tmp_path):
     monkeypatch.setattr(gm, "GUI_TIMEOUT", 0.3)
     vm = LumeVM(vm_name="echoecho-vm")
     vm.ip = "10.0.0.9"
-    vm.ssh_argv = lambda remote: ["sh", "-c", "sleep 30"]  # "hung" guest cmd
+    import sys
+    # Explicitly fork a child so every platform exercises inherited-pipe
+    # cleanup; some shells optimize a lone sleep by replacing themselves.
+    vm.ssh_argv = lambda remote: [sys.executable, '-c',
+        'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",'
+        '"import time; time.sleep(30)"]); time.sleep(30)']
     driver = SshGuiDriver(vm, tmp_path)
     import time
     t0 = time.monotonic()
@@ -308,7 +313,7 @@ def test_computer_use_prepares_a_cold_vm_before_stepping(tmp_path):
     broken = BrokenVmFake(tmp_path / "ws")
     task, _ = run_task({"steps": [{"action": "launch", "app": "TextEdit"}]},
                        tmp_path, extra={"gui_driver": broken})
-    assert task.status == "done"  # a reported failure, not a worker crash
+    assert task.status == "error"  # setup failure is surfaced as failed work
     assert "couldn't start my Mac VM" in task.result.say
     assert "PRIVATE-VM-ERROR-CANARY" not in task.result.say
     assert "PRIVATE-VM-ERROR-CANARY" not in repr(task.result.data)

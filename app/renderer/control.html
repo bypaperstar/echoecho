@@ -2,92 +2,62 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:" />
   <title>echoecho</title>
-  <style>
-    :root { color-scheme: dark; }
-    html, body {
-      margin: 0; height: 100%;
-      background: linear-gradient(170deg, #14151b 0%, #0e0f14 100%);
-      color: #e6e8ee;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      user-select: none;
-    }
-    .wrap { padding: 22px 26px 18px; display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
-    .head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
-    .head canvas { width: 52px; height: 52px; }
-    .head h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: 0.01em; }
-    .head .sub { font-size: 11.5px; color: #8a91a2; margin-top: 2px; }
-
-    .status { background: rgba(255,255,255,0.035); border: 1px solid rgba(255,255,255,0.07);
-              border-radius: 12px; padding: 4px 14px; margin-bottom: 16px; }
-    .row { display: flex; align-items: center; justify-content: space-between;
-           padding: 9px 0; font-size: 13px; }
-    .row + .row { border-top: 1px solid rgba(255,255,255,0.05); }
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-           margin-right: 9px; vertical-align: 1px; background: #4a4f5e; }
-    .dot.on { background: #59d08a; box-shadow: 0 0 6px rgba(89,208,138,0.55); }
-    .dot.off { background: #d06459; }
-    .val { color: #9aa1b3; font-size: 12px; }
-
-    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-    button {
-      appearance: none; border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.055); color: #e6e8ee;
-      border-radius: 10px; padding: 10px 8px; font-size: 12.5px; font-weight: 550;
-      cursor: pointer; font-family: inherit;
-    }
-    button:hover { background: rgba(255,255,255,0.10); }
-    button:active { background: rgba(255,255,255,0.14); }
-    button.primary {
-      grid-column: 1 / -1;
-      background: rgba(126,168,255,0.16); border-color: rgba(126,168,255,0.4);
-      color: #cfe0ff; padding: 12px; font-size: 13.5px;
-    }
-    button.primary:hover { background: rgba(126,168,255,0.24); }
-    button.danger { border-color: rgba(208,100,89,0.4); color: #f0b9b2; }
-    button:disabled { opacity: 0.45; cursor: default; }
-
-    .foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between;
-            padding-top: 14px; font-size: 11.5px; color: #767d8f; }
-    .foot label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-    #note { font-size: 11px; color: #8a91a2; min-height: 14px; margin-top: 10px;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  </style>
+  <link rel="stylesheet" href="control.css" />
 </head>
 <body>
-  <div class="wrap">
-    <div class="head">
-      <canvas id="icon" width="104" height="104"></canvas>
-      <div>
-        <h1>echoecho</h1>
-        <div class="sub" id="version">—</div>
+  <main class="wrap">
+    <header class="head">
+      <div class="brand"><canvas id="icon" width="104" height="104" aria-hidden="true"></canvas><div><h1>echoecho</h1><p>Your voice. Your workspace.</p></div></div>
+      <span id="connection" class="badge">Connecting</span>
+    </header>
+
+    <section class="voice-card" aria-labelledby="voice-heading">
+      <div class="eyebrow">VOICE</div>
+      <h2 id="voice-heading">Getting ready…</h2>
+      <p id="voice-detail">Checking the microphone and your connection.</p>
+      <div class="input-row"><span id="input-name">Microphone</span><meter id="input-meter" min="0" max="1" value="0" aria-label="Microphone input level"></meter></div>
+      <div class="voice-actions"><button class="primary" id="b-talk">Talk now</button><button id="b-pause">Pause listening</button></div>
+      <div class="model-line"><span class="dot" id="voice-dot"></span><span id="model-label">Voice connects when you start a conversation</span></div>
+    </section>
+
+    <div id="notice" class="notice" hidden role="status"></div>
+    <div id="note" class="note" role="status" aria-live="polite"></div>
+
+    <section class="workspace-section" aria-labelledby="workspace-heading">
+      <div class="section-head"><h2 id="workspace-heading">A place to work together</h2><span id="vm-state" class="quiet">Checking VM…</span></div>
+      <div class="tiles">
+        <button id="b-open-vm" class="tile"><svg class="tile-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><strong>Open shared VM</strong><span>The same Mac you and echoecho use</span></button>
+        <button id="b-workspace" class="tile"><svg class="tile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"/></svg><strong>Workspace &amp; conversation</strong><span>Files, transcripts, and progress</span></button>
+        <button id="b-livewriter" class="tile"><svg class="tile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4-1 12-12-3-3L5 16zM14 7l3 3"/></svg><strong>Live Writer</strong><span>Talk through an idea. Watch it take shape.</span></button>
+        <button id="b-summon" class="tile"><svg class="tile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3z"/></svg><strong>Show the orb</strong><span>Bring your workspace onto the desktop</span></button>
       </div>
-    </div>
+    </section>
 
-    <div class="status">
-      <div class="row"><span><span class="dot" id="d-daemon"></span>Voice daemon</span><span class="val" id="v-daemon">checking…</span></div>
-      <div class="row"><span><span class="dot" id="d-vm"></span>Shared Mac (VM)</span><span class="val" id="v-vm">checking…</span></div>
-      <div class="row"><span><span class="dot on" id="d-orb"></span>Orb scene</span><span class="val" id="v-orb">hidden</span></div>
-    </div>
+    <section class="work-section" aria-labelledby="work-heading">
+      <div class="section-head"><h2 id="work-heading">Current work</h2><span id="task-count" class="quiet">No active tasks</span></div>
+      <form id="task-form"><label class="sr-only" for="task-input">Give echoecho a task</label><input id="task-input" placeholder="Or type a task, like “write a weekend plan”…" maxlength="12000" autocomplete="off" /><button type="submit" id="b-send" aria-label="Send task">↑</button></form>
+      <div id="tasks" class="tasks"><p class="empty">Ask for something out loud or type it here. Progress will appear as it happens.</p></div>
+    </section>
 
-    <div class="actions">
-      <button class="primary" id="b-summon" title="Reveal the orb scene on your desktop">Summon echoecho ✦</button>
-      <button class="primary" id="b-livewriter" title="Open the Live Writer: talk out loud, it writes and editorializes the document live">Live Writer ✍️ — talk, it writes</button>
-      <button id="b-daemon" title="Start or stop the background voice daemon">Start daemon</button>
-      <button id="b-vm" title="Clone and boot the sandbox VM (~a minute)">Wake echoecho's Mac</button>
-      <button class="primary" id="b-open-vm" title="Open the same Mac used by Echoecho in a normal window you can move and minimize">Open shared VM</button>
-      <button id="b-reset" class="danger" title="Delete the VM and re-clone it fresh from the golden image">Reset echoecho's Mac</button>
-      <button id="b-update" title="Pull latest main, reinstall, rebuild, and relaunch">Update &amp; relaunch</button>
-    </div>
-    <div id="note" role="status" aria-live="polite"></div>
-
-    <div class="foot">
-      <label><input type="checkbox" id="login" /> Start at login</label>
-      <button id="b-quit" style="padding:6px 12px">Quit echoecho</button>
-    </div>
-  </div>
+    <details id="settings">
+      <summary>Voice &amp; app settings</summary>
+      <div class="settings-grid">
+        <label for="voice-model">Voice model</label><select id="voice-model"><option value="gpt-live-1">GPT-Live · natural conversation</option><option value="gpt-realtime-2.1">GPT-Realtime 2.1 · strong tool use</option><option value="gpt-realtime-2.1-mini">GPT-Realtime 2.1 Mini · lower cost</option></select>
+        <label for="input-device">Microphone</label><select id="input-device"><option value="">System default</option></select>
+        <label for="output-device">Speaker or headphones</label><select id="output-device"><option value="">System default</option></select>
+      </div>
+      <label class="check"><input type="checkbox" id="record" /> Save session recordings on this Mac</label>
+      <p class="hint">GPT-Live is $0.05/minute while a conversation is open, plus backend usage. Wake-word listening stays local. GPT-Realtime is the automatic fallback if Live is unavailable.</p>
+      <button id="b-save">Save voice settings</button>
+      <div class="advanced"><button id="b-mic-settings">Microphone permission</button><button id="b-network-settings">Local Network permission</button><button id="b-daemon">Restart voice</button><button id="b-update">Update &amp; relaunch</button><button id="b-reset" class="danger">Reset shared VM…</button></div>
+      <p class="hint">Reset replaces the VM with a fresh copy. Files in the shared workspace stay on your Mac.</p>
+    </details>
+    <footer><label class="check"><input type="checkbox" id="login" /> Start at login</label><span id="version" class="quiet">—</span><button id="b-quit">Quit</button></footer>
+  </main>
+  <script src="control-state.js"></script>
   <script src="control.js"></script>
 </body>
 </html>

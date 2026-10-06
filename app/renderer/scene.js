@@ -364,7 +364,7 @@ window.orb.onEvents((evts) => {
     else if (e.type === 'assistant_text') wisp('assistant', e.text);
     else if (e.type === 'task') {
       if (e.status === 'running' || e.status === 'progress') running.add(e.task_id);
-      else if (e.status === 'done' || e.status === 'error') running.delete(e.task_id);
+      else if (['done', 'error', 'cancelled'].includes(e.status)) running.delete(e.task_id);
       if (e.status === 'done') taskDocCard(e).catch((err) => {
         report('scene.doc_fetch_failed', errorMeta(err));
       });

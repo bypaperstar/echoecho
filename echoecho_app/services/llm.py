@@ -24,7 +24,7 @@ class LLMPort:
 
 class RealLLM(LLMPort):
     def __init__(self, model=None):
-        self.model = model or os.environ.get("ECHOECHO_WORKER_MODEL", "gpt-4o-mini")
+        self.model = model or os.environ.get("ECHOECHO_WORKER_MODEL", config.backend_model())
         self._client = None
 
     def _client_or_raise(self):
@@ -32,7 +32,7 @@ class RealLLM(LLMPort):
             if not os.environ.get("OPENAI_API_KEY"):
                 raise LLMUnavailable("OPENAI_API_KEY not set")
             from openai import AsyncOpenAI  # lazy: keyless import paths never touch this
-            self._client = AsyncOpenAI()
+            self._client = AsyncOpenAI(timeout=60.0, max_retries=2)
         return self._client
 
     async def complete(self, kind, prompt):

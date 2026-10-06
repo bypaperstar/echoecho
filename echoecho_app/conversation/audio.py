@@ -15,9 +15,11 @@ import base64
 import math
 import struct
 import threading
+import time
 
 from echoecho_app import diagnostics, events, recorder
 from echoecho_app.conversation.audio_pipeline import AudioPipeline
+from echoecho_app.conversation.level import pcm_level
 
 RATE = 24000
 BLOCK_FRAMES = 480  # 20 ms: two WebRTC APM frames, low-latency barge-in
@@ -166,6 +168,10 @@ class AudioIO:
         self._pipeline_status_lock = threading.Lock()
         self._pipeline_disabled_announced = False
         self._telemetry_lock = threading.Lock()
+        self._last_capture_at = 0.0
+        self._input_level = 0.0
+        self.input_label = ""
+        self.output_label = ""
         self._telemetry = {
             "capture_callbacks": 0, "capture_bytes": 0,
             "playback_callbacks": 0, "playback_bytes": 0,
@@ -181,6 +187,8 @@ class AudioIO:
     def _in_callback(self, indata, frames, time_info, status):
         # Bind locally: stop() nulls these from another thread mid-callback.
         send, loop = self.send_event, self.loop
+        self._last_capture_at = time.monotonic()
+        self._input_level = pcm_level(bytes(indata))
         rec = recorder.active()
         with self._telemetry_lock:
             self._telemetry["capture_callbacks"] += 1
@@ -404,6 +412,8 @@ class AudioIO:
             raise
         in_name = device_label(in_dev, "input")
         out_name = device_label(out_dev, "output")
+        self.input_label = in_name
+        self.output_label = out_name
         processing = "webrtc-aec" if self.pipeline.enabled else "fallback-gate"
         with self._pipeline_status_lock:
             self._pipeline_disabled_announced = not self.pipeline.enabled
@@ -474,6 +484,8 @@ class AudioIO:
         with self._telemetry_lock:
             result = dict(self._telemetry)
         result["portaudio_close_safe"] = self.portaudio_close_safe
+        result.update(stream_active=self._in_stream is not None,
+                      last_capture_at=self._last_capture_at, input_level=self._input_level)
         return result
 
     def pipeline_telemetry(self):

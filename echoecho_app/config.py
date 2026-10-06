@@ -166,7 +166,17 @@ def vnc_url_override():
 
 
 def realtime_model():
-    return os.environ.get("ECHOECHO_REALTIME_MODEL", "gpt-realtime-2.1-mini")
+    return os.environ.get("ECHOECHO_REALTIME_MODEL", "gpt-realtime-2.1")
+
+
+def voice_model():
+    return (os.environ.get("ECHOECHO_VOICE_MODEL", "").strip()
+            or os.environ.get("ECHOECHO_REALTIME_MODEL", "").strip()
+            or "gpt-live-1")
+
+
+def backend_model():
+    return os.environ.get("ECHOECHO_BACKEND_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
 
 
 def silence_timeout():
@@ -232,7 +242,8 @@ SYSTEM_PROMPT_TEMPLATE = (
     "time — refer to tasks by what they are (\"the lease review\"), never by "
     "raw ids. To steer, extend, or answer a question from an earlier agent "
     "task, dispatch the same kind again with args.task_id set to that "
-    "task's id.%(approval)s Call end_session when the user says something "
+    "task's id. To cancel a task, dispatch agent.run with args.task_id and "
+    "args.cancel=true; do not start another agent to cancel it.%(approval)s Call end_session when the user says something "
     "like \"that's it\".")
 
 # Appended only when the user has shared folders (workers/outbox.py): agents

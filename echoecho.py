@@ -13,10 +13,10 @@ import sys
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="echoecho", description="echoecho voice agent")
     p.add_argument("--text", action="store_true", help="text REPL mode (no audio)")
-    p.add_argument("--voice", action="store_true", help="voice mode (Mac only, later PR)")
+    p.add_argument("--voice", action="store_true", help="always-on voice mode (Mac)")
     p.add_argument("--fake-llm", action="store_true", help="use fixture LLM outputs")
     p.add_argument("--script", metavar="PATH", help="run a scripted keyless session")
-    p.add_argument("--model", metavar="ID", help="Realtime model id override")
+    p.add_argument("--model", metavar="ID", help="voice model id override (GPT-Live or Realtime)")
     p.add_argument("--no-viewer", action="store_true",
                    help="don't start the workspace live viewer")
     p.add_argument("--mic-check", action="store_true",
@@ -221,6 +221,9 @@ def make_tool_handler(orch, port):
     def _handle(name, args):
         if name == "dispatch_task":
             task_args = dict(args.get("args") or {})
+            if task_args.pop("cancel", False) and task_args.get("task_id"):
+                return {"task_id":task_args["task_id"],
+                        "status":"cancelled" if orch.cancel(task_args["task_id"]) else "not_running"}
             instructions = args.get("instructions", "")
             instruction_source = "top_level" if instructions else "missing"
             if not instructions:
@@ -471,7 +474,7 @@ def start_tether_watchdog(pid=None, interval=2.0, on_dead=None):
 
 
 async def voice_main(args):
-    """Mac-only always-on daemon: wake loop -> Realtime session -> back to
+    """Mac-only always-on daemon: wake loop -> voice session -> back to
     IDLE. The Vosk feed is paused while ACTIVE (Session's wake_pause hook) so
     echoecho saying "echo" can't self-trigger; enter/spacebar+enter is the manual
     wake override. Orchestrator + viewer persist across sessions."""
@@ -480,8 +483,6 @@ async def voice_main(args):
 
     from echoecho_app import config, diagnostics, events, recorder
     from echoecho_app.conversation.audio import AudioIO
-    from echoecho_app.conversation.realtime import (RealtimeClient,
-                                                WebSocketTransport)
     from echoecho_app.conversation.session import Session
     from echoecho_app.orchestrator.core import Orchestrator
     from echoecho_app.wake.detector import WakeDetector
@@ -530,7 +531,18 @@ async def voice_main(args):
             print("[viewer] not started (%s)" % exc)
     orch_loop = asyncio.create_task(orch.run(), name="orchestrator")
 
-    model = config.realtime_model()
+    from echoecho_app.control import DaemonControl
+    from echoecho_app.conversation.factory import connect_voice
+    control = DaemonControl(loop,session,mic,orch,manual_wake)
+    control.refresh_devices()
+    if viewer:
+        viewer.control = control
+    async def publish_status():
+        while True:
+            control.publish()
+            await asyncio.sleep(0.25)
+    status_loop = asyncio.create_task(publish_status(),name="voice-status")
+    model = config.voice_model()
     # collect_missed() draws from a persisted announcement watermark, so tasks
     # that finished while echoecho was asleep — including across a restart — are
     # each announced on the next wake exactly once
@@ -549,6 +561,9 @@ async def voice_main(args):
         while True:
             # -- IDLE: pump mic chunks through the detector -----------------
             wake_via = "manual"
+            if control.paused:
+                await asyncio.sleep(0.2)
+                continue
             if manual_wake.is_set():
                 manual_wake.clear()
             else:
@@ -608,7 +623,9 @@ async def voice_main(args):
                 audio_recovered = True
                 fallback_reason = "interrupted"  # Ctrl-C / cancellation
                 try:
-                    missed = orch.collect_missed()
+                    missed_ids = [tid for tid in orch.tasks if tid not in orch._announced
+                                  and orch.tasks[tid].finished_at is not None]
+                    missed = orch.collect_missed(mark=False)
                     diagnostics.info("voice.missed_tasks.collected",
                                      count=len(missed))
                     since = None
@@ -619,23 +636,27 @@ async def voice_main(args):
                                  " Mention them naturally if relevant.")
                     audio = AudioIO(input_device=config.input_device(),
                                     output_device=config.output_device())
-                    client = RealtimeClient(
-                        WebSocketTransport(model), session=session,
-                        on_audio=audio.on_audio, flush_playback=audio.flush,
-                        transport_factory=lambda: WebSocketTransport(model),
-                        since_last_session=since)
-                    audio.tracker = client.tracker
-                    orch.on_injection = client.inject
-                    orch.live = True
-                    client.on_tool(make_tool_handler(orch, client))
+                    control.phase = 'connecting'
+                    control.audio = audio
+                    control.error = ''
+                    control.publish()
                     # A failure before wake() must not reuse the prior reason.
                     session.end_reason = None
                     # Set this before the call: a partial failure may already
                     # have closed the wake mic or opened a session stream.
                     audio_transition_attempted = True
                     start_session_audio(mic, audio, loop, send_event=None)
-                    with diagnostics.span("realtime.connect", model=model):
-                        await client.connect()
+                    model = config.voice_model()
+                    with diagnostics.span("voice.connect", model=model):
+                        client = await connect_voice(model,session,audio,
+                            lambda port: make_tool_handler(orch,port),since)
+                    orch._mark_announced([orch.tasks[tid] for tid in missed_ids])
+                    control.client = client
+                    control.model = client.transport.model
+                    control.phase = 'conversation'
+                    audio.tracker = client.tracker
+                    orch.on_injection = client.inject
+                    orch.live = True
                     audio.set_sender(client.send_input_audio)
                     audio.play_chime("wake")
                     await client.run()
@@ -645,6 +666,8 @@ async def voice_main(args):
                     print("[voice] session crashed (%s) — returning to IDLE"
                           % exc)
                     fallback_reason = "crash"
+                    control.error = "Voice could not connect. Check your API key, connection and audio devices, then retry."
+                    events.emit('session',event='error',detail=control.error)
                     if session.state == "ACTIVE":
                         session.begin_ending("crash")
                     if session.state == "ENDING":
@@ -657,7 +680,7 @@ async def voice_main(args):
                         try:
                             audio.play_chime("end")
                             await asyncio.sleep(
-                                max(0.3, audio.pending_ms() / 1000.0))
+                                min(10.0, max(0.3, audio.pending_ms() / 1000.0)))
                         except Exception as exc:
                             diagnostics.exception(
                                 "audio.end_chime.failed", exc=exc)
@@ -666,6 +689,14 @@ async def voice_main(args):
                     reason = session.end_reason or fallback_reason
                     recorder.stop(end_reason=reason)
                     manual_wake.clear()
+                    if control.paused:
+                        mic.stop()
+                        mic.drain()
+                    control.client = None
+                    control.audio = None
+                    control.phase = 'ready' if audio_recovered else 'error'
+                    control.refresh_devices()
+                    control.publish()
                     diagnostics.info(
                         "voice.session.finished", reason=reason,
                         duration_ms=round(
@@ -681,6 +712,8 @@ async def voice_main(args):
                   % (session.end_reason, config.WAKE_PHRASE))
     finally:
         diagnostics.info("voice.shutdown.started")
+        status_loop.cancel()
+        await asyncio.gather(status_loop,return_exceptions=True)
         try:
             mic.stop()
         except Exception as exc:
@@ -701,6 +734,8 @@ def main(argv=None):
 
     from echoecho_app import __version__, config, diagnostics
     config.load_env_local()  # .env.local secrets; real env vars win
+    from echoecho_app import preferences
+    preferences.apply()
     apply_early_diagnostic_args(argv)
     try:
         args = parse_args(argv)
@@ -714,7 +749,7 @@ def main(argv=None):
                 exc.code if isinstance(exc.code, int) else 1))
         raise
     if args.model:
-        os.environ["ECHOECHO_REALTIME_MODEL"] = args.model
+        os.environ["ECHOECHO_VOICE_MODEL"] = args.model
     if args.fake_llm:
         os.environ["ECHOECHO_FAKE_LLM"] = "1"
     if args.text:
@@ -743,7 +778,7 @@ def main(argv=None):
         fake_llm=config.echoecho_fake_llm(),
         recording_enabled=config.echoecho_record(mode),
         viewer_enabled=not args.no_viewer,
-        realtime_model=config.realtime_model() if args.voice else None,
+        voice_model=config.voice_model() if args.voice else None,
         sandbox=config.sandbox_tier(),
         gui_input_backend=(gui_backend if gui_backend in {"vnc", "ssh"}
                            else "other"),

@@ -4,6 +4,9 @@ sounddevice is imported lazily inside start() so this module imports fine on
 the Linux sandbox (no audio hardware, package not installed).
 """
 import queue
+import time
+
+from echoecho_app.conversation.level import pcm_level
 
 from echoecho_app import diagnostics
 
@@ -16,7 +19,7 @@ class WakeMic:
         self.rate = rate
         self.block_frames = block_frames
         self.device = device  # SPEC (index / name substring / "" = default),
-        self.chunks = queue.Queue()  # resolved fresh at every start()/reopen()
+        self.chunks = queue.Queue(maxsize=30)  # resolved fresh at every start()/reopen()
         self._stream = None
         # close() failure means the native stream may still exist after its
         # Python reference is cleared.  This remains sticky for the lifetime
@@ -29,9 +32,27 @@ class WakeMic:
         self._read_timeouts = 0
         self._drained_chunks = 0
         self._starts = 0
+        self._last_capture_at = 0.0
+        self._input_level = 0.0
+        self.input_label = ""
+        self._dropped_chunks = 0
 
     def _callback(self, indata, frames, time_info, status):
-        self.chunks.put(bytes(indata))
+        chunk = bytes(indata)
+        self._last_capture_at = time.monotonic()
+        self._input_level = pcm_level(chunk)
+        try:
+            self.chunks.put_nowait(chunk)
+        except queue.Full:
+            try:
+                self.chunks.get_nowait()
+            except queue.Empty:
+                pass
+            self._dropped_chunks += 1
+            try:
+                self.chunks.put_nowait(chunk)
+            except queue.Full:
+                pass
         # PortAudio callback: counters only. Never write diagnostics here.
         try:
             self._callbacks += 1
@@ -50,6 +71,7 @@ class WakeMic:
                 "cannot start wake mic after a native stream failed to close")
         dev = resolve_device(self.device, "input")  # at OPEN time, on purpose
         label = device_label(dev, "input")
+        self.input_label = label
         stream = None
         try:
             stream = sd.RawInputStream(
@@ -120,6 +142,9 @@ class WakeMic:
         """Memory-only snapshot safe to read from the asyncio thread."""
         return {
             "callback_count": self._callbacks,
+            "last_capture_at": self._last_capture_at,
+            "input_level": self._input_level,
+            "dropped_chunks": self._dropped_chunks,
             "captured_bytes": self._captured_bytes,
             "status_callbacks": self._status_callbacks,
             "queue_depth": self.chunks.qsize(),

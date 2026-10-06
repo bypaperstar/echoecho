@@ -14,7 +14,7 @@ import hashlib
 import json
 import os
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 from echoecho_app import config, diagnostics, events
@@ -93,6 +93,7 @@ class WebSocketTransport:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.url = "wss://api.openai.com/v1/realtime?model=" + model
         self._ws = None
+        self._prefetched = deque()
 
     async def connect(self):
         import websockets  # lazy: sandbox tests never hit the network
@@ -101,7 +102,7 @@ class WebSocketTransport:
             self._ws = await websockets.connect(
                 self.url,
                 additional_headers={"Authorization": "Bearer " + self.api_key},
-                max_size=None)
+                max_size=4 * 1024 * 1024, open_timeout=15, close_timeout=5)
         except Exception as exc:
             diagnostics.exception(
                 "realtime.transport.connect_failed", exc=exc, model=self.model,
@@ -127,11 +128,30 @@ class WebSocketTransport:
     async def recv(self):
         import websockets.exceptions  # see send(): bare import lacks .exceptions
         try:
+            if self._prefetched:
+                return self._prefetched.popleft()
             return json.loads(await self._ws.recv())
         except websockets.exceptions.ConnectionClosed as exc:
             diagnostics.warning("realtime.transport.closed", operation="recv",
                                 close_code=getattr(exc, "code", None))
             raise TransportClosed() from exc
+
+    async def wait_ready(self):
+        """Do not enable microphone uploads until the server accepts settings."""
+        deadline = time.monotonic() + 15
+        while True:
+            event = json.loads(await asyncio.wait_for(
+                self._ws.recv(), max(0.01, deadline-time.monotonic())))
+            if not isinstance(event, dict):
+                raise RuntimeError("Invalid voice session response")
+            if event.get("type") == "session.updated":
+                return
+            if event.get("type") == "error":
+                error = event.get("error") if isinstance(event.get("error"), dict) else {}
+                raise RuntimeError("Voice session rejected: %s" % error.get("code", "unknown"))
+            if len(self._prefetched) >= 32:
+                raise RuntimeError("Voice startup received too many unexpected events")
+            self._prefetched.append(event)
 
     async def close(self):
         if self._ws is not None:
@@ -267,6 +287,7 @@ class RealtimeClient(ConversationPort):
         self._response_seq = 0
         self._summary_emitted = False
         self._protocol_errors = Counter()
+        self._history = deque(maxlen=16)
 
     def _protocol_issue(self, kind, level="warning", **fields):
         """Aggregate malformed upstream frames without event-loop log floods."""
@@ -315,7 +336,10 @@ class RealtimeClient(ConversationPort):
             if self.session.state == ENDING:
                 self.session.finish()
         finally:
-            self._emit_summary()
+            try:
+                await self.transport.close()
+            finally:
+                self._emit_summary()
 
     # -- connection ------------------------------------------------------------
 
@@ -347,12 +371,16 @@ class RealtimeClient(ConversationPort):
         if connect is not None:
             await connect()
         await self._send(build_session_update(self.instructions))
+        ready = getattr(self.transport,"wait_ready",None)
+        if ready:
+            await ready()
         if reconnect:
             # summary stub (cookbook pattern): a real rolling summary is v1+
             await self._send(_system_item(
                 "[reconnected] The previous connection dropped or neared the "
                 "60-minute cap and was refreshed; continue where the "
-                "conversation left off."))
+                "conversation left off. Recent verified conversation: " +
+                " | ".join(self._history)))
         elif self.since_last_session:
             # tasks that finished while IDLE, surfaced on wake
             await self._send(_system_item(self.since_last_session))
@@ -389,6 +417,9 @@ class RealtimeClient(ConversationPort):
                         detail="attempt %d/%d" % (self._reconnects,
                                                   self.max_reconnects))
             try:
+                await self.transport.close()
+                self._flush_playback()
+                self.tracker.truncate()
                 self.transport = self._transport_factory()
                 self._connected = False
                 await self._connect(reconnect=True)
@@ -494,6 +525,7 @@ class RealtimeClient(ConversationPort):
                     "invalid_transcript", value_type=type(transcript).__name__)
                 transcript = ""
             events.emit("user_text", text=transcript)
+            self._history.append("User: " + transcript[:1000])
             self.session.handle_transcript(transcript)
         elif t in ("response.output_audio_transcript.done",
                    "response.audio_transcript.done"):  # GA sibling name
@@ -504,13 +536,17 @@ class RealtimeClient(ConversationPort):
                     "invalid_transcript", value_type=type(transcript).__name__)
                 transcript = ""
             events.emit("assistant_text", text=transcript)
+            self._history.append("Assistant: " + transcript[:1000])
         elif t == "error":
-            self._log("server error: %s" % json.dumps(event.get("error", {})))
+            self._log("voice server rejected a command")
             err = event.get("error") if isinstance(event.get("error"), dict) else {}
             diagnostics.error("realtime.server.error",
                               error_type=err.get("type"),
                               error_code=err.get("code"),
                               parameter=err.get("param"))
+            if err.get("code") not in ("response_cancel_not_active", "response_already_in_progress"):
+                events.emit("session",event="error",detail="Voice reported an error. Start a new conversation to retry.")
+                self.session.begin_ending("protocol_error")
 
     async def _on_speech_started(self):
         """Barge-in: reset silence timer, flush local playback, tell the server

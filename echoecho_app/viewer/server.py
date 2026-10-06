@@ -173,16 +173,27 @@ class _Handler(BaseHTTPRequestHandler):
     workspace = None   # set on the subclass by ViewerServer
     stopping = None    # threading.Event
     token = None       # per-run bearer token gating /vnc-info
+    control = None
 
     def log_message(self, fmt, *args):  # keep the demo console quiet
         pass
 
+    def _trusted_host(self):
+        host = self.headers.get("Host", "")
+        port = self.server.server_port
+        if host not in ("localhost:%d" % port, "127.0.0.1:%d" % port, "[::1]:%d" % port):
+            self._json(403, {"error":"Untrusted host"})
+            return False
+        return True
+
     def do_GET(self):
+        if not self._trusted_host():
+            return
         started = time.monotonic()
         parsed = urllib.parse.urlparse(self.path)
         known_routes = {
             "/", "/healthz", "/doc", "/version", "/transcript",
-            "/events", "/vnc-info", "/proto", "/proto/",
+            "/events", "/vnc-info", "/status", "/proto", "/proto/",
         }
         route = ("/proto/*" if parsed.path.startswith("/proto/") else
                  parsed.path if parsed.path in known_routes else "/unknown")
@@ -195,6 +206,13 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/healthz":
                 self._json(200, {"ok": True,
                                  "run_id": diagnostics.get_run_id()})
+            elif parsed.path == "/status":
+                if not self._authorized():
+                    return
+                if self.control is None:
+                    self._json(503, {"error":"Voice controls are unavailable"})
+                else:
+                    self._json(200, self.control.snapshot())
             elif parsed.path == "/doc":
                 self._doc(parsed)
             elif parsed.path == "/version":
@@ -244,6 +262,55 @@ class _Handler(BaseHTTPRequestHandler):
                     duration_ms=round(duration_ms, 1),
                     sse_updates=getattr(self, "_diag_sse_updates", None),
                     occurrences=sample_count)
+
+    def _authorized(self):
+        auth = self.headers.get("Authorization", "")
+        if not secrets.compare_digest(auth.encode("utf-8", "replace"),
+                                      ("Bearer %s" % self.token).encode()):
+            self._json(403,{"error":"Missing or invalid app token"})
+            return False
+        return True
+
+    def do_POST(self):
+        if not self._trusted_host():
+            return
+        if urllib.parse.urlparse(self.path).path != "/control":
+            self._json(404,{"error":"Not found"})
+            return
+        if not self._authorized():
+            return
+        origin = self.headers.get("Origin")
+        if origin and origin not in ("http://127.0.0.1:%d" % self.server.server_port,
+                                     "http://localhost:%d" % self.server.server_port):
+            self._json(403,{"error":"Untrusted origin"})
+            return
+        if self.headers.get("Content-Type", "").split(";",1)[0] != "application/json":
+            self._json(415,{"error":"Expected JSON"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if not 0 < length <= 65536:
+            self._json(413,{"error":"Command is too large or empty"})
+            return
+        # A partial body must not retain a worker thread indefinitely.
+        self.connection.settimeout(3)
+        try:
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data,dict):
+                raise ValueError("Invalid command")
+            if self.control is None:
+                self._json(503,{"error":"Voice controls are unavailable"})
+                return
+            self._json(200,self.control.command(data))
+        except (ValueError,TypeError):
+            self._json(400,{"error":"Invalid command or Echoecho is busy"})
+        except (BrokenPipeError,ConnectionResetError,TimeoutError):
+            return
+        except Exception as exc:
+            diagnostics.exception("viewer.control.failed",exc=exc)
+            self._json(500,{"error":"Could not complete the command"})
 
     def _diag_sample(self, key):
         """Power-of-two sampling for client-amplifiable request failures."""
@@ -357,6 +424,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         # workspace files are agent-written: text/plain must stay text/plain
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         if csp:
             self.send_header("Content-Security-Policy", csp)
         self.end_headers()
@@ -459,6 +528,14 @@ class ViewerServer:
         if self._host_scope == "non_loopback":
             diagnostics.warning(
                 "viewer.non_loopback_bind", host_scope=self._host_scope)
+
+    @property
+    def control(self):
+        return self.httpd.RequestHandlerClass.control
+
+    @control.setter
+    def control(self, value):
+        self.httpd.RequestHandlerClass.control = value
 
     @property
     def url(self):

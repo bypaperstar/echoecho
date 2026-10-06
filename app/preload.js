@@ -172,6 +172,8 @@ contextBridge.exposeInMainWorld('orb', {
 // control panel surface (same preload serves both windows)
 contextBridge.exposeInMainWorld('ctl', {
   status: () => ipcRenderer.invoke('ctl:status'),
+  command: (data) => ipcRenderer.invoke('ctl:command', data),
+  preferences: (data) => ipcRenderer.invoke('ctl:preferences', data),
   action: (name) => ipcRenderer.invoke('ctl:action', name),
   setLoginItem: (enable) => ipcRenderer.invoke('ctl:login-item', enable),
 });
