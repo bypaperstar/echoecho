@@ -64,6 +64,7 @@ function bridge(ws, target, conns) {
   const started = Date.now();
   const metrics = { wsBytes: 0, tcpBytes: 0, wsPauses: 0, tcpPauses: 0 };
   let finished = false;
+  let dropped = false;
   let entry;
   const finish = (reason, err) => {
     if (finished) return;
@@ -77,15 +78,25 @@ function bridge(ws, target, conns) {
       error: err ? errorMeta(err) : null,
     });
   };
-  entry = { ws, tcp, finish };
-  conns.add(entry);
-  log('info', 'vnc_proxy.connection_opened', { connections: conns.size });
   const drop = (reason, err) => {
+    if (dropped) return;
+    dropped = true;
     finish(reason, err);
     conns.delete(entry);
-    tcp.destroy();
+    // Let the RFB server observe EOF while we drain its pending framebuffer.
+    // Resetting a socket with unread data can terminate Lume's guest runner.
+    if (!tcp.destroyed) {
+      const timer = setTimeout(() => tcp.destroy(), 4000);
+      timer.unref();
+      tcp.once('close', () => clearTimeout(timer));
+      tcp.resume();
+      tcp.end();
+    }
     try { ws.terminate(); } catch {}
   };
+  entry = { ws, tcp, finish, drop };
+  conns.add(entry);
+  log('info', 'vnc_proxy.connection_opened', { connections: conns.size });
 
   // ws -> tcp (net queues writes until 'connect', no buffering needed here)
   ws.on('message', (data) => {
@@ -101,6 +112,7 @@ function bridge(ws, target, conns) {
 
   // tcp -> ws, pausing the TCP side while the WS send queue is backed up
   tcp.on('data', (chunk) => {
+    if (finished) { tcp.resume(); return; }
     metrics.tcpBytes += chunk.length;
     ws.send(chunk, () => {
       if (ws.bufferedAmount < HIGH_WATER) tcp.resume();
@@ -187,10 +199,8 @@ function doStop() {
   const { wss, conns } = state;
   state = null;
   const connectionCount = conns.size;
-  for (const { ws, tcp, finish } of conns) {
-    finish('proxy-stop');
-    try { ws.terminate(); } catch {}
-    tcp.destroy();
+  for (const { drop } of conns) {
+    drop('proxy-stop');
   }
   conns.clear();
   return new Promise((resolve) => wss.close(() => {

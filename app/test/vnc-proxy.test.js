@@ -10,8 +10,10 @@ const proxy = require('../vnc-proxy');
 test('a cold display opens exactly one TCP session for the real renderer', async () => {
   const sockets = new Set();
   let connections = 0;
+  let remoteEnd;
   const server = net.createServer(socket => {
     connections++;
+    remoteEnd = once(socket, 'end');
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
     socket.on('error', () => {});
@@ -33,6 +35,8 @@ test('a cold display opens exactly one TCP session for the real renderer', async
     ws.send('RFB 003.008\n');
     assert.equal(String((await response)[0]), 'RFB 003.008\n');
     assert.equal(connections, 1);
+    await proxy.stop();
+    await remoteEnd; // The guest receives EOF rather than an abrupt reset.
   } finally {
     if (ws) ws.terminate();
     await proxy.stop();
