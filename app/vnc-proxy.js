@@ -11,7 +11,6 @@ const crypto = require('crypto');
 const net = require('net');
 const { WebSocketServer } = require('ws');
 
-const PROBE_TIMEOUT_MS = 4000;
 // Above this much unsent WS data the TCP side pauses (framebuffer bursts can
 // outrun a slow renderer; RFB has no flow control of its own).
 const HIGH_WATER = 1 << 20;
@@ -57,24 +56,6 @@ function parseVncUrl(raw) {
     port: url.port ? Number(url.port) : 5900,
     password: url.password ? decodeURIComponent(url.password) : '',
   };
-}
-
-// Fail fast while the VM is off, so vnc:connect rejects and the renderer can
-// say "echoecho's Mac is asleep" instead of a WS that opens then dies.
-function probe(target) {
-  return new Promise((resolve, reject) => {
-    const sock = net.connect({ host: target.host, port: target.port });
-    const fail = (why) => {
-      sock.destroy();
-      reject(new Error(`cannot reach VNC target (${why})`));
-    };
-    sock.setTimeout(PROBE_TIMEOUT_MS, () => fail('timeout'));
-    sock.on('error', (err) => fail(err.code || err.message));
-    sock.on('connect', () => {
-      sock.destroy();
-      resolve();
-    });
-  });
 }
 
 function bridge(ws, target, conns) {
@@ -155,16 +136,8 @@ async function doStart(targetUrl) {
     console.warn('[vnc-proxy] VNC target has no password — the endpoint is unauthenticated');
   }
 
-  const probeStarted = Date.now();
-  try {
-    await probe(target);
-    log('info', 'vnc_proxy.probe_ready', { duration_ms: Date.now() - probeStarted });
-  } catch (err) {
-    log('warn', 'vnc_proxy.probe_failed', {
-      duration_ms: Date.now() - probeStarted, error: errorMeta(err),
-    });
-    throw err;
-  }
+  // Connect only when the renderer is ready to negotiate RFB. A disposable
+  // TCP probe closes the guest's first VNC connection before its handshake.
 
   // The bridge listens on loopback but any local process could reach it;
   // upgrades must present the per-bridge token (never logged) to ride it.
