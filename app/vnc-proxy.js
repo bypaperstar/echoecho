@@ -11,7 +11,6 @@ const crypto = require('crypto');
 const net = require('net');
 const { WebSocketServer } = require('ws');
 
-const PROBE_TIMEOUT_MS = 4000;
 // Above this much unsent WS data the TCP side pauses (framebuffer bursts can
 // outrun a slow renderer; RFB has no flow control of its own).
 const HIGH_WATER = 1 << 20;
@@ -59,30 +58,13 @@ function parseVncUrl(raw) {
   };
 }
 
-// Fail fast while the VM is off, so vnc:connect rejects and the renderer can
-// say "echoecho's Mac is asleep" instead of a WS that opens then dies.
-function probe(target) {
-  return new Promise((resolve, reject) => {
-    const sock = net.connect({ host: target.host, port: target.port });
-    const fail = (why) => {
-      sock.destroy();
-      reject(new Error(`cannot reach VNC target (${why})`));
-    };
-    sock.setTimeout(PROBE_TIMEOUT_MS, () => fail('timeout'));
-    sock.on('error', (err) => fail(err.code || err.message));
-    sock.on('connect', () => {
-      sock.destroy();
-      resolve();
-    });
-  });
-}
-
 function bridge(ws, target, conns) {
   const tcp = net.connect({ host: target.host, port: target.port });
   tcp.setNoDelay(true);
   const started = Date.now();
   const metrics = { wsBytes: 0, tcpBytes: 0, wsPauses: 0, tcpPauses: 0 };
   let finished = false;
+  let dropped = false;
   let entry;
   const finish = (reason, err) => {
     if (finished) return;
@@ -96,15 +78,25 @@ function bridge(ws, target, conns) {
       error: err ? errorMeta(err) : null,
     });
   };
-  entry = { ws, tcp, finish };
-  conns.add(entry);
-  log('info', 'vnc_proxy.connection_opened', { connections: conns.size });
   const drop = (reason, err) => {
+    if (dropped) return;
+    dropped = true;
     finish(reason, err);
     conns.delete(entry);
-    tcp.destroy();
+    // Let the RFB server observe EOF while we drain its pending framebuffer.
+    // Resetting a socket with unread data can terminate Lume's guest runner.
+    if (!tcp.destroyed) {
+      const timer = setTimeout(() => tcp.destroy(), 4000);
+      timer.unref();
+      tcp.once('close', () => clearTimeout(timer));
+      tcp.resume();
+      tcp.end();
+    }
     try { ws.terminate(); } catch {}
   };
+  entry = { ws, tcp, finish, drop };
+  conns.add(entry);
+  log('info', 'vnc_proxy.connection_opened', { connections: conns.size });
 
   // ws -> tcp (net queues writes until 'connect', no buffering needed here)
   ws.on('message', (data) => {
@@ -120,6 +112,7 @@ function bridge(ws, target, conns) {
 
   // tcp -> ws, pausing the TCP side while the WS send queue is backed up
   tcp.on('data', (chunk) => {
+    if (finished) { tcp.resume(); return; }
     metrics.tcpBytes += chunk.length;
     ws.send(chunk, () => {
       if (ws.bufferedAmount < HIGH_WATER) tcp.resume();
@@ -155,16 +148,8 @@ async function doStart(targetUrl) {
     console.warn('[vnc-proxy] VNC target has no password — the endpoint is unauthenticated');
   }
 
-  const probeStarted = Date.now();
-  try {
-    await probe(target);
-    log('info', 'vnc_proxy.probe_ready', { duration_ms: Date.now() - probeStarted });
-  } catch (err) {
-    log('warn', 'vnc_proxy.probe_failed', {
-      duration_ms: Date.now() - probeStarted, error: errorMeta(err),
-    });
-    throw err;
-  }
+  // Connect only when the renderer is ready to negotiate RFB. A disposable
+  // TCP probe closes the guest's first VNC connection before its handshake.
 
   // The bridge listens on loopback but any local process could reach it;
   // upgrades must present the per-bridge token (never logged) to ride it.
@@ -214,10 +199,8 @@ function doStop() {
   const { wss, conns } = state;
   state = null;
   const connectionCount = conns.size;
-  for (const { ws, tcp, finish } of conns) {
-    finish('proxy-stop');
-    try { ws.terminate(); } catch {}
-    tcp.destroy();
+  for (const { drop } of conns) {
+    drop('proxy-stop');
   }
   conns.clear();
   return new Promise((resolve) => wss.close(() => {
